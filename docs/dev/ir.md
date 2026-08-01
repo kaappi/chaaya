@@ -7,6 +7,13 @@ ABI.
 
 Header: [`include/chaaya/ir.h`](../../include/chaaya/ir.h).
 
+**See also:** [KEP-0008](https://github.com/kaappi/keps/blob/main/keps/0008-shared-ir-contract.md)
+documents the core-form set, optimization set, and shadowing-safety
+invariant this IR shares with kaappi's and paal's independent IRs — the
+"different shape and ABI" above is deliberate, but the safety gates in
+this file's Optimization section are meant to match kaappi's equivalent
+guard in spirit.
+
 ---
 
 ## Pipeline placement
