@@ -46,4 +46,10 @@
 (import (scheme read))
 (check-assert "scheme.read eof-object?" (procedure? eof-object?))
 
+(import (only (scheme complex) make-rectangular real-part imag-part))
+(check-assert "scheme.complex make-rectangular"
+              (= (make-rectangular 1 2) 1+2i))
+(check-eqv "scheme.complex real-part" 1.0 (real-part 1+2i))
+(check-eqv "scheme.complex imag-part" 2.0 (imag-part 1+2i))
+
 (check-finish)

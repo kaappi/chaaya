@@ -16,6 +16,9 @@ endif()
 add_library(chaaya_core STATIC
   src/value.c
   src/gc.c
+  src/bignum.c
+  src/rational.c
+  src/complex.c
   src/reader.c
   src/printer.c
   src/compiler.c

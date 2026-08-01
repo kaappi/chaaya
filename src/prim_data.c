@@ -1,5 +1,10 @@
 #include "chaaya/prim.h"
 
+#include "chaaya/bignum.h"
+#include "chaaya/complex.h"
+#include "chaaya/rational.h"
+
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -128,9 +133,8 @@ static ChValue prim_integer_to_char(ChVM *vm, ChValue *args, int nargs) {
 
 static ChValue prim_abs(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    if (ch_is_fixnum(args[0])) {
-        int64_t n = ch_to_fixnum(args[0]);
-        return ch_make_fixnum(n < 0 ? -n : n);
+    if (ch_is_exact(args[0])) {
+        return ch_exact_abs(&vm->gc, args[0]);
     }
     if (ch_is_flonum(args[0])) {
         double d = ch_to_flonum(args[0]);
@@ -143,7 +147,7 @@ static ChValue prim_abs(ChVM *vm, ChValue *args, int nargs) {
 static ChValue prim_integer_p(ChVM *vm, ChValue *args, int nargs) {
     (void)vm;
     (void)nargs;
-    if (ch_is_fixnum(args[0])) {
+    if (ch_is_exact_integer(args[0])) {
         return CH_TRUE;
     }
     if (ch_is_flonum(args[0])) {
@@ -155,11 +159,20 @@ static ChValue prim_integer_p(ChVM *vm, ChValue *args, int nargs) {
 
 static ChValue prim_zero_p(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    if (ch_is_fixnum(args[0])) {
-        return ch_to_fixnum(args[0]) == 0 ? CH_TRUE : CH_FALSE;
+    if (ch_is_exact_integer(args[0])) {
+        return ch_bignum_compare(args[0], ch_make_fixnum(0)) == 0 ? CH_TRUE : CH_FALSE;
+    }
+    if (ch_is_rational_obj(args[0])) {
+        return ch_bignum_compare(ch_as_rational(args[0])->numerator, ch_make_fixnum(0)) == 0
+                   ? CH_TRUE
+                   : CH_FALSE;
     }
     if (ch_is_flonum(args[0])) {
         return ch_to_flonum(args[0]) == 0.0 ? CH_TRUE : CH_FALSE;
+    }
+    if (ch_is_complex_obj(args[0])) {
+        ChComplex *c = ch_as_complex(args[0]);
+        return (c->real == 0.0 && c->imag == 0.0) ? CH_TRUE : CH_FALSE;
     }
     snprintf(vm->error, sizeof(vm->error), "zero?: not a number");
     return CH_UNDEFINED;

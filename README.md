@@ -69,7 +69,7 @@ See [docs/dev/cli.md](docs/dev/cli.md) and [docs/dev/repl.md](docs/dev/repl.md).
 | 4 | `call/cc`, `dynamic-wind`, exceptions (**done**) |
 | 5 | Hygienic `syntax-rules` + derived forms (**done**) |
 | 6 | R7RS libraries + portable `.sld` reuse from Kaappi (**done**) |
-| 7 | Full R7RS-small surface (**in progress**: case-lambda, lazy, file ports) |
+| 7 | Full R7RS-small surface (**in progress**: numeric tower MVP; more `(scheme …)` next) |
 | 8+ | IR/opts, SRFIs, FFI, concurrency, tooling, LLVM, WASM, LSP, packages |
 
 Language-parity target (≈99% Kaappi language surface): R7RS-small + portable

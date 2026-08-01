@@ -64,6 +64,15 @@ static void free_object(ChObject *obj) {
         break;
     case CH_TAG_PROMISE:
         break;
+    case CH_TAG_BIGNUM: {
+        ChBignum *bn = (ChBignum *)obj;
+        free(bn->limbs);
+        break;
+    }
+    case CH_TAG_RATIONAL:
+        break;
+    case CH_TAG_COMPLEX:
+        break;
     default:
         break;
     }
@@ -213,6 +222,16 @@ static void mark_object(ChObject *obj) {
         mark_value(pr->value);
         break;
     }
+    case CH_TAG_BIGNUM:
+        break;
+    case CH_TAG_RATIONAL: {
+        ChRational *r = (ChRational *)obj;
+        mark_value(r->numerator);
+        mark_value(r->denominator);
+        break;
+    }
+    case CH_TAG_COMPLEX:
+        break;
     }
 }
 

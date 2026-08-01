@@ -8,7 +8,7 @@
 (check-eqv "binary -" 7 (- 10 3))
 (check-eqv "variadic -" 5 (- 10 3 2))
 (check-assert "/" (= 2 (/ 10 5)))
-(check-eqv "unary /" 0.5 (/ 2))
+(check-assert "unary /" (= (/ 2) 1/2))
 
 (check-assert "=" (= 1 1 1))
 (check-assert "not =" (not (= 1 1 2)))
@@ -24,5 +24,62 @@
 
 (check-eqv "nested" 14 (+ (* 2 (+ 3 4)) 0))
 (check-assert "div mul" (= 5 (* (/ 10 2) 1)))
+
+;; Bignum MVP — beyond fixnum / exact integer ops
+(define big 100000000000000000000) ; 10^20
+(check-assert "bignum number?" (number? big))
+(check-assert "bignum integer?" (integer? big))
+(check-assert "bignum exact?" (exact? big))
+(check-assert "bignum exact-integer?" (exact-integer? big))
+(check-assert "bignum =" (= big 100000000000000000000))
+(check-assert "bignum +" (= (+ big 1) 100000000000000000001))
+(check-assert "bignum *" (= (* 1000000000000 1000000000000) 1000000000000000000000000))
+(check-assert "bignum <" (< 1 big))
+(check-eqv "quotient" 3 (quotient 10 3))
+(check-eqv "remainder" 1 (remainder 10 3))
+(check-assert "bignum quotient"
+              (= (quotient big 10) 10000000000000000000))
+(check-eqv "abs neg" 5 (abs -5))
+(check-assert "zero? 0" (zero? 0))
+(check-assert "not zero? big" (not (zero? big)))
+
+;; Rationals
+(check-assert "rational? int" (rational? 3))
+(check-assert "rational? 2/4" (rational? 2/4))
+(check-assert "read reduces" (= 1/2 2/4))
+(check-assert "exact /" (= (/ 1 2) 1/2))
+(check-assert "rat +" (= (+ 1/2 1/3) 5/6))
+(check-assert "rat *" (= (* 2/3 3/4) 1/2))
+(check-assert "rat -" (= (- 1 1/3) 2/3))
+(check-assert "rat /" (= (/ 1/2 1/4) 2))
+(check-eqv "numerator" 1 (numerator 1/2))
+(check-eqv "denominator" 2 (denominator 1/2))
+(check-eqv "numerator int" 7 (numerator 7))
+(check-eqv "denominator int" 1 (denominator 7))
+(check-assert "rat <" (< 1/3 1/2))
+(check-assert "exact? rat" (exact? 3/4))
+(check-assert "not exact-integer? rat" (not (exact-integer? 3/4)))
+
+;; Complexes (inexact rectangular MVP)
+(check-assert "complex? 1" (complex? 1))
+(check-assert "complex? 1+2i" (complex? 1+2i))
+(check-assert "real? 3" (real? 3))
+(check-assert "not real? 1+2i" (not (real? 1+2i)))
+(check-assert "number? 1+2i" (number? 1+2i))
+(check-assert "inexact? 1+2i" (inexact? 1+2i))
+(check-assert "read +i" (= +i (make-rectangular 0 1)))
+(check-assert "read -i" (= -i (make-rectangular 0 -1)))
+(check-assert "read 3i" (= 3i (make-rectangular 0 3)))
+(check-assert "read 1-2i" (= 1-2i (make-rectangular 1 -2)))
+(check-assert "c +" (= (+ 1+2i 3+4i) 4+6i))
+(check-assert "c *" (= (* 1+2i 3+4i) -5+10i))
+(check-assert "c demote" (real? (+ 1+2i 1-2i)))
+(check-assert "= mix" (= (+ 1 2i) 1+2i))
+(check-eqv "real-part" 1.0 (real-part 1+2i))
+(check-eqv "imag-part" 2.0 (imag-part 1+2i))
+(check-assert "magnitude"
+              (= (magnitude 3+4i) 5.0))
+(check-assert "make-polar roundtrip"
+              (= (make-polar 5 0) 5.0))
 
 (check-finish)

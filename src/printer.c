@@ -1,6 +1,11 @@
 #include "chaaya/printer.h"
 
+#include "chaaya/bignum.h"
+#include "chaaya/complex.h"
+#include "chaaya/rational.h"
+
 #include <stdio.h>
+#include <stdlib.h>
 
 static void print_string_write(FILE *out, const ChString *s) {
     fputc('"', out);
@@ -100,6 +105,24 @@ static void print_value_rec(FILE *out, ChValue v, bool display) {
     }
     if (ch_is_fixnum(v)) {
         fprintf(out, "%lld", (long long)ch_to_fixnum(v));
+        return;
+    }
+    if (ch_is_bignum(v)) {
+        char *s = ch_bignum_to_string(v);
+        fputs(s, out);
+        free(s);
+        return;
+    }
+    if (ch_is_rational_obj(v)) {
+        char *s = ch_exact_to_string(v);
+        fputs(s, out);
+        free(s);
+        return;
+    }
+    if (ch_is_complex_obj(v)) {
+        char *s = ch_complex_to_string(v);
+        fputs(s, out);
+        free(s);
         return;
     }
     if (ch_is_flonum(v)) {

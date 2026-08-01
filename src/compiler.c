@@ -553,6 +553,7 @@ static ChCompileStatus compile_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue
 static ChCompileStatus compile_case_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
                                            uint8_t dst, bool tail) {
     ChGC *gc = &c->vm->gc;
+    const int nroots = 7;
     ChValue lambda_sym = ch_gc_intern_symbol_cstr(gc, "lambda");
     ChValue let_sym = ch_gc_intern_symbol_cstr(gc, "let");
     ChValue cond_sym = ch_gc_intern_symbol_cstr(gc, "cond");
@@ -565,13 +566,26 @@ static ChCompileStatus compile_case_lambda(ChCompiler *c, ChFuncCompiler *fc, Ch
     ChValue args_sym = ch_gc_intern_symbol_cstr(gc, "%cl-args");
     ChValue n_sym = ch_gc_intern_symbol_cstr(gc, "%cl-n");
 
+    /* Rooted scratch slots — nested cons would otherwise drop live
+     * pointers across GC triggered by later allocations. */
     ChValue rev_clauses = CH_NIL;
+    ChValue scratch = CH_NIL;
+    ChValue piece = CH_NIL;
+    ChValue apply_call = CH_NIL;
+    ChValue cond_clauses = CH_NIL;
+    ChValue outer = CH_NIL;
     ch_gc_push(gc, &rev_clauses);
+    ch_gc_push(gc, &scratch);
+    ch_gc_push(gc, &piece);
+    ch_gc_push(gc, &apply_call);
+    ch_gc_push(gc, &cond_clauses);
+    ch_gc_push(gc, &outer);
+    ch_gc_push(gc, &args);
 
     for (ChValue cl = args; ch_is_pair(cl); cl = ch_cdr(cl)) {
         ChValue clause = ch_car(cl);
         if (!ch_is_pair(clause) || !ch_is_pair(ch_cdr(clause))) {
-            ch_gc_pop(gc);
+            ch_gc_pop_n(gc, nroots);
             return fail(c, "case-lambda: bad clause");
         }
         ChValue formals = ch_car(clause);
@@ -581,7 +595,7 @@ static ChCompileStatus compile_case_lambda(ChCompiler *c, ChFuncCompiler *fc, Ch
         for (ChValue f = formals; !ch_is_nil(f);) {
             if (ch_is_pair(f)) {
                 if (!ch_is_symbol(ch_car(f))) {
-                    ch_gc_pop(gc);
+                    ch_gc_pop_n(gc, nroots);
                     return fail(c, "case-lambda: bad formals");
                 }
                 arity++;
@@ -590,40 +604,55 @@ static ChCompileStatus compile_case_lambda(ChCompiler *c, ChFuncCompiler *fc, Ch
                 has_rest = 1;
                 break;
             } else {
-                ch_gc_pop(gc);
+                ch_gc_pop_n(gc, nroots);
                 return fail(c, "case-lambda: bad formals");
             }
         }
         ChValue cmp = has_rest ? ge_sym : eq_sym;
         ChValue arity_v = ch_make_fixnum(arity);
-        ChValue test = ch_gc_cons(gc, cmp, ch_gc_cons(gc, n_sym, ch_gc_cons(gc, arity_v, CH_NIL)));
-        ChValue inner_lam = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, formals, body));
-        ChValue apply_call =
-            ch_gc_cons(gc, apply_sym, ch_gc_cons(gc, inner_lam, ch_gc_cons(gc, args_sym, CH_NIL)));
-        ChValue cond_clause = ch_gc_cons(gc, test, ch_gc_cons(gc, apply_call, CH_NIL));
-        rev_clauses = ch_gc_cons(gc, cond_clause, rev_clauses);
+        /* scratch = (cmp n arity) */
+        scratch = ch_gc_cons(gc, arity_v, CH_NIL);
+        scratch = ch_gc_cons(gc, n_sym, scratch);
+        scratch = ch_gc_cons(gc, cmp, scratch);
+        /* piece = (lambda formals . body) */
+        piece = ch_gc_cons(gc, formals, body);
+        piece = ch_gc_cons(gc, lambda_sym, piece);
+        /* apply_call = (apply piece args) */
+        apply_call = ch_gc_cons(gc, args_sym, CH_NIL);
+        apply_call = ch_gc_cons(gc, piece, apply_call);
+        apply_call = ch_gc_cons(gc, apply_sym, apply_call);
+        /* piece = (scratch apply_call) */
+        piece = ch_gc_cons(gc, apply_call, CH_NIL);
+        piece = ch_gc_cons(gc, scratch, piece);
+        rev_clauses = ch_gc_cons(gc, piece, rev_clauses);
     }
 
-    ChValue err_msg = ch_gc_make_string_cstr(gc, "wrong number of arguments");
-    ChValue err_call = ch_gc_cons(gc, error_sym, ch_gc_cons(gc, err_msg, CH_NIL));
-    ChValue else_clause = ch_gc_cons(gc, else_sym, ch_gc_cons(gc, err_call, CH_NIL));
-
-    ChValue cond_clauses = ch_gc_cons(gc, else_clause, CH_NIL);
-    ch_gc_push(gc, &cond_clauses);
+    /* else clause: (else (error "wrong number of arguments")) */
+    scratch = ch_gc_make_string_cstr(gc, "wrong number of arguments");
+    scratch = ch_gc_cons(gc, scratch, CH_NIL);
+    scratch = ch_gc_cons(gc, error_sym, scratch);
+    scratch = ch_gc_cons(gc, scratch, CH_NIL);
+    scratch = ch_gc_cons(gc, else_sym, scratch);
+    cond_clauses = ch_gc_cons(gc, scratch, CH_NIL);
     while (ch_is_pair(rev_clauses)) {
         cond_clauses = ch_gc_cons(gc, ch_car(rev_clauses), cond_clauses);
         rev_clauses = ch_cdr(rev_clauses);
     }
 
-    ChValue cond_form = ch_gc_cons(gc, cond_sym, cond_clauses);
-    ChValue length_call = ch_gc_cons(gc, length_sym, ch_gc_cons(gc, args_sym, CH_NIL));
-    ChValue n_binding = ch_gc_cons(gc, n_sym, ch_gc_cons(gc, length_call, CH_NIL));
-    ChValue bindings = ch_gc_cons(gc, n_binding, CH_NIL);
-    ChValue let_form =
-        ch_gc_cons(gc, let_sym, ch_gc_cons(gc, bindings, ch_gc_cons(gc, cond_form, CH_NIL)));
-    ChValue outer =
-        ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, args_sym, ch_gc_cons(gc, let_form, CH_NIL)));
-    ch_gc_pop_n(gc, 2);
+    /* (lambda %cl-args (let ((%cl-n (length %cl-args))) (cond ...))) */
+    scratch = ch_gc_cons(gc, cond_sym, cond_clauses);
+    piece = ch_gc_cons(gc, args_sym, CH_NIL);
+    piece = ch_gc_cons(gc, length_sym, piece);
+    piece = ch_gc_cons(gc, piece, CH_NIL);
+    piece = ch_gc_cons(gc, n_sym, piece);
+    piece = ch_gc_cons(gc, piece, CH_NIL);
+    scratch = ch_gc_cons(gc, scratch, CH_NIL);
+    scratch = ch_gc_cons(gc, piece, scratch);
+    scratch = ch_gc_cons(gc, let_sym, scratch);
+    scratch = ch_gc_cons(gc, scratch, CH_NIL);
+    scratch = ch_gc_cons(gc, args_sym, scratch);
+    outer = ch_gc_cons(gc, lambda_sym, scratch);
+    ch_gc_pop_n(gc, nroots);
     return compile_expr(c, fc, outer, dst, tail);
 }
 
@@ -636,8 +665,14 @@ static ChCompileStatus compile_delay(ChCompiler *c, ChFuncCompiler *fc, ChValue 
     ChValue lambda_sym = ch_gc_intern_symbol_cstr(gc, "lambda");
     ChValue make_sym = ch_gc_intern_symbol_cstr(gc, "%make-promise");
     /* (delay e1 e2 ...) → (%make-promise (lambda () e1 e2 ...)) */
-    ChValue thunk = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, args));
-    ChValue form = ch_gc_cons(gc, make_sym, ch_gc_cons(gc, thunk, CH_NIL));
+    ChValue form = CH_NIL;
+    ch_gc_push(gc, &form);
+    ch_gc_push(gc, &args);
+    form = ch_gc_cons(gc, CH_NIL, args);
+    form = ch_gc_cons(gc, lambda_sym, form);
+    form = ch_gc_cons(gc, form, CH_NIL);
+    form = ch_gc_cons(gc, make_sym, form);
+    ch_gc_pop_n(gc, 2);
     return compile_expr(c, fc, form, dst, tail);
 }
 

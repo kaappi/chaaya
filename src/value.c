@@ -1,5 +1,8 @@
 #include "chaaya/value.h"
 
+#include "chaaya/bignum.h"
+#include "chaaya/rational.h"
+
 #include <string.h>
 
 ChValue ch_make_fixnum(int64_t n) {
@@ -114,6 +117,31 @@ bool ch_is_promise(ChValue v) {
     return CH_IS_TAG(v, CH_TAG_PROMISE);
 }
 
+bool ch_is_bignum(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_BIGNUM);
+}
+
+bool ch_is_rational_obj(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_RATIONAL);
+}
+
+bool ch_is_complex_obj(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_COMPLEX);
+}
+
+bool ch_is_exact_integer(ChValue v) {
+    return ch_is_fixnum(v) || ch_is_bignum(v);
+}
+
+bool ch_is_exact(ChValue v) {
+    return ch_is_exact_integer(v) || ch_is_rational_obj(v);
+}
+
+bool ch_is_number(ChValue v) {
+    return ch_is_fixnum(v) || ch_is_flonum(v) || ch_is_bignum(v) || ch_is_rational_obj(v) ||
+           ch_is_complex_obj(v);
+}
+
 bool ch_is_procedure(ChValue v) {
     return ch_is_closure(v) || ch_is_native(v) || ch_is_continuation(v);
 }
@@ -174,6 +202,18 @@ ChPromise *ch_as_promise(ChValue v) {
     return (ChPromise *)ch_to_object(v);
 }
 
+ChBignum *ch_as_bignum(ChValue v) {
+    return (ChBignum *)ch_to_object(v);
+}
+
+ChRational *ch_as_rational(ChValue v) {
+    return (ChRational *)ch_to_object(v);
+}
+
+ChComplex *ch_as_complex(ChValue v) {
+    return (ChComplex *)ch_to_object(v);
+}
+
 const char *ch_symbol_basename(ChSymbol *sym) {
     const char *name = sym->name;
     if (strncmp(name, "__hyg_", 6) != 0) {
@@ -227,6 +267,22 @@ bool ch_eqv(ChValue a, ChValue b) {
     if (ch_is_fixnum(a) && ch_is_fixnum(b)) {
         return ch_to_fixnum(a) == ch_to_fixnum(b);
     }
+    if (ch_is_exact_integer(a) && ch_is_exact_integer(b)) {
+        return ch_bignum_compare(a, b) == 0;
+    }
+    if (ch_is_exact(a) && ch_is_exact(b)) {
+        /* Cross-multiply without a VM — use string/f64 only if we lack GC here.
+         * eqv? for rationals: same reduced num and den. */
+        if (ch_is_rational_obj(a) && ch_is_rational_obj(b)) {
+            ChRational *ra = ch_as_rational(a);
+            ChRational *rb = ch_as_rational(b);
+            return ch_bignum_compare(ra->numerator, rb->numerator) == 0 &&
+                   ch_bignum_compare(ra->denominator, rb->denominator) == 0;
+        }
+        if (ch_is_rational_obj(a) || ch_is_rational_obj(b)) {
+            return false; /* integer vs non-reduced shouldn't happen; unequal types */
+        }
+    }
     if (ch_is_flonum(a) && ch_is_flonum(b)) {
         double x = ch_to_flonum(a);
         double y = ch_to_flonum(b);
@@ -234,6 +290,11 @@ bool ch_eqv(ChValue a, ChValue b) {
             return true; /* both NaN */
         }
         return x == y;
+    }
+    if (ch_is_complex_obj(a) && ch_is_complex_obj(b)) {
+        ChComplex *ca = ch_as_complex(a);
+        ChComplex *cb = ch_as_complex(b);
+        return ca->real == cb->real && ca->imag == cb->imag;
     }
     if (ch_is_char(a) && ch_is_char(b)) {
         return ch_to_char(a) == ch_to_char(b);

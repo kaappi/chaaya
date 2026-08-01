@@ -1,5 +1,9 @@
 #include "chaaya/reader.h"
 
+#include "chaaya/bignum.h"
+#include "chaaya/complex.h"
+#include "chaaya/rational.h"
+
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -153,13 +157,131 @@ static ChReadStatus read_string(ChReader *r, ChValue *out) {
     return CH_READ_OK;
 }
 
-static bool try_parse_number(const char *text, size_t len, ChValue *out) {
+static bool try_parse_number(ChGC *gc, const char *text, size_t len, ChValue *out);
+
+static bool try_parse_real_f64(ChGC *gc, const char *text, size_t len, double *out) {
+    if (len == 0) {
+        return false;
+    }
+    ChValue v;
+    if (!try_parse_number(gc, text, len, &v) || ch_is_complex_obj(v)) {
+        return false;
+    }
+    double re, im;
+    if (!ch_complex_parts(v, &re, &im)) {
+        return false;
+    }
+    *out = re;
+    return true;
+}
+
+static bool try_parse_complex(ChGC *gc, const char *text, size_t len, ChValue *out) {
+    if (len < 2) {
+        return false;
+    }
+    char last = text[len - 1];
+    if (last != 'i' && last != 'I') {
+        return false;
+    }
+    /* +i / -i */
+    if (len == 2 && (text[0] == '+' || text[0] == '-')) {
+        *out = ch_make_complex(gc, 0.0, text[0] == '+' ? 1.0 : -1.0);
+        return true;
+    }
+    size_t body = len - 1; /* strip trailing i */
+    /* Last +/− after index 0 separates real and imag parts. */
+    size_t split = 0;
+    for (size_t j = 1; j < body; j++) {
+        if (text[j] == '+' || text[j] == '-') {
+            split = j;
+        }
+    }
+    double real = 0.0;
+    double imag = 0.0;
+    if (split == 0) {
+        /* Pure imaginary: Ni, +Ni, -Ni */
+        if (!try_parse_real_f64(gc, text, body, &imag)) {
+            return false;
+        }
+    } else {
+        size_t ilen = body - split;
+        if (!try_parse_real_f64(gc, text, split, &real)) {
+            return false;
+        }
+        if (ilen == 1) {
+            imag = text[split] == '+' ? 1.0 : -1.0;
+        } else if (!try_parse_real_f64(gc, text + split, ilen, &imag)) {
+            return false;
+        }
+    }
+    *out = ch_make_complex(gc, real, imag);
+    return true;
+}
+
+static bool try_parse_number(ChGC *gc, const char *text, size_t len, ChValue *out) {
     if (len == 0) {
         return false;
     }
     /* special: + - alone are symbols */
     if ((len == 1 && (text[0] == '+' || text[0] == '-')) ||
         (len == 1 && text[0] == '.')) {
+        return false;
+    }
+    /* Complex before rational so 2/4i is pure-imaginary, not a fraction. */
+    if (try_parse_complex(gc, text, len, out)) {
+        return true;
+    }
+    /* Rational N/D with optional signs */
+    const char *slash = NULL;
+    for (size_t j = 0; j < len; j++) {
+        if (text[j] == '/') {
+            slash = text + j;
+            break;
+        }
+    }
+    if (slash) {
+        size_t nlen = (size_t)(slash - text);
+        size_t dlen = len - nlen - 1;
+        if (nlen == 0 || dlen == 0) {
+            return false;
+        }
+        ChValue num = ch_bignum_parse_decimal(gc, text, nlen);
+        if (num == CH_UNDEFINED) {
+            return false;
+        }
+        ch_gc_push(gc, &num);
+        ChValue den = ch_bignum_parse_decimal(gc, slash + 1, dlen);
+        if (den == CH_UNDEFINED) {
+            ch_gc_pop(gc);
+            return false;
+        }
+        ch_gc_push(gc, &den);
+        ChValue rat = ch_make_rational(gc, num, den);
+        ch_gc_pop_n(gc, 2);
+        if (rat == CH_UNDEFINED) {
+            return false;
+        }
+        *out = rat;
+        return true;
+    }
+    /* Exact integer: optional sign + digits only → bignum path (demotes to fixnum). */
+    size_t i = 0;
+    if (text[0] == '+' || text[0] == '-') {
+        i = 1;
+    }
+    int all_digits = (i < len);
+    for (size_t j = i; j < len; j++) {
+        if (text[j] < '0' || text[j] > '9') {
+            all_digits = 0;
+            break;
+        }
+    }
+    if (all_digits) {
+        ChValue v = ch_bignum_parse_decimal(gc, text, len);
+        if (v != CH_UNDEFINED) {
+            *out = v;
+            return true;
+        }
         return false;
     }
     char *tmp = (char *)malloc(len + 1);
@@ -169,14 +291,6 @@ static bool try_parse_number(const char *text, size_t len, ChValue *out) {
     memcpy(tmp, text, len);
     tmp[len] = '\0';
     char *end = NULL;
-    /* try integer */
-    long long iv = strtoll(tmp, &end, 10);
-    if (end && *end == '\0') {
-        *out = ch_make_fixnum((int64_t)iv);
-        free(tmp);
-        return true;
-    }
-    end = NULL;
     double dv = strtod(tmp, &end);
     if (end && *end == '\0') {
         *out = ch_make_flonum(dv);
@@ -235,7 +349,7 @@ static ChReadStatus read_atom(ChReader *r, ChValue *out) {
         return CH_READ_OK;
     }
     ChValue num;
-    if (try_parse_number(text, len, &num)) {
+    if (try_parse_number(r->gc, text, len, &num)) {
         *out = num;
         return CH_READ_OK;
     }

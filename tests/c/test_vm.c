@@ -13,7 +13,8 @@ int main(void) {
     CH_CHECK(ch_test_expect_fixnum(&vm, "(*)", 1));
     CH_CHECK(ch_test_expect_fixnum(&vm, "(- 10 3)", 7));
     CH_CHECK(ch_test_expect_fixnum(&vm, "(- 5)", -5));
-    CH_CHECK(ch_test_expect_flonum(&vm, "(/ 1 2)", 0.5, 1e-12));
+    CH_CHECK(ch_test_expect_equal(&vm, "(/ 1 2)", "1/2"));
+    CH_CHECK(ch_test_expect_flonum(&vm, "(/ 1.0 2)", 0.5, 1e-12));
 
     CH_CHECK(ch_test_expect_fixnum(&vm, "(if #t 1 2)", 1));
     CH_CHECK(ch_test_expect_fixnum(&vm, "(if #f 1 2)", 2));

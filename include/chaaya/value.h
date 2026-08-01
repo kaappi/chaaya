@@ -47,6 +47,9 @@ typedef enum ChObjectTag {
     CH_TAG_RECORD_TYPE = 11,
     CH_TAG_RECORD = 12,
     CH_TAG_PROMISE = 13,
+    CH_TAG_BIGNUM = 14,
+    CH_TAG_RATIONAL = 15,
+    CH_TAG_COMPLEX = 16,
 } ChObjectTag;
 
 typedef struct ChObject {
@@ -219,6 +222,32 @@ typedef struct ChPromise {
     ChValue value; /* thunk if lazy; result if forced */
 } ChPromise;
 
+/* Sign-magnitude little-endian limbs (Kaappi-compatible layout). */
+typedef struct ChBignum {
+    ChObject header;
+    uint64_t *limbs;
+    size_t len;       /* active limb count; 0 = zero */
+    uint8_t positive; /* 1 = non-negative */
+} ChBignum;
+
+/* Exact fraction p/q in lowest terms; q always positive and > 1 when heap-allocated. */
+typedef struct ChRational {
+    ChObject header;
+    ChValue numerator;   /* fixnum or bignum */
+    ChValue denominator; /* fixnum or bignum, always > 0 */
+} ChRational;
+
+/* Inexact rectangular complex (MVP). Imag == 0 demotes to flonum. */
+typedef struct ChComplex {
+    ChObject header;
+    double real;
+    double imag;
+} ChComplex;
+
+/* Signed i48 fixnum range. */
+#define CH_FIXNUM_MIN (-((int64_t)1 << 47))
+#define CH_FIXNUM_MAX (((int64_t)1 << 47) - 1)
+
 static inline bool ch_is_flonum(ChValue v) {
     return v < CH_NANBOX_THRESHOLD;
 }
@@ -272,6 +301,12 @@ bool ch_is_transformer(ChValue v);
 bool ch_is_record_type(ChValue v);
 bool ch_is_record(ChValue v);
 bool ch_is_promise(ChValue v);
+bool ch_is_bignum(ChValue v);
+bool ch_is_rational_obj(ChValue v); /* heap rational only */
+bool ch_is_complex_obj(ChValue v);  /* heap complex only */
+bool ch_is_exact_integer(ChValue v);
+bool ch_is_exact(ChValue v); /* integer or rational */
+bool ch_is_number(ChValue v);
 bool ch_is_procedure(ChValue v);
 
 ChPair *ch_as_pair(ChValue v);
@@ -288,6 +323,9 @@ ChTransformer *ch_as_transformer(ChValue v);
 ChRecordType *ch_as_record_type(ChValue v);
 ChRecord *ch_as_record(ChValue v);
 ChPromise *ch_as_promise(ChValue v);
+ChBignum *ch_as_bignum(ChValue v);
+ChRational *ch_as_rational(ChValue v);
+ChComplex *ch_as_complex(ChValue v);
 
 /* Collapse multiple values to the first (or void if none). */
 ChValue ch_coerce_single(ChValue v);
