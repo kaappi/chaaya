@@ -13,6 +13,8 @@ extern "C" {
 #define CH_VM_MAX_FRAMES 256
 #define CH_VM_MAX_REGS 4096
 #define CH_VM_MAX_GLOBALS 1024
+#define CH_VM_MAX_LIB_PATHS 32
+#define CH_VM_MAX_SCRIPT_ARGS 64
 
 typedef enum ChVMStatus {
     CH_VM_OK = 0,
@@ -44,6 +46,12 @@ typedef struct ChVM {
     ChUpvalue *open_upvalues;
     ChValue result;
     char error[256];
+    /* CLI / script context (owned strings are not strdup'd — point at argv) */
+    const char *lib_paths[CH_VM_MAX_LIB_PATHS];
+    size_t lib_path_count;
+    const char *script_path;
+    const char *script_args[CH_VM_MAX_SCRIPT_ARGS];
+    size_t script_arg_count;
 } ChVM;
 
 void ch_vm_init(ChVM *vm);

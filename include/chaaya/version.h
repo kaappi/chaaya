@@ -1,0 +1,7 @@
+#ifndef CHAAYA_VERSION_H
+#define CHAAYA_VERSION_H
+
+#define CHAAYA_VERSION "0.1.0"
+#define CHAAYA_VERSION_BANNER "Chaaya Scheme v" CHAAYA_VERSION
+
+#endif /* CHAAYA_VERSION_H */

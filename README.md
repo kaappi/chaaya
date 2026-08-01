@@ -14,7 +14,8 @@ Bootstrap interpreter:
 - Register bytecode VM
 - Special forms: `quote`, `if`, `lambda`, `define`, `set!`, `begin`, `and`, `or`, `let`
 - Core primitives (lists, arithmetic, equality, I/O)
-- REPL and file runner
+- Kaappi-shaped CLI (`features`, `doctor`, `ast`, …) and linenoise REPL
+  (`chaaya>`, multiline, `,help`, `_`)
 
 ## Build
 
@@ -36,12 +37,16 @@ ctest --test-dir build --output-on-failure
 ```
 
 ```bash
-./build/chaaya              # REPL (linenoise when stdin is a TTY)
-./build/chaaya program.scm  # run a file
-./build/chaaya --version
+./build/chaaya                 # REPL
+./build/chaaya program.scm     # run a file
+./build/chaaya --version       # Chaaya Scheme v0.1.0
+./build/chaaya features
+./build/chaaya doctor
+./build/chaaya ast program.scm
 ```
 
 REPL history is stored in `~/.chaaya/history` (or `$CHAAYA_HOME/history`).
+See [docs/dev/cli.md](docs/dev/cli.md) and [docs/dev/repl.md](docs/dev/repl.md).
 
 ## Example
 
@@ -76,6 +81,8 @@ independent. Note that Kaappi’s R7RS `(scheme …)` libraries are built-in (no
 Contributor documentation lives in [docs/dev/](docs/dev/):
 
 - [Architecture](docs/dev/architecture.md) — pipeline, values, GC, VM, layout
+- [CLI](docs/dev/cli.md) — help shape, exit codes, stubs
+- [REPL](docs/dev/repl.md) — prompts, comma-commands, history
 
 ## License
 

@@ -8,6 +8,11 @@ set(CMAKE_C_EXTENSIONS OFF)
 option(CHAAYA_WARNINGS_AS_ERRORS "Treat warnings as errors" ON)
 option(CHAAYA_USE_LINENOISE "Use linenoise for interactive REPL (POSIX)" ON)
 
+set(CHAAYA_HAS_LINENOISE_VALUE 0)
+if(CHAAYA_USE_LINENOISE AND NOT WIN32)
+  set(CHAAYA_HAS_LINENOISE_VALUE 1)
+endif()
+
 add_library(chaaya_core STATIC
   src/value.c
   src/gc.c
@@ -16,6 +21,9 @@ add_library(chaaya_core STATIC
   src/compiler.c
   src/vm.c
   src/prim_core.c
+  src/eval.c
+  src/cli.c
+  src/repl.c
 )
 
 target_include_directories(chaaya_core
@@ -28,22 +36,20 @@ target_compile_options(chaaya_core PRIVATE
   $<$<BOOL:${CHAAYA_WARNINGS_AS_ERRORS}>:-Werror>
 )
 
+if(CHAAYA_HAS_LINENOISE_VALUE)
+  add_library(linenoise STATIC third_party/linenoise/linenoise.c)
+  target_include_directories(linenoise PUBLIC third_party/linenoise)
+  target_compile_options(linenoise PRIVATE -Wall -Wno-unused-parameter)
+  target_link_libraries(chaaya_core PUBLIC linenoise)
+  target_compile_definitions(chaaya_core PUBLIC CHAAYA_HAS_LINENOISE=1)
+endif()
+
 add_executable(chaaya src/main.c)
 target_link_libraries(chaaya PRIVATE chaaya_core)
 target_compile_options(chaaya PRIVATE
   -Wall -Wextra -Wpedantic
   $<$<BOOL:${CHAAYA_WARNINGS_AS_ERRORS}>:-Werror>
 )
-
-# linenoise is termios/POSIX-only — skip on Windows
-if(CHAAYA_USE_LINENOISE AND NOT WIN32)
-  add_library(linenoise STATIC third_party/linenoise/linenoise.c)
-  target_include_directories(linenoise PUBLIC third_party/linenoise)
-  # Vendored code: keep warnings visible but not fatal
-  target_compile_options(linenoise PRIVATE -Wall -Wno-unused-parameter)
-  target_link_libraries(chaaya PRIVATE linenoise)
-  target_compile_definitions(chaaya PRIVATE CHAAYA_HAS_LINENOISE=1)
-endif()
 
 enable_testing()
 
@@ -62,8 +68,9 @@ chaaya_add_test(test_value_gc tests/c/test_value_gc.c)
 chaaya_add_test(test_reader_printer tests/c/test_reader_printer.c)
 chaaya_add_test(test_vm tests/c/test_vm.c)
 chaaya_add_test(test_primitives tests/c/test_primitives.c)
+chaaya_add_test(test_cli tests/c/test_cli.c)
+chaaya_add_test(test_repl_util tests/c/test_repl_util.c)
 
-# Scheme file tests: compare chaaya stdout to *.expected
 function(chaaya_scheme_test name)
   add_test(
     NAME scheme_${name}
@@ -79,5 +86,27 @@ chaaya_scheme_test(fact)
 chaaya_scheme_test(lists)
 chaaya_scheme_test(closures)
 chaaya_scheme_test(tail)
+
+# CLI integration tests via the chaaya binary
+add_test(NAME cli_version COMMAND $<TARGET_FILE:chaaya> --version)
+set_tests_properties(cli_version PROPERTIES PASS_REGULAR_EXPRESSION "Chaaya Scheme v0.1.0")
+
+add_test(NAME cli_features COMMAND $<TARGET_FILE:chaaya> features)
+set_tests_properties(cli_features PROPERTIES PASS_REGULAR_EXPRESSION "bootstrap")
+
+add_test(NAME cli_ast COMMAND $<TARGET_FILE:chaaya> ast ${CMAKE_SOURCE_DIR}/tests/scheme/fact.scm)
+set_tests_properties(cli_ast PROPERTIES PASS_REGULAR_EXPRESSION "define")
+
+add_test(NAME cli_nyi_compile
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/expect_nyi_compile.cmake
+)
+
+add_test(NAME cli_stdin
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/run_stdin.cmake
+)
 
 install(TARGETS chaaya RUNTIME DESTINATION bin)

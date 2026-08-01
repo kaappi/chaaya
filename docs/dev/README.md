@@ -15,6 +15,8 @@ Open bugs belong in the issue tracker.
 | Document | Contents |
 |----------|----------|
 | [architecture.md](architecture.md) | Pipeline, values, GC, bytecode VM, source layout, roadmap seams |
+| [cli.md](cli.md) | CLI help shape, exit codes, implemented vs stubbed commands |
+| [repl.md](repl.md) | REPL prompts, multiline, comma-commands, history |
 
 ## Design decisions
 

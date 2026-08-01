@@ -33,7 +33,10 @@ handled directly in the compiler today.
 | **GC** | [`src/gc.c`](../../src/gc.c), [`include/chaaya/gc.h`](../../include/chaaya/gc.h) | Mark-sweep heap, root stack, symbol intern table |
 | **Values** | [`src/value.c`](../../src/value.c), [`include/chaaya/value.h`](../../include/chaaya/value.h) | NaN-boxed `ChValue`, heap object tags, equality |
 | **Primitives** | [`src/prim_core.c`](../../src/prim_core.c), [`include/chaaya/prim.h`](../../include/chaaya/prim.h) | Native procedures registered into VM globals |
-| **Driver** | [`src/main.c`](../../src/main.c) | REPL (linenoise on POSIX TTYs; plain `fgets` otherwise) and file runner |
+| **Eval** | [`src/eval.c`](../../src/eval.c) | Shared top-level eval + `_` binding |
+| **CLI** | [`src/cli.c`](../../src/cli.c), [`include/chaaya/cli.h`](../../include/chaaya/cli.h) | Kaappi-shaped help/flags/subcommands; see [cli.md](cli.md) |
+| **REPL** | [`src/repl.c`](../../src/repl.c), [`include/chaaya/repl.h`](../../include/chaaya/repl.h) | Interactive loop; see [repl.md](repl.md) |
+| **Driver** | [`src/main.c`](../../src/main.c) | `main` → parse → dispatch |
 | **linenoise** | [`third_party/linenoise/`](../../third_party/linenoise/) | Vendored BSD line editor (history in `~/.chaaya/history`) |
 
 ---
@@ -110,10 +113,11 @@ Special forms compiled today: `quote`, `if`, `lambda`, `define`, `set!`,
 
 ```text
 include/chaaya/   Public-ish headers (ch_ / Ch prefixes)
-src/              One concern per .c file
+src/              One concern per .c file (cli, repl, eval, vm, …)
 tests/c/          CTest unit tests
 tests/scheme/     Scheme smoke programs
-docs/dev/         This contributor documentation
+tests/cli/        CLI integration helpers
+docs/dev/         Contributor documentation
 third_party/      Vendored C deps (linenoise)
 lib/              Portable .sld trees (reserved; after library system)
 ```
