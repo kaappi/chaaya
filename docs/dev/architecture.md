@@ -33,7 +33,8 @@ handled directly in the compiler today.
 | **GC** | [`src/gc.c`](../../src/gc.c), [`include/chaaya/gc.h`](../../include/chaaya/gc.h) | Mark-sweep heap, root stack, symbol intern table |
 | **Values** | [`src/value.c`](../../src/value.c), [`include/chaaya/value.h`](../../include/chaaya/value.h) | NaN-boxed `ChValue`, heap object tags, equality |
 | **Primitives** | [`src/prim_core.c`](../../src/prim_core.c), [`include/chaaya/prim.h`](../../include/chaaya/prim.h) | Native procedures registered into VM globals |
-| **Driver** | [`src/main.c`](../../src/main.c) | REPL and file runner |
+| **Driver** | [`src/main.c`](../../src/main.c) | REPL (linenoise on POSIX TTYs; plain `fgets` otherwise) and file runner |
+| **linenoise** | [`third_party/linenoise/`](../../third_party/linenoise/) | Vendored BSD line editor (history in `~/.chaaya/history`) |
 
 ---
 
@@ -113,7 +114,7 @@ src/              One concern per .c file
 tests/c/          CTest unit tests
 tests/scheme/     Scheme smoke programs
 docs/dev/         This contributor documentation
-third_party/      Vendored C deps (reserved; linenoise later)
+third_party/      Vendored C deps (linenoise)
 lib/              Portable .sld trees (reserved; after library system)
 ```
 

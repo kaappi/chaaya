@@ -6,9 +6,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
+#ifdef CHAAYA_HAS_LINENOISE
+#include "linenoise.h"
+#endif
+
 #define CHAAYA_VERSION "0.1.0"
+#define CHAAYA_HISTORY_MAX 1000
 
 static int eval_source(ChVM *vm, const char *source, size_t len, bool print_results) {
     ChReader reader;
@@ -90,7 +96,82 @@ static char *read_file(const char *path, size_t *out_len) {
     return buf;
 }
 
-static int run_repl(ChVM *vm) {
+#ifdef CHAAYA_HAS_LINENOISE
+static int mkdir_p_home_subdir(const char *dir) {
+    struct stat st;
+    if (stat(dir, &st) == 0) {
+        return S_ISDIR(st.st_mode) ? 0 : -1;
+    }
+    if (mkdir(dir, 0700) == 0) {
+        return 0;
+    }
+    return -1;
+}
+
+/* Build history file path into buf. Default: ~/.chaaya/history.
+ * Override base dir with CHAAYA_HOME. Returns 0 on success. */
+static int history_path(char *buf, size_t buflen) {
+    char home_buf[512];
+    const char *env_home = getenv("CHAAYA_HOME");
+    if (env_home && env_home[0] != '\0') {
+        if (snprintf(home_buf, sizeof(home_buf), "%s", env_home) >= (int)sizeof(home_buf)) {
+            return -1;
+        }
+    } else {
+        const char *h = getenv("HOME");
+        if (!h || h[0] == '\0') {
+            return -1;
+        }
+        if (snprintf(home_buf, sizeof(home_buf), "%s/.chaaya", h) >= (int)sizeof(home_buf)) {
+            return -1;
+        }
+    }
+    if (mkdir_p_home_subdir(home_buf) != 0) {
+        return -1;
+    }
+    if (snprintf(buf, buflen, "%s/history", home_buf) >= (int)buflen) {
+        return -1;
+    }
+    return 0;
+}
+
+static int run_repl_linenoise(ChVM *vm) {
+    printf("Chaaya %s — R7RS Scheme in C (bootstrap)\n", CHAAYA_VERSION);
+    printf("Type expressions; Ctrl-D to exit.\n");
+
+    linenoiseSetMultiLine(1);
+    linenoiseHistorySetMaxLen(CHAAYA_HISTORY_MAX);
+
+    char hist[1024];
+    int have_hist = (history_path(hist, sizeof(hist)) == 0);
+    if (have_hist) {
+        linenoiseHistoryLoad(hist);
+    }
+
+    for (;;) {
+        char *line = linenoise("> ");
+        if (!line) {
+            fputc('\n', stdout);
+            break;
+        }
+        if (line[0] == '\0') {
+            linenoiseFree(line);
+            continue;
+        }
+        linenoiseHistoryAdd(line);
+        eval_source(vm, line, strlen(line), true);
+        vm->error[0] = '\0';
+        linenoiseFree(line);
+    }
+
+    if (have_hist) {
+        linenoiseHistorySave(hist);
+    }
+    return 0;
+}
+#endif /* CHAAYA_HAS_LINENOISE */
+
+static int run_repl_plain(ChVM *vm) {
     int interactive = isatty(STDIN_FILENO);
     if (interactive) {
         printf("Chaaya %s — R7RS Scheme in C (bootstrap)\n", CHAAYA_VERSION);
@@ -115,6 +196,15 @@ static int run_repl(ChVM *vm) {
         vm->error[0] = '\0';
     }
     return 0;
+}
+
+static int run_repl(ChVM *vm) {
+#ifdef CHAAYA_HAS_LINENOISE
+    if (isatty(STDIN_FILENO)) {
+        return run_repl_linenoise(vm);
+    }
+#endif
+    return run_repl_plain(vm);
 }
 
 static void usage(const char *argv0) {

@@ -18,7 +18,8 @@ Bootstrap interpreter:
 
 ## Build
 
-Requires CMake 3.20+, a C17 compiler, and libc.
+Requires CMake 3.20+, a C17 compiler, and libc. On POSIX, the interactive REPL
+uses vendored [linenoise](third_party/linenoise/) (arrow keys, history).
 
 ```bash
 make            # configure + build → build/chaaya
@@ -35,10 +36,12 @@ ctest --test-dir build --output-on-failure
 ```
 
 ```bash
-./build/chaaya              # REPL
+./build/chaaya              # REPL (linenoise when stdin is a TTY)
 ./build/chaaya program.scm  # run a file
 ./build/chaaya --version
 ```
+
+REPL history is stored in `~/.chaaya/history` (or `$CHAAYA_HOME/history`).
 
 ## Example
 

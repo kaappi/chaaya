@@ -6,6 +6,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
 option(CHAAYA_WARNINGS_AS_ERRORS "Treat warnings as errors" ON)
+option(CHAAYA_USE_LINENOISE "Use linenoise for interactive REPL (POSIX)" ON)
 
 add_library(chaaya_core STATIC
   src/value.c
@@ -33,6 +34,16 @@ target_compile_options(chaaya PRIVATE
   -Wall -Wextra -Wpedantic
   $<$<BOOL:${CHAAYA_WARNINGS_AS_ERRORS}>:-Werror>
 )
+
+# linenoise is termios/POSIX-only — skip on Windows
+if(CHAAYA_USE_LINENOISE AND NOT WIN32)
+  add_library(linenoise STATIC third_party/linenoise/linenoise.c)
+  target_include_directories(linenoise PUBLIC third_party/linenoise)
+  # Vendored code: keep warnings visible but not fatal
+  target_compile_options(linenoise PRIVATE -Wall -Wno-unused-parameter)
+  target_link_libraries(chaaya PRIVATE linenoise)
+  target_compile_definitions(chaaya PRIVATE CHAAYA_HAS_LINENOISE=1)
+endif()
 
 enable_testing()
 
