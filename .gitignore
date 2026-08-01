@@ -1,5 +1,6 @@
 # Build
 build/
+build-wasm/
 cmake-build-*/
 .cache/
 compile_commands.json
