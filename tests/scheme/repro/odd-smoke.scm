@@ -1,0 +1,12 @@
+(import (scheme base) (scheme char) (scheme lazy)
+        (scheme inexact) (scheme complex) (scheme time)
+        (scheme file) (scheme read) (scheme write)
+        (scheme eval) (scheme process-context) (scheme case-lambda)
+        (scheme r5rs)
+        (chibi test))
+
+(test-begin "odd-smoke")
+(test #f (odd? 0))
+(test #t (odd? 1))
+(test-end "odd-smoke")
+(display "done\n")

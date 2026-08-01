@@ -1,4 +1,6 @@
 #include "chaaya/gc.h"
+#include "chaaya/vm.h"
+#include "chaaya/library.h"
 #include "chaaya/environment.h"
 #include "chaaya/ffi.h"
 #include "chaaya/fiber.h"
@@ -155,6 +157,13 @@ void ch_gc_pop_n(ChGC *gc, size_t n) {
         abort();
     }
     gc->root_count -= n;
+}
+
+void ch_gc_pop_to(ChGC *gc, size_t target) {
+    if (gc->root_count < target) {
+        abort();
+    }
+    gc->root_count = target;
 }
 
 static void mark_value(ChValue v);
@@ -424,9 +433,22 @@ static void mark_value(ChValue v) {
     }
 }
 
+void ch_gc_mark_value(ChValue v) {
+    mark_value(v);
+}
+
 static void mark_roots_and_symbols(ChGC *gc) {
     gc->pending_ephem_count = 0;
     g_mark_gc = gc;
+    if (gc->vm) {
+        ch_vm_mark_gc_roots(gc->vm);
+        ch_library_mark_gc_roots(gc->vm);
+    }
+    for (size_t i = 0; i < gc->compiling_fn_depth; i++) {
+        if (gc->compiling_fns[i]) {
+            mark_object(&gc->compiling_fns[i]->header);
+        }
+    }
     for (size_t i = 0; i < gc->root_count; i++) {
         mark_value(*gc->roots[i]);
     }
@@ -524,24 +546,28 @@ void ch_gc_write_barrier(ChGC *gc, ChObject *owner, ChValue value) {
     if (!child || child->generation != CH_OBJ_GEN_YOUNG) {
         return;
     }
+    ch_gc_promote_to_old(gc, child);
+}
 
-    /* MVP remembered-set fallback: eagerly promote young children written into
-     * old objects so minor collections keep these references alive. */
-    ChObject **link = &gc->young_objects;
-    while (*link && *link != child) {
-        link = &(*link)->next;
-    }
-    if (*link != child) {
+void ch_gc_promote_to_old(ChGC *gc, ChObject *obj) {
+    if (!gc || !obj || obj->generation != CH_OBJ_GEN_YOUNG) {
         return;
     }
-    *link = child->next;
+    ChObject **link = &gc->young_objects;
+    while (*link && *link != obj) {
+        link = &(*link)->next;
+    }
+    if (*link != obj) {
+        return;
+    }
+    *link = obj->next;
     if (gc->young_count > 0) {
         gc->young_count--;
     }
-    child->generation = CH_OBJ_GEN_OLD;
-    child->age = 0;
-    child->next = gc->old_objects;
-    gc->old_objects = child;
+    obj->generation = CH_OBJ_GEN_OLD;
+    obj->age = 0;
+    obj->next = gc->old_objects;
+    gc->old_objects = obj;
     gc->old_count++;
 }
 

@@ -1,0 +1,16 @@
+(import (scheme base) (srfi 64))
+(test-begin "v")
+(test-group "g1" (test-eqv "a" 1 1))
+(test-group "g2" (test-eqv "a" 1 1))
+(test-group "g3" (test-eqv "a" 1 1))
+(test-group "g4" (test-eqv "a" 1 1))
+(test-group "g5" (test-eqv "a" 1 1))
+(test-group "vector-set!"
+  (test-equal "vs" #(1 99 3)
+    (let ((v (vector 1 2 3)))
+      (vector-set! v 1 99)
+      v)))
+(test-group "vector->list"
+  (test-equal "full" '(a b c) (vector->list #(a b c)))
+  (test-equal "slice" '(b c) (vector->list #(a b c d e) 1 3)))
+(test-end "v")

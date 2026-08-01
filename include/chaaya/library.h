@@ -72,6 +72,9 @@ int ch_library_file_exists(ChVM *vm, const char *rel_path);
 /* Push all registered library export values as GC roots; returns count pushed. */
 size_t ch_library_push_gc_roots(ChVM *vm);
 
+/* Mark registered library export values during collection. */
+void ch_library_mark_gc_roots(ChVM *vm);
+
 /* Resolve import-set into env (does not touch globals). */
 int ch_import_set_into_env(ChVM *vm, ChValue set, ChLibEnv *out);
 

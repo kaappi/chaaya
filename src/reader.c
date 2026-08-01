@@ -5,6 +5,7 @@
 #include "chaaya/rational.h"
 
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -248,6 +249,22 @@ static bool try_parse_real_f64(ChGC *gc, const char *text, size_t len, double *o
     return true;
 }
 
+static bool imag_literal_is_inexact(const char *text, size_t split, size_t body) {
+    size_t ilen = body - split;
+    if (ilen == 0) {
+        return false;
+    }
+    if (ilen == 1) {
+        return false;
+    }
+    for (size_t j = split; j < body; j++) {
+        if (text[j] == '.' || text[j] == 'e' || text[j] == 'E') {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool try_parse_complex(ChGC *gc, const char *text, size_t len, ChValue *out) {
     if (len < 2) {
         return false;
@@ -287,13 +304,40 @@ static bool try_parse_complex(ChGC *gc, const char *text, size_t len, ChValue *o
             return false;
         }
     }
-    *out = ch_make_complex(gc, real, imag);
+    if (imag == 0.0 && imag_literal_is_inexact(text, split, body)) {
+        *out = ch_make_complex_raw(gc, real, imag);
+    } else {
+        *out = ch_make_complex(gc, real, imag);
+    }
     return true;
+}
+
+static bool try_parse_special_flonum(const char *text, size_t len, ChValue *out) {
+    if (len == 6 && memcmp(text, "+inf.0", 6) == 0) {
+        *out = ch_make_flonum(INFINITY);
+        return true;
+    }
+    if (len == 6 && memcmp(text, "-inf.0", 6) == 0) {
+        *out = ch_make_flonum(-INFINITY);
+        return true;
+    }
+    if (len == 6 && memcmp(text, "+nan.0", 6) == 0) {
+        *out = ch_make_flonum(NAN);
+        return true;
+    }
+    if (len == 6 && memcmp(text, "-nan.0", 6) == 0) {
+        *out = ch_make_flonum(NAN);
+        return true;
+    }
+    return false;
 }
 
 static bool try_parse_number(ChGC *gc, const char *text, size_t len, ChValue *out) {
     if (len == 0) {
         return false;
+    }
+    if (try_parse_special_flonum(text, len, out)) {
+        return true;
     }
     /* special: + - alone are symbols */
     if ((len == 1 && (text[0] == '+' || text[0] == '-')) ||
@@ -430,6 +474,30 @@ static ChReadStatus read_atom(ChReader *r, ChValue *out) {
         return CH_READ_OK;
     }
     if (len >= 3 && text[0] == '#') {
+        char ec = text[1];
+        if (ec == 'e' || ec == 'E' || ec == 'i' || ec == 'I') {
+            ChValue num;
+            if (try_parse_number(r->gc, text + 2, len - 2, &num)) {
+                if (ec == 'e' || ec == 'E') {
+                    if (ch_is_flonum(num)) {
+                        double dv = ch_to_flonum(num);
+                        double ipart;
+                        if (modf(dv, &ipart) == 0.0 && isfinite(dv)) {
+                            *out = ch_make_integer(r->gc, (int64_t)ipart);
+                            return CH_READ_OK;
+                        }
+                    }
+                    *out = num;
+                } else {
+                    if (ch_is_exact(num)) {
+                        *out = ch_make_flonum(ch_exact_to_f64(num));
+                    } else {
+                        *out = num;
+                    }
+                }
+                return CH_READ_OK;
+            }
+        }
         int base = 0;
         size_t num_start = 2;
         switch (text[1]) {

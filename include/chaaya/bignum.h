@@ -37,6 +37,9 @@ char *ch_bignum_to_string(ChValue v);
 /* Convert exact integer to f64 (approximate for large values). */
 double ch_bignum_to_f64(ChValue v);
 
+/* If d is an exact integer representable without rounding, return that integer. */
+ChValue ch_double_to_exact_if_exact(ChGC *gc, double d);
+
 #ifdef __cplusplus
 }
 #endif

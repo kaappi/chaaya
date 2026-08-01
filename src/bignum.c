@@ -1,5 +1,8 @@
 #include "chaaya/bignum.h"
 
+#include "chaaya/rational.h"
+
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -814,4 +817,38 @@ double ch_bignum_to_f64(ChValue v) {
         scale *= 18446744073709551616.0; /* 2^64 */
     }
     return m.positive ? r : -r;
+}
+
+ChValue ch_double_to_exact_if_exact(ChGC *gc, double d) {
+    if (!isfinite(d)) {
+        return CH_UNDEFINED;
+    }
+    double ipart;
+    if (modf(d, &ipart) != 0.0) {
+        return CH_UNDEFINED;
+    }
+    if (ipart == 0.0) {
+        return ch_make_fixnum(0);
+    }
+    if (ipart >= (double)INT64_MIN && ipart <= (double)INT64_MAX) {
+        ChValue v = ch_make_integer(gc, (int64_t)ipart);
+        if (ch_exact_to_f64(v) == d) {
+            return v;
+        }
+    }
+    int negative = ipart < 0;
+    double ad = negative ? -ipart : ipart;
+    int exp;
+    double mant = frexp(ad, &exp);
+    uint64_t sig = (uint64_t)(mant * (1ULL << 53));
+    int exp_adj = exp - 53;
+    if (exp_adj < 0 || sig == 0) {
+        return CH_UNDEFINED;
+    }
+    ChValue v = ch_gc_make_bignum_from_limbs(gc, &sig, 1, !negative);
+    ChValue two = ch_make_fixnum(2);
+    for (int i = 0; i < exp_adj; i++) {
+        v = ch_bignum_mul(gc, v, two);
+    }
+    return ch_exact_to_f64(v) == d ? v : CH_UNDEFINED;
 }

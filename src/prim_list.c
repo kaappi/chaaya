@@ -390,29 +390,67 @@ static ChValue prim_assoc(ChVM *vm, ChValue *args, int nargs) {
 }
 
 static ChValue prim_map(ChVM *vm, ChValue *args, int nargs) {
-    if (nargs != 2) {
-        snprintf(vm->error, sizeof(vm->error), "map: expected procedure and one list (bootstrap)");
+    if (nargs < 2) {
+        snprintf(vm->error, sizeof(vm->error), "map: expected procedure and at least one list");
         return CH_UNDEFINED;
     }
     ChValue proc = args[0];
-    ChValue lst = args[1];
     if (!ch_is_procedure(proc)) {
         snprintf(vm->error, sizeof(vm->error), "map: not a procedure");
         return CH_UNDEFINED;
+    }
+    int nlists = nargs - 1;
+    if (nlists > CH_APPLY_MAX_ARGS) {
+        snprintf(vm->error, sizeof(vm->error), "map: too many lists");
+        return CH_UNDEFINED;
+    }
+    ChValue lists[CH_APPLY_MAX_ARGS];
+    for (int k = 0; k < nlists; k++) {
+        lists[k] = args[k + 1];
+        if (!ch_is_pair(lists[k]) && !ch_is_nil(lists[k])) {
+            snprintf(vm->error, sizeof(vm->error), "map: not a proper list");
+            return CH_UNDEFINED;
+        }
     }
     ChValue acc = CH_NIL;
     ch_gc_push(&vm->gc, &acc);
     ChValue tmp[64];
     int n = 0;
-    while (ch_is_pair(lst)) {
+    for (;;) {
+        for (int k = 0; k < nlists; k++) {
+            if (!ch_is_pair(lists[k])) {
+                if (!ch_is_nil(lists[k])) {
+                    ch_gc_pop(&vm->gc);
+                    snprintf(vm->error, sizeof(vm->error), "map: not a proper list");
+                    return CH_UNDEFINED;
+                }
+                if (k == 0) {
+                    for (int i = n - 1; i >= 0; i--) {
+                        ChValue item = tmp[i];
+                        ch_gc_push(&vm->gc, &item);
+                        acc = ch_gc_cons(&vm->gc, item, acc);
+                        ch_gc_pop(&vm->gc);
+                    }
+                    ch_gc_pop(&vm->gc);
+                    return acc;
+                }
+                ch_gc_pop(&vm->gc);
+                snprintf(vm->error, sizeof(vm->error), "map: lists differ in length");
+                return CH_UNDEFINED;
+            }
+        }
         if (n >= 64) {
             ch_gc_pop(&vm->gc);
             snprintf(vm->error, sizeof(vm->error), "map: list too long (bootstrap limit)");
             return CH_UNDEFINED;
         }
-        ChValue a = ch_car(lst);
+        ChValue call_args[CH_APPLY_MAX_ARGS];
+        for (int k = 0; k < nlists; k++) {
+            call_args[k] = ch_car(lists[k]);
+            lists[k] = ch_cdr(lists[k]);
+        }
         ChValue r = CH_VOID;
-        ChVMStatus st = ch_vm_apply(vm, proc, &a, 1, &r);
+        ChVMStatus st = ch_vm_apply(vm, proc, call_args, nlists, &r);
         if (st == CH_VM_CONTINUATION_INVOKED) {
             ch_gc_pop(&vm->gc);
             vm->continuation_invoked = true;
@@ -423,21 +461,7 @@ static ChValue prim_map(ChVM *vm, ChValue *args, int nargs) {
             return CH_UNDEFINED;
         }
         tmp[n++] = ch_coerce_single(r);
-        lst = ch_cdr(lst);
     }
-    if (!ch_is_nil(lst)) {
-        ch_gc_pop(&vm->gc);
-        snprintf(vm->error, sizeof(vm->error), "map: not a proper list");
-        return CH_UNDEFINED;
-    }
-    for (int i = n - 1; i >= 0; i--) {
-        ChValue item = tmp[i];
-        ch_gc_push(&vm->gc, &item);
-        acc = ch_gc_cons(&vm->gc, item, acc);
-        ch_gc_pop(&vm->gc);
-    }
-    ch_gc_pop(&vm->gc);
-    return acc;
 }
 
 static ChValue prim_symbol_eq(ChVM *vm, ChValue *args, int nargs) {
@@ -462,20 +486,45 @@ static ChValue prim_symbol_eq(ChVM *vm, ChValue *args, int nargs) {
 }
 
 static ChValue prim_for_each(ChVM *vm, ChValue *args, int nargs) {
-    if (nargs != 2) {
-        snprintf(vm->error, sizeof(vm->error), "for-each: expected procedure and one list (bootstrap)");
+    if (nargs < 2) {
+        snprintf(vm->error, sizeof(vm->error), "for-each: expected procedure and at least one list");
         return CH_UNDEFINED;
     }
     ChValue proc = args[0];
-    ChValue lst = args[1];
     if (!ch_is_procedure(proc)) {
         snprintf(vm->error, sizeof(vm->error), "for-each: not a procedure");
         return CH_UNDEFINED;
     }
-    while (ch_is_pair(lst)) {
-        ChValue a = ch_car(lst);
+    int nlists = nargs - 1;
+    ChValue lists[CH_APPLY_MAX_ARGS];
+    if (nlists > CH_APPLY_MAX_ARGS) {
+        snprintf(vm->error, sizeof(vm->error), "for-each: too many lists");
+        return CH_UNDEFINED;
+    }
+    for (int k = 0; k < nlists; k++) {
+        lists[k] = args[k + 1];
+    }
+    for (;;) {
+        for (int k = 0; k < nlists; k++) {
+            if (!ch_is_pair(lists[k])) {
+                if (!ch_is_nil(lists[k])) {
+                    snprintf(vm->error, sizeof(vm->error), "for-each: not a proper list");
+                    return CH_UNDEFINED;
+                }
+                if (k == 0) {
+                    return CH_VOID;
+                }
+                snprintf(vm->error, sizeof(vm->error), "for-each: lists differ in length");
+                return CH_UNDEFINED;
+            }
+        }
+        ChValue call_args[CH_APPLY_MAX_ARGS];
+        for (int k = 0; k < nlists; k++) {
+            call_args[k] = ch_car(lists[k]);
+            lists[k] = ch_cdr(lists[k]);
+        }
         ChValue r = CH_VOID;
-        ChVMStatus st = ch_vm_apply(vm, proc, &a, 1, &r);
+        ChVMStatus st = ch_vm_apply(vm, proc, call_args, nlists, &r);
         if (st == CH_VM_CONTINUATION_INVOKED) {
             vm->continuation_invoked = true;
             return CH_UNDEFINED;
@@ -483,13 +532,7 @@ static ChValue prim_for_each(ChVM *vm, ChValue *args, int nargs) {
         if (st != CH_VM_OK) {
             return CH_UNDEFINED;
         }
-        lst = ch_cdr(lst);
     }
-    if (!ch_is_nil(lst)) {
-        snprintf(vm->error, sizeof(vm->error), "for-each: not a proper list");
-        return CH_UNDEFINED;
-    }
-    return CH_VOID;
 }
 
 void ch_register_list_primitives(ChVM *vm) {

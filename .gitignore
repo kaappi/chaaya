@@ -64,3 +64,6 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# SRFI-64 / compliance repro logs
+*.log

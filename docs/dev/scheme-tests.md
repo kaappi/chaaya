@@ -11,8 +11,8 @@ an R7RS library MVP; fuller Kaappi/R7RS suites stay deferred.
 | `tests/scheme/*.scm` + `*.expected` | Early smoke (fact, lists, …) | yes |
 | `tests/scheme/bootstrap/` | Kaappi-shaped `check-*` suites (`libraries.scm` uses `import`) | yes |
 | `tests/scheme/probes/` | Adapted Kaappi differential probes (stdout golden) | yes |
-| `tests/scheme/r7rs/` | Canonical R7RS-small suite (vendored) | **partial** (`r7rs_suite` in CTest; §4.1–4.3 green in slices; full run segfaults ~line 354 nested quasiquote) |
-| `tests/scheme/kaappi-deferred/` | Full Kaappi smoke/compliance/probe copies | **partial** (Tier-1 compliance wired in CTest; SRFI-64 import/load fixed; tests still report runtime gaps) |
+| `tests/scheme/r7rs/` | Canonical R7RS-small suite (vendored) | **partial** (`r7rs_suite` in CTest; §4.1–5 and much of §6 green; full run stops in §6.2 numeric tower — `denominator` / flonum gaps) |
+| `tests/scheme/kaappi-deferred/` | Full Kaappi smoke/compliance/probe copies | **partial** (Tier-1 + three Tier-2 compliance files wired in CTest; SRFI-64 macros green) |
 
 ## Bootstrap harness
 
@@ -47,6 +47,6 @@ See `tests/scheme/kaappi-deferred/README.md`. Rough gates:
 5. Rationals + exact `/` — **done** (MVP)
 6. Complexes (inexact rectangular) — **done** (MVP)
 7. `(scheme inexact)` / `(scheme exact)` + math prims — **done** (MVP)
-8. SRFI-64 or `(chibi test)` — **mostly done** (`bootstrap/srfi-smoke.scm` green; portable `(srfi 64)` library export/GC fixed; `(chibi test)` used by `r7rs_suite`; deferred compliance still triaging `test-equal` / guard paths)
+8. SRFI-64 or `(chibi test)` — **done** for wired deferred suites (`bind_lib_ref` skips transformers; per-env hoist globals). `(chibi test)` drives `r7rs_suite`.
 9. Re-run Kaappi’s `tests/scheme/run-all.sh` corpus against `chaaya` — **in progress**
-   (Phase 9: portable SRFI tree under `lib/srfi/`; `bootstrap/srfi-smoke.scm` imports SRFI 1/13/14/69; Tier-1 kaappi-deferred compliance files wired in CTest)
+   (Tier-1: `sqrt-exact`, `lists`, `vectors` in CTest; Tier-2: `macro-export-scope`, `chars`, `bytevectors`; `eval`/`lazy` still blocked)

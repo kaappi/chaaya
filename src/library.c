@@ -585,6 +585,25 @@ size_t ch_library_push_gc_roots(ChVM *vm) {
     return n;
 }
 
+void ch_library_mark_gc_roots(ChVM *vm) {
+    if (!vm->libraries) {
+        return;
+    }
+    for (size_t i = 0; i < vm->libraries->count; i++) {
+        ChLibrary *lib = vm->libraries->libs[i];
+        for (size_t j = 0; j < lib->export_count; j++) {
+            ch_gc_mark_value(lib->export_values[j]);
+        }
+        if (lib->runtime_env) {
+            for (size_t j = 0; j < lib->runtime_env->count; j++) {
+                if (lib->runtime_env->bindings[j].defined) {
+                    ch_gc_mark_value(lib->runtime_env->bindings[j].value);
+                }
+            }
+        }
+    }
+}
+
 int ch_eval_toplevel_form(ChVM *vm, ChValue expr) {
     return eval_toplevel_form(vm, expr);
 }
@@ -603,13 +622,14 @@ static int load_library_file(ChVM *vm, const char *path) {
     ch_reader_init(&reader, &vm->gc, src, len);
     int rc = 0;
     for (;;) {
+        size_t base = vm->gc.root_count;
         ChValue expr = CH_NIL;
         ch_gc_push(&vm->gc, &expr);
         for (size_t i = 0; i < vm->global_count; i++) {
             ch_gc_push(&vm->gc, &vm->globals[i].value);
         }
         ChReadStatus rs = ch_read_datum(&reader, &expr);
-        ch_gc_pop_n(&vm->gc, vm->global_count);
+        ch_gc_pop_to(&vm->gc, base + 1);
         if (rs == CH_READ_EOF) {
             ch_gc_pop(&vm->gc);
             break;

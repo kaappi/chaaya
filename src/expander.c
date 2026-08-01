@@ -405,29 +405,18 @@ static int lib_env_binding(ChVM *vm, ChSymbol *sym, ChValue *out) {
     if (!vm->active_lib_env) {
         return 0;
     }
+    for (size_t i = 0; i < vm->active_lib_env->count; i++) {
+        if (vm->active_lib_env->bindings[i].defined &&
+            vm->active_lib_env->bindings[i].name == sym) {
+            *out = vm->active_lib_env->bindings[i].value;
+            return 1;
+        }
+    }
     const char *base = ch_symbol_basename(sym);
     for (size_t i = 0; i < vm->active_lib_env->count; i++) {
         if (vm->active_lib_env->bindings[i].defined &&
             strcmp(ch_symbol_basename(vm->active_lib_env->bindings[i].name), base) == 0) {
             *out = vm->active_lib_env->bindings[i].value;
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static int is_bound_in_env(ChVM *vm, ChSymbol *sym) {
-    const char *base = ch_symbol_basename(sym);
-    if (vm->active_lib_env) {
-        for (size_t i = 0; i < vm->active_lib_env->count; i++) {
-            if (vm->active_lib_env->bindings[i].defined &&
-                strcmp(ch_symbol_basename(vm->active_lib_env->bindings[i].name), base) == 0) {
-                return 1;
-            }
-        }
-    }
-    for (size_t i = 0; i < vm->global_count; i++) {
-        if (vm->globals[i].defined && strcmp(ch_symbol_basename(vm->globals[i].name), base) == 0) {
             return 1;
         }
     }
@@ -458,7 +447,10 @@ static ChValue bind_lib_ref(ChExpandCtx *ctx, ChSymbol *sym) {
     if (!lib_env_binding(ctx->vm, sym, &val)) {
         return ch_make_pointer(&sym->header);
     }
-    ChSymbol *ren = hyg_rename(ctx, sym);
+    char buf[256];
+    unsigned env_tag = (unsigned)(uintptr_t)ctx->vm->active_lib_env;
+    snprintf(buf, sizeof(buf), "__hyg_lib_%u_%s", env_tag, ch_symbol_basename(sym));
+    ChSymbol *ren = ch_as_symbol(ch_gc_intern_symbol_cstr(&ctx->vm->gc, buf));
     int g = ch_vm_intern_global(ctx->vm, ren);
     ch_vm_define_global(ctx->vm, g, val);
     return ch_make_pointer(&ren->header);
@@ -501,25 +493,29 @@ static ChValue nth_of(ChValue lst, int n) {
 }
 
 static ChValue deep_copy_instantiate(ChExpandCtx *ctx, ChValue v) {
-    if (ch_is_pair(v)) {
-        ChValue car = deep_copy_instantiate(ctx, ch_car(v));
+    ChValue v_root = v;
+    ch_gc_push(&ctx->vm->gc, &v_root);
+    if (ch_is_pair(v_root)) {
+        ChValue car = deep_copy_instantiate(ctx, ch_car(v_root));
         ch_gc_push(&ctx->vm->gc, &car);
-        ChValue cdr = deep_copy_instantiate(ctx, ch_cdr(v));
+        ChValue cdr = deep_copy_instantiate(ctx, ch_cdr(v_root));
         ch_gc_push(&ctx->vm->gc, &cdr);
         ChValue out = ch_gc_cons(&ctx->vm->gc, car, cdr);
-        ch_gc_pop_n(&ctx->vm->gc, 2);
+        ch_gc_pop_n(&ctx->vm->gc, 3);
         return out;
     }
-    if (ch_is_vector(v)) {
-        ChVector *src = ch_as_vector(v);
+    if (ch_is_vector(v_root)) {
+        ChVector *src = ch_as_vector(v_root);
         ChValue out = ch_gc_make_vector(&ctx->vm->gc, src->len, CH_UNDEFINED);
         ChVector *dst = ch_as_vector(out);
         for (size_t i = 0; i < src->len; i++) {
             dst->items[i] = deep_copy_instantiate(ctx, src->items[i]);
         }
+        ch_gc_pop(&ctx->vm->gc);
         return out;
     }
-    return v;
+    ch_gc_pop(&ctx->vm->gc);
+    return v_root;
 }
 
 static ChValue instantiate_with_index(ChExpandCtx *ctx, ChValue tmpl, int index) {
@@ -538,11 +534,11 @@ static ChValue instantiate_with_index(ChExpandCtx *ctx, ChValue tmpl, int index)
         {
             ChValue lib_val = CH_UNDEFINED;
             if (lib_env_binding(ctx->vm, ch_as_symbol(tmpl), &lib_val)) {
-                return bind_lib_ref(ctx, ch_as_symbol(tmpl));
+                if (!ch_is_transformer(lib_val)) {
+                    return bind_lib_ref(ctx, ch_as_symbol(tmpl));
+                }
+                return tmpl;
             }
-        }
-        if (is_bound_in_env(ctx->vm, ch_as_symbol(tmpl))) {
-            return tmpl;
         }
         if (!ctx->escape && is_ellipsis_id(ctx, ch_as_symbol(tmpl))) {
             return tmpl;
@@ -725,11 +721,11 @@ static ChValue instantiate(ChExpandCtx *ctx, ChValue tmpl) {
         {
             ChValue lib_val = CH_UNDEFINED;
             if (lib_env_binding(ctx->vm, s, &lib_val)) {
-                return bind_lib_ref(ctx, s);
+                if (!ch_is_transformer(lib_val)) {
+                    return bind_lib_ref(ctx, s);
+                }
+                return tmpl;
             }
-        }
-        if (is_bound_in_env(ctx->vm, s)) {
-            return tmpl;
         }
         if (!ctx->escape && is_ellipsis_id(ctx, s)) {
             return tmpl;
@@ -870,7 +866,11 @@ ChExpandStatus ch_expand_macro(ChVM *vm, ChTransformer *tr, ChValue use, ChValue
             continue;
         }
         (void)reverse_all_ellipsis;
+        size_t roots_before = vm->gc.root_count;
         *out = instantiate(&ctx, tr->templates[i]);
+        if (vm->gc.root_count > roots_before) {
+            ch_gc_pop_n(&vm->gc, vm->gc.root_count - roots_before);
+        }
         ch_gc_push(&vm->gc, out);
         vm->active_lib_env = saved_env;
         ch_gc_pop_n(&vm->gc, 2);

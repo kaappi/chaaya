@@ -37,6 +37,8 @@ typedef struct ChCompUpvalue {
 typedef struct ChFuncCompiler {
     struct ChFuncCompiler *enclosing;
     ChFunction *fn;
+    ChValue fn_root;
+    size_t compiling_fn_slot;
     ChLocal locals[CH_MAX_LOCALS];
     int local_count;
     int scope_depth;
@@ -68,11 +70,19 @@ static ChCompileStatus fail(ChCompiler *c, const char *msg) {
     return CH_COMPILE_ERROR;
 }
 
-static void fc_init(ChFuncCompiler *fc, ChFuncCompiler *enclosing, ChFunction *fn, bool toplevel) {
+static void fc_init(ChCompiler *c, ChFuncCompiler *fc, ChFuncCompiler *enclosing, ChFunction *fn,
+                    bool toplevel) {
     memset(fc, 0, sizeof(*fc));
     fc->enclosing = enclosing;
     fc->fn = fn;
     fc->is_toplevel = toplevel;
+    if (c->vm->gc.compiling_fn_depth >= sizeof(c->vm->gc.compiling_fns) / sizeof(c->vm->gc.compiling_fns[0])) {
+        abort();
+    }
+    fc->compiling_fn_slot = c->vm->gc.compiling_fn_depth;
+    c->vm->gc.compiling_fns[c->vm->gc.compiling_fn_depth++] = fn;
+    fc->fn_root = ch_make_pointer(&fn->header);
+    ch_gc_push(&c->vm->gc, &fc->fn_root);
     fc->code_cap = CH_CODE_INIT;
     fc->code = (uint8_t *)malloc(fc->code_cap);
     if (!fc->code) {
@@ -95,6 +105,19 @@ static void fc_free_buf(ChCompiler *c, ChFuncCompiler *fc) {
     pop_const_roots(c, fc);
     free(fc->code);
     fc->code = NULL;
+}
+
+static void fc_end_compile(ChCompiler *c, ChFuncCompiler *fc) {
+    pop_const_roots(c, fc);
+    ch_gc_pop(&c->vm->gc);
+    if (c->vm->gc.compiling_fn_depth > fc->compiling_fn_slot) {
+        c->vm->gc.compiling_fn_depth = fc->compiling_fn_slot;
+    }
+}
+
+static void fc_discard(ChCompiler *c, ChFuncCompiler *fc) {
+    fc_end_compile(c, fc);
+    fc_free_buf(c, fc);
 }
 
 static void emit_byte(ChFuncCompiler *fc, uint8_t b) {
@@ -206,6 +229,12 @@ static int add_constant(ChCompiler *c, ChFuncCompiler *fc, ChValue v) {
 static int resolve_local(ChFuncCompiler *fc, ChSymbol *name) {
     for (int i = fc->local_count - 1; i >= 0; i--) {
         if (fc->locals[i].name == name) {
+            return i;
+        }
+    }
+    const char *base = ch_symbol_basename(name);
+    for (int i = fc->local_count - 1; i >= 0; i--) {
+        if (strcmp(ch_symbol_basename(fc->locals[i].name), base) == 0) {
             return i;
         }
     }
@@ -695,10 +724,8 @@ static ChCompileStatus compile_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue
 
     ChValue fn_v = ch_gc_make_function(&c->vm->gc);
     ChFunction *fn = ch_as_function(fn_v);
-    ch_gc_push(&c->vm->gc, &fn_v);
-
     ChFuncCompiler child;
-    fc_init(&child, fc, fn, false);
+    fc_init(c, &child, fc, fn, false);
     begin_scope(&child);
 
     /* bind parameters as locals 0.. */
@@ -706,13 +733,11 @@ static ChCompileStatus compile_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue
     ChValue p = params;
     while (ch_is_pair(p)) {
         if (!ch_is_symbol(ch_car(p))) {
-            fc_free_buf(c, &child);
-            ch_gc_pop(&c->vm->gc);
+            fc_discard(c, &child);
             return fail(c, "lambda: parameter must be a symbol");
         }
         if (add_local(c, &child, ch_as_symbol(ch_car(p))) < 0) {
-            fc_free_buf(c, &child);
-            ch_gc_pop(&c->vm->gc);
+            fc_discard(c, &child);
             return CH_COMPILE_ERROR;
         }
         p = ch_cdr(p);
@@ -720,13 +745,11 @@ static ChCompileStatus compile_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue
     if (ch_is_symbol(p)) {
         variadic = true;
         if (add_local(c, &child, ch_as_symbol(p)) < 0) {
-            fc_free_buf(c, &child);
-            ch_gc_pop(&c->vm->gc);
+            fc_discard(c, &child);
             return CH_COMPILE_ERROR;
         }
     } else if (!ch_is_nil(p)) {
-        fc_free_buf(c, &child);
-        ch_gc_pop(&c->vm->gc);
+        fc_discard(c, &child);
         return fail(c, "lambda: bad parameter list");
     }
 
@@ -738,8 +761,7 @@ static ChCompileStatus compile_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue
     ensure_temps_from(&child);
     uint8_t body_dst = alloc_reg(&child);
     if (compile_begin(c, &child, body, body_dst, true) != CH_COMPILE_OK) {
-        fc_free_buf(c, &child);
-        ch_gc_pop(&c->vm->gc);
+        fc_discard(c, &child);
         return CH_COMPILE_ERROR;
     }
     emit_byte(&child, CH_OP_RETURN);
@@ -747,13 +769,15 @@ static ChCompileStatus compile_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue
     end_scope(&child);
 
     if (finish_function(c, &child) != CH_COMPILE_OK) {
-        fc_free_buf(c, &child);
-        ch_gc_pop(&c->vm->gc);
+        fc_discard(c, &child);
         return CH_COMPILE_ERROR;
     }
 
-    int idx = add_constant(c, fc, fn_v);
+    ChValue fn_cv = ch_make_pointer(&child.fn->header);
+    ch_gc_push(&c->vm->gc, &fn_cv);
+    int idx = add_constant(c, fc, fn_cv);
     ch_gc_pop(&c->vm->gc);
+    fc_end_compile(c, &child);
     if (idx < 0) {
         return CH_COMPILE_ERROR;
     }
@@ -1301,7 +1325,6 @@ static ChCompileStatus compile_let_star_values(ChCompiler *c, ChFuncCompiler *fc
 }
 
 static ChCompileStatus finish_function(ChCompiler *c, ChFuncCompiler *fc) {
-    (void)c;
     ChFunction *fn = fc->fn;
     fn->code = fc->code;
     fn->code_len = fc->code_len;
@@ -1327,7 +1350,8 @@ static ChCompileStatus finish_function(ChCompiler *c, ChFuncCompiler *fc) {
             fn->uv_index[i] = fc->upvalues[i].index;
         }
     }
-    pop_const_roots(c, fc);
+    ch_gc_promote_to_old(&c->vm->gc, &fn->header);
+    /* const_roots are popped in fc_end_compile once this function is wired into its parent. */
     return CH_COMPILE_OK;
 }
 
@@ -1812,10 +1836,9 @@ static ChCompileStatus compile_cond(ChCompiler *c, ChFuncCompiler *fc, ChValue a
         return compile_expr(c, fc, form, dst, tail);
     }
     /* (=> recipient) — only when => is not shadowed by a local binding */
-    ChValue arrow_v = ch_gc_intern_symbol_cstr(&c->vm->gc, "=>");
-    ChSymbol *arrow = ch_as_symbol(arrow_v);
-    if (ch_is_pair(exprs) && is_symbol_named(ch_car(exprs), "=>") && resolve_local(fc, arrow) < 0 &&
-        resolve_upvalue(fc, arrow) < 0) {
+    if (ch_is_pair(exprs) && is_symbol_named(ch_car(exprs), "=>")) {
+        ChSymbol *arrow = ch_as_symbol(ch_car(exprs));
+        if (resolve_local(fc, arrow) < 0 && resolve_upvalue(fc, arrow) < 0) {
         if (!ch_is_pair(ch_cdr(exprs)) || !ch_is_nil(ch_cdr(ch_cdr(exprs)))) {
             return fail(c, "cond: bad => clause");
         }
@@ -1833,6 +1856,7 @@ static ChCompileStatus compile_cond(ChCompiler *c, ChFuncCompiler *fc, ChValue a
         ChValue form =
             ch_gc_cons(&c->vm->gc, let_sym, ch_gc_cons(&c->vm->gc, binds, ch_gc_cons(&c->vm->gc, if_form, CH_NIL)));
         return compile_expr(c, fc, form, dst, tail);
+        }
     }
     ChValue if_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "if");
     ChValue begin_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "begin");
@@ -2394,35 +2418,43 @@ static ChCompileStatus compile_parameterize(ChCompiler *c, ChFuncCompiler *fc, C
 static ChValue qq_expand(ChCompiler *c, ChValue x, int level);
 
 static ChValue qq_expand_list(ChCompiler *c, ChValue xs, int level) {
-    if (ch_is_nil(xs)) {
-        return ch_gc_cons(&c->vm->gc, ch_gc_intern_symbol_cstr(&c->vm->gc, "quote"),
-                          ch_gc_cons(&c->vm->gc, CH_NIL, CH_NIL));
+    ChValue xs_root = xs;
+    ch_gc_push(&c->vm->gc, &xs_root);
+    if (ch_is_nil(xs_root)) {
+        ChValue out = ch_gc_cons(&c->vm->gc, ch_gc_intern_symbol_cstr(&c->vm->gc, "quote"),
+                                 ch_gc_cons(&c->vm->gc, CH_NIL, CH_NIL));
+        ch_gc_pop(&c->vm->gc);
+        return out;
     }
-    if (!ch_is_pair(xs)) {
-        return qq_expand(c, xs, level);
+    if (!ch_is_pair(xs_root)) {
+        ChValue out = qq_expand(c, xs_root, level);
+        ch_gc_pop(&c->vm->gc);
+        return out;
     }
-    ChValue head = ch_car(xs);
+    ChValue head = ch_car(xs_root);
+    ch_gc_push(&c->vm->gc, &head);
     if (level == 0 && ch_is_pair(head) && is_symbol_named(ch_car(head), "unquote-splicing")) {
         ChValue uargs = ch_cdr(head);
         if (!ch_is_pair(uargs)) {
-            return CH_FALSE; /* signal error via false — caller checks */
+            ch_gc_pop_n(&c->vm->gc, 2);
+            return CH_FALSE;
         }
-        ChValue rest = qq_expand_list(c, ch_cdr(xs), level);
+        ChValue rest = qq_expand_list(c, ch_cdr(xs_root), level);
         ch_gc_push(&c->vm->gc, &rest);
         ChValue app = ch_gc_cons(
             &c->vm->gc, ch_gc_intern_symbol_cstr(&c->vm->gc, "append"),
             ch_gc_cons(&c->vm->gc, ch_car(uargs), ch_gc_cons(&c->vm->gc, rest, CH_NIL)));
-        ch_gc_pop(&c->vm->gc);
+        ch_gc_pop_n(&c->vm->gc, 3);
         return app;
     }
     ChValue car_e = qq_expand(c, head, level);
     ch_gc_push(&c->vm->gc, &car_e);
-    ChValue cdr_e = qq_expand_list(c, ch_cdr(xs), level);
+    ChValue cdr_e = qq_expand_list(c, ch_cdr(xs_root), level);
     ch_gc_push(&c->vm->gc, &cdr_e);
     ChValue out = ch_gc_cons(
         &c->vm->gc, ch_gc_intern_symbol_cstr(&c->vm->gc, "cons"),
         ch_gc_cons(&c->vm->gc, car_e, ch_gc_cons(&c->vm->gc, cdr_e, CH_NIL)));
-    ch_gc_pop_n(&c->vm->gc, 2);
+    ch_gc_pop_n(&c->vm->gc, 4);
     return out;
 }
 
@@ -2471,6 +2503,27 @@ static ChValue qq_expand(ChCompiler *c, ChValue x, int level) {
             ch_gc_pop(&c->vm->gc);
             return q;
         }
+        if (is_symbol_named(ch_car(x), "unquote-splicing")) {
+            ChValue args = ch_cdr(x);
+            if (!ch_is_pair(args)) {
+                return CH_FALSE;
+            }
+            if (level == 0) {
+                return CH_FALSE;
+            }
+            ChValue inner = qq_expand(c, ch_car(args), level - 1);
+            ch_gc_push(&c->vm->gc, &inner);
+            ChValue q = ch_gc_cons(
+                &c->vm->gc, ch_gc_intern_symbol_cstr(&c->vm->gc, "list"),
+                ch_gc_cons(&c->vm->gc,
+                           ch_gc_cons(&c->vm->gc, ch_gc_intern_symbol_cstr(&c->vm->gc, "quote"),
+                                      ch_gc_cons(&c->vm->gc,
+                                                 ch_gc_intern_symbol_cstr(&c->vm->gc, "unquote-splicing"),
+                                                 CH_NIL)),
+                           ch_gc_cons(&c->vm->gc, inner, CH_NIL)));
+            ch_gc_pop(&c->vm->gc);
+            return q;
+        }
         if (is_symbol_named(ch_car(x), "quasiquote")) {
             ChValue args = ch_cdr(x);
             if (!ch_is_pair(args)) {
@@ -2501,11 +2554,17 @@ static ChCompileStatus compile_quasiquote_real(ChCompiler *c, ChFuncCompiler *fc
     if (!ch_is_pair(args) || !ch_is_nil(ch_cdr(args))) {
         return fail(c, "quasiquote: bad syntax");
     }
-    ChValue expanded = qq_expand(c, ch_car(args), 0);
+    ChValue tmpl = ch_car(args);
+    ch_gc_push(&c->vm->gc, &tmpl);
+    ChValue expanded = qq_expand(c, tmpl, 0);
+    ch_gc_pop(&c->vm->gc);
     if (expanded == CH_FALSE) {
         return fail(c, "quasiquote: bad syntax");
     }
-    return compile_expr(c, fc, expanded, dst, tail);
+    ch_gc_push(&c->vm->gc, &expanded);
+    ChCompileStatus st = compile_expr(c, fc, expanded, dst, tail);
+    ch_gc_pop(&c->vm->gc);
+    return st;
 }
 
 static ChCompileStatus compile_expr_impl(ChCompiler *c, ChFuncCompiler *fc, ChValue expr,
@@ -2696,6 +2755,7 @@ static ChCompileStatus compile_expr_impl(ChCompiler *c, ChFuncCompiler *fc, ChVa
 
 ChCompileStatus ch_compile_toplevel(ChCompiler *c, ChValue expr, ChFunction **out_fn) {
     c->error[0] = '\0';
+    size_t compile_base = c->vm->gc.root_count;
 
     /* Root globals/macros before any allocation — first GC must see them. */
     for (size_t i = 0; i < c->vm->global_count; i++) {
@@ -2704,20 +2764,16 @@ ChCompileStatus ch_compile_toplevel(ChCompiler *c, ChValue expr, ChFunction **ou
     for (size_t i = 0; i < c->vm->macro_count; i++) {
         ch_gc_push(&c->vm->gc, &c->vm->macros[i].transformer);
     }
-    size_t sticky_roots = c->vm->global_count + c->vm->macro_count;
 
-    ChValue fn_v = ch_gc_make_function(&c->vm->gc);
-    ch_gc_push(&c->vm->gc, &fn_v);
     ChValue expr_r = expr;
     ch_gc_push(&c->vm->gc, &expr_r);
-
     {
         ChValue expanded = CH_NIL;
         ch_gc_push(&c->vm->gc, &expanded);
         char err[256];
         if (ch_expand_toplevel(c->vm, expr_r, &expanded, err, sizeof(err)) != CH_EXPAND_OK) {
             snprintf(c->error, sizeof(c->error), "%s", err);
-            ch_gc_pop_n(&c->vm->gc, 3 + sticky_roots);
+            ch_gc_pop_to(&c->vm->gc, compile_base);
             return CH_COMPILE_ERROR;
         }
         expr_r = expanded;
@@ -2725,33 +2781,35 @@ ChCompileStatus ch_compile_toplevel(ChCompiler *c, ChValue expr, ChFunction **ou
     }
 
     /* Expansion / define-syntax may grow globals or macros — re-root the full set. */
-    ch_gc_pop_n(&c->vm->gc, sticky_roots);
+    ch_gc_pop_to(&c->vm->gc, compile_base);
     for (size_t i = 0; i < c->vm->global_count; i++) {
         ch_gc_push(&c->vm->gc, &c->vm->globals[i].value);
     }
     for (size_t i = 0; i < c->vm->macro_count; i++) {
         ch_gc_push(&c->vm->gc, &c->vm->macros[i].transformer);
     }
-    sticky_roots = c->vm->global_count + c->vm->macro_count;
+    ch_gc_push(&c->vm->gc, &expr_r);
 
+    ChValue fn_v = ch_gc_make_function(&c->vm->gc);
+    ch_gc_push(&c->vm->gc, &fn_v);
     ChFunction *fn = ch_as_function(fn_v);
     ChFuncCompiler fc;
-    fc_init(&fc, NULL, fn, true);
+    fc_init(c, &fc, NULL, fn, true);
     fn->arity = 0;
     fn->variadic = 0;
 
     uint8_t dst = alloc_reg(&fc);
     ChIrNode *ir_root = NULL;
     if (ch_ir_lower(c, expr_r, &ir_root) != CH_COMPILE_OK) {
-        fc_free_buf(c, &fc);
-        ch_gc_pop_n(&c->vm->gc, 2 + sticky_roots);
+        fc_discard(c, &fc);
+        ch_gc_pop_to(&c->vm->gc, compile_base);
         return CH_COMPILE_ERROR;
     }
     ch_ir_analyze(ir_root);
     if (ch_ir_optimize(c, &ir_root) != CH_COMPILE_OK) {
         ch_ir_free(ir_root);
-        fc_free_buf(c, &fc);
-        ch_gc_pop_n(&c->vm->gc, 2 + sticky_roots);
+        fc_discard(c, &fc);
+        ch_gc_pop_to(&c->vm->gc, compile_base);
         return CH_COMPILE_ERROR;
     }
     ChIrLegacyEmitCtx ir_emit_ctx = {
@@ -2760,18 +2818,19 @@ ChCompileStatus ch_compile_toplevel(ChCompiler *c, ChValue expr, ChFunction **ou
     };
     if (ch_ir_emit(c, ir_root, emit_ir_with_legacy, &ir_emit_ctx, dst, false) != CH_COMPILE_OK) {
         ch_ir_free(ir_root);
-        fc_free_buf(c, &fc);
-        ch_gc_pop_n(&c->vm->gc, 2 + sticky_roots);
+        fc_discard(c, &fc);
+        ch_gc_pop_to(&c->vm->gc, compile_base);
         return CH_COMPILE_ERROR;
     }
     ch_ir_free(ir_root);
     emit_byte(&fc, CH_OP_HALT);
     if (finish_function(c, &fc) != CH_COMPILE_OK) {
-        fc_free_buf(c, &fc);
-        ch_gc_pop_n(&c->vm->gc, 2 + sticky_roots);
+        fc_discard(c, &fc);
+        ch_gc_pop_to(&c->vm->gc, compile_base);
         return CH_COMPILE_ERROR;
     }
+    fc_end_compile(c, &fc);
     *out_fn = fn;
-    ch_gc_pop_n(&c->vm->gc, 2 + sticky_roots);
+    ch_gc_pop_to(&c->vm->gc, compile_base);
     return CH_COMPILE_OK;
 }

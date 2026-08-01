@@ -150,9 +150,11 @@ int ch_eval_datum(ChVM *vm, ChValue expr, ChValue env_or_void, ChValue *out) {
             snprintf(vm->error, sizeof(vm->error), "%s", ch_compiler_error(&compiler));
             rc = -1;
         } else {
+            ChValue fn_keep = ch_make_pointer(&fn->header);
+            ch_gc_push(&vm->gc, &fn_keep);
             ch_gc_push(&vm->gc, &result);
             ChVMStatus st = ch_vm_eval_function(vm, fn, &result);
-            ch_gc_pop(&vm->gc);
+            ch_gc_pop_n(&vm->gc, 2);
             if (st != CH_VM_OK || (vm->error[0] != '\0' && result == CH_UNDEFINED)) {
                 rc = -1;
             }
@@ -176,6 +178,7 @@ int ch_eval_source(ChVM *vm, const char *source, size_t len, int print_results) 
     ch_reader_init(&reader, &vm->gc, source, len);
 
     for (;;) {
+        size_t base = vm->gc.root_count;
         ChValue expr = CH_NIL;
         ch_gc_push(&vm->gc, &expr);
         for (size_t i = 0; i < vm->global_count; i++) {
@@ -184,9 +187,9 @@ int ch_eval_source(ChVM *vm, const char *source, size_t len, int print_results) 
         for (size_t i = 0; i < vm->macro_count; i++) {
             ch_gc_push(&vm->gc, &vm->macros[i].transformer);
         }
-        size_t lib_roots = ch_library_push_gc_roots(vm);
+        (void)ch_library_push_gc_roots(vm);
         ChReadStatus rs = ch_read_datum(&reader, &expr);
-        ch_gc_pop_n(&vm->gc, vm->global_count + vm->macro_count + lib_roots);
+        ch_gc_pop_to(&vm->gc, base + 1);
         if (rs == CH_READ_EOF) {
             ch_gc_pop(&vm->gc);
             break;
@@ -235,6 +238,7 @@ int ch_eval_file(ChVM *vm, const char *path, ChValue env_or_void, ChValue *last_
 
     int rc = 0;
     for (;;) {
+        size_t base = vm->gc.root_count;
         ChValue expr = CH_NIL;
         ch_gc_push(&vm->gc, &expr);
         for (size_t i = 0; i < vm->global_count; i++) {
@@ -243,9 +247,9 @@ int ch_eval_file(ChVM *vm, const char *path, ChValue env_or_void, ChValue *last_
         for (size_t i = 0; i < vm->macro_count; i++) {
             ch_gc_push(&vm->gc, &vm->macros[i].transformer);
         }
-        size_t lib_roots = ch_library_push_gc_roots(vm);
+        (void)ch_library_push_gc_roots(vm);
         ChReadStatus rs = ch_read_datum(&reader, &expr);
-        ch_gc_pop_n(&vm->gc, vm->global_count + vm->macro_count + lib_roots);
+        ch_gc_pop_to(&vm->gc, base + 1);
         if (rs == CH_READ_EOF) {
             ch_gc_pop(&vm->gc);
             break;

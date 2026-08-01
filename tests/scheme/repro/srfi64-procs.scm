@@ -1,0 +1,15 @@
+(import (scheme base) (srfi 64))
+
+(display "get=")
+(display (procedure? test-runner-get))
+(newline)
+(display "pass!=")
+(display (procedure? test-runner-pass-count!))
+(newline)
+(display "equal?=")
+(display (procedure? equal?))
+(newline)
+
+(let ((r (test-runner-get)))
+  (display "runner ok")
+  (newline))

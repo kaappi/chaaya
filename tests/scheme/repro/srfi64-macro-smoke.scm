@@ -1,0 +1,6 @@
+(import (scheme base) (srfi 64))
+(test-begin "macro-smoke")
+(test-equal "two" 2 2)
+(test-eqv "symbol" 'a 'a)
+(test-assert "true" #t)
+(test-end "macro-smoke")

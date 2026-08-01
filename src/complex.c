@@ -17,6 +17,13 @@ ChValue ch_make_complex(ChGC *gc, double real, double imag) {
     return ch_make_pointer(&c->header);
 }
 
+ChValue ch_make_complex_raw(ChGC *gc, double real, double imag) {
+    ChComplex *c = (ChComplex *)ch_gc_alloc(gc, sizeof(ChComplex), CH_TAG_COMPLEX);
+    c->real = real;
+    c->imag = imag;
+    return ch_make_pointer(&c->header);
+}
+
 int ch_complex_parts(ChValue v, double *real_out, double *imag_out) {
     if (ch_is_complex_obj(v)) {
         ChComplex *c = ch_as_complex(v);

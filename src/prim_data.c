@@ -1327,15 +1327,23 @@ static ChValue prim_make_vector(ChVM *vm, ChValue *args, int nargs) {
 }
 
 static ChValue prim_vector_to_list(ChVM *vm, ChValue *args, int nargs) {
-    (void)nargs;
+    if (nargs < 1 || nargs > 3) {
+        snprintf(vm->error, sizeof(vm->error), "vector->list: expected 1 to 3 arguments");
+        return CH_UNDEFINED;
+    }
     if (!ch_is_vector(args[0])) {
         snprintf(vm->error, sizeof(vm->error), "vector->list: not a vector");
         return CH_UNDEFINED;
     }
     ChVector *v = ch_as_vector(args[0]);
+    size_t start = 0;
+    size_t end = v->len;
+    if (parse_optional_range(vm, args, nargs, 1, v->len, "vector->list", &start, &end) != 0) {
+        return CH_UNDEFINED;
+    }
     ChValue list = CH_NIL;
     ch_gc_push(&vm->gc, &list);
-    for (size_t i = v->len; i > 0; i--) {
+    for (size_t i = end; i > start; i--) {
         ChValue item = v->items[i - 1];
         ch_gc_push(&vm->gc, &item);
         list = ch_gc_cons(&vm->gc, item, list);
@@ -1491,7 +1499,7 @@ void ch_register_data_primitives(ChVM *vm) {
     define_prim(vm, "vector-map", prim_vector_map, -1, 2);
     define_prim(vm, "vector-for-each", prim_vector_for_each, -1, 2);
     define_prim(vm, "make-vector", prim_make_vector, -1, 1);
-    define_prim(vm, "vector->list", prim_vector_to_list, 1, 1);
+    define_prim(vm, "vector->list", prim_vector_to_list, -1, 1);
     define_prim(vm, "list->vector", prim_list_to_vector, 1, 1);
     define_prim(vm, "string->list", prim_string_to_list, 1, 1);
     define_prim(vm, "list->string", prim_list_to_string, 1, 1);

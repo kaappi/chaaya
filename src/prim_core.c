@@ -140,8 +140,10 @@ static ChValue prim_rational_p(ChVM *vm, ChValue *args, int nargs) {
     if (ch_is_complex_obj(args[0])) {
         return CH_FALSE;
     }
-    /* R7RS: integers and flonums are rational */
-    return (ch_is_exact(args[0]) || ch_is_flonum(args[0])) ? CH_TRUE : CH_FALSE;
+    if (ch_is_flonum(args[0])) {
+        return isfinite(ch_to_flonum(args[0])) ? CH_TRUE : CH_FALSE;
+    }
+    return ch_is_exact(args[0]) ? CH_TRUE : CH_FALSE;
 }
 
 static ChValue prim_numerator(ChVM *vm, ChValue *args, int nargs) {
@@ -224,6 +226,34 @@ static int any_complex(ChValue *args, int nargs) {
         }
     }
     return 0;
+}
+
+static int any_inexact(ChValue *args, int nargs) {
+    for (int i = 0; i < nargs; i++) {
+        if (ch_is_flonum(args[i]) || ch_is_complex_obj(args[i])) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static bool mixed_num_equal(ChGC *gc, ChValue a, ChValue b) {
+    if (ch_is_flonum(a) && ch_is_exact(b)) {
+        ChValue ea = ch_double_to_exact_if_exact(gc, ch_to_flonum(a));
+        if (ea != CH_UNDEFINED) {
+            return ch_exact_compare(gc, ea, b) == 0;
+        }
+        return false;
+    }
+    if (ch_is_flonum(b) && ch_is_exact(a)) {
+        ChValue eb = ch_double_to_exact_if_exact(gc, ch_to_flonum(b));
+        if (eb != CH_UNDEFINED) {
+            return ch_exact_compare(gc, a, eb) == 0;
+        }
+        return false;
+    }
+    double da, db;
+    return as_number(a, &da) && as_number(b, &db) && da == db;
 }
 
 typedef ChValue (*ChComplexBinOp)(ChGC *gc, ChValue a, ChValue b);
@@ -465,6 +495,14 @@ static ChValue prim_num_eq(ChVM *vm, ChValue *args, int nargs) {
         }
         return CH_TRUE;
     }
+    if (any_inexact(args, nargs)) {
+        for (int i = 1; i < nargs; i++) {
+            if (!mixed_num_equal(&vm->gc, args[0], args[i])) {
+                return CH_FALSE;
+            }
+        }
+        return CH_TRUE;
+    }
     double first;
     if (!as_number(args[0], &first)) {
         snprintf(vm->error, sizeof(vm->error), "=: not a number");
@@ -606,6 +644,18 @@ static ChValue prim_quotient(ChVM *vm, ChValue *args, int nargs) {
 
 static ChValue prim_remainder(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
+    if (ch_is_flonum(args[0]) || ch_is_flonum(args[1])) {
+        double a, b;
+        if (!as_number(args[0], &a) || !as_number(args[1], &b)) {
+            snprintf(vm->error, sizeof(vm->error), "remainder: not a number");
+            return CH_UNDEFINED;
+        }
+        if (b == 0.0) {
+            snprintf(vm->error, sizeof(vm->error), "remainder: division by zero");
+            return CH_UNDEFINED;
+        }
+        return ch_make_flonum(fmod(a, b));
+    }
     if (!ch_is_exact_integer(args[0]) || !ch_is_exact_integer(args[1])) {
         snprintf(vm->error, sizeof(vm->error), "remainder: expected exact integers");
         return CH_UNDEFINED;
@@ -677,6 +727,26 @@ static ChValue prim_boolean_p(ChVM *vm, ChValue *args, int nargs) {
     (void)vm;
     (void)nargs;
     return (args[0] == CH_TRUE || args[0] == CH_FALSE) ? CH_TRUE : CH_FALSE;
+}
+
+static ChValue prim_boolean_eq(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs == 0) {
+        return CH_TRUE;
+    }
+    if (args[0] != CH_TRUE && args[0] != CH_FALSE) {
+        snprintf(vm->error, sizeof(vm->error), "boolean=?: not a boolean");
+        return CH_UNDEFINED;
+    }
+    for (int i = 1; i < nargs; i++) {
+        if (args[i] != CH_TRUE && args[i] != CH_FALSE) {
+            snprintf(vm->error, sizeof(vm->error), "boolean=?: not a boolean");
+            return CH_UNDEFINED;
+        }
+        if (args[i] != args[0]) {
+            return CH_FALSE;
+        }
+    }
+    return CH_TRUE;
 }
 
 static ChValue prim_exit(ChVM *vm, ChValue *args, int nargs) {
@@ -817,6 +887,7 @@ void ch_register_core_primitives(ChVM *vm) {
     define_prim(vm, "angle", prim_angle, 1, 1);
     define_prim(vm, "procedure?", prim_procedure_p, 1, 1);
     define_prim(vm, "boolean?", prim_boolean_p, 1, 1);
+    define_prim(vm, "boolean=?", prim_boolean_eq, -1, 0);
     define_prim(vm, "vector?", prim_vector_p, 1, 1);
     define_prim(vm, "eq?", prim_eq_p, 2, 2);
     define_prim(vm, "eqv?", prim_eqv_p, 2, 2);

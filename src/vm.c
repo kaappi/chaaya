@@ -17,6 +17,7 @@
 void ch_vm_init(ChVM *vm) {
     memset(vm, 0, sizeof(*vm));
     ch_gc_init(&vm->gc);
+    vm->gc.vm = vm;
     vm->result = CH_VOID;
     vm->default_random_source = CH_UNDEFINED;
     vm->fiber_runtime = (ChFiberRuntime *)calloc(1, sizeof(ChFiberRuntime));
@@ -119,6 +120,25 @@ static ChVMStatus runtime_error(ChVM *vm, const char *msg) {
     return CH_VM_RUNTIME_ERROR;
 }
 
+static ChVMStatus raise_unbound(ChVM *vm, const char *name, uint8_t dst, ChValue *regs) {
+    if (vm->handler_count == 0) {
+        snprintf(vm->error, sizeof(vm->error), "unbound variable: %s", name);
+        return CH_VM_RUNTIME_ERROR;
+    }
+    char buf[256];
+    snprintf(buf, sizeof(buf), "unbound variable: %s", name);
+    ChValue msg = ch_gc_make_string_cstr(&vm->gc, buf);
+    ch_gc_push(&vm->gc, &msg);
+    ChValue err = ch_gc_make_error_object(&vm->gc, msg, CH_NIL, 0);
+    ch_gc_pop(&vm->gc);
+    ChValue result = ch_vm_raise(vm, err, 0);
+    if (vm->error[0] != '\0') {
+        return CH_VM_RUNTIME_ERROR;
+    }
+    regs[dst] = result;
+    return CH_VM_OK;
+}
+
 ChValue ch_vm_parameter_ref(ChVM *vm, ChValue parameter) {
     for (size_t i = vm->parameter_count; i > 0; i--) {
         size_t idx = i - 1;
@@ -205,11 +225,7 @@ ChValue ch_vm_raise(ChVM *vm, ChValue obj, int continuable) {
     if (st != CH_VM_OK) {
         return CH_UNDEFINED;
     }
-    if (!continuable) {
-        snprintf(vm->error, sizeof(vm->error),
-                 "exception handler returned (non-continuable exception)");
-        return CH_UNDEFINED;
-    }
+    (void)continuable;
     return result;
 }
 
@@ -243,35 +259,16 @@ static ChLibEnv *resolve_lib_env(ChVM *vm, ChCallFrame *frame) {
 
 static ChValue frame_closure_roots[CH_VM_MAX_FRAMES];
 
-static size_t gc_root_span(ChVM *vm) {
-    size_t span = vm->reg_top + vm->global_count + vm->wind_count * 2 + vm->handler_count +
-                  vm->parameter_count * 2 + vm->macro_count + vm->frame_count;
-    if (vm->fiber_runtime) {
-        span += ch_fiber_runtime_root_count(vm->fiber_runtime);
-    }
-    return span;
-}
-
-static void push_gc_roots(ChVM *vm) {
+size_t ch_vm_push_gc_roots(ChVM *vm) {
+    /* Registers and frame closures only; other VM slots are marked in collection. */
+    size_t before = vm->gc.root_count;
     for (size_t i = 0; i < vm->reg_top; i++) {
         ch_gc_push(&vm->gc, &vm->regs[i]);
     }
-    for (size_t i = 0; i < vm->global_count; i++) {
-        ch_gc_push(&vm->gc, &vm->globals[i].value);
-    }
-    for (size_t i = 0; i < vm->wind_count; i++) {
-        ch_gc_push(&vm->gc, &vm->wind_stack[i].before);
-        ch_gc_push(&vm->gc, &vm->wind_stack[i].after);
-    }
-    for (size_t i = 0; i < vm->handler_count; i++) {
-        ch_gc_push(&vm->gc, &vm->handler_stack[i].handler);
-    }
-    for (size_t i = 0; i < vm->parameter_count; i++) {
-        ch_gc_push(&vm->gc, &vm->parameter_stack[i].parameter);
-        ch_gc_push(&vm->gc, &vm->parameter_stack[i].value);
-    }
-    for (size_t i = 0; i < vm->macro_count; i++) {
-        ch_gc_push(&vm->gc, &vm->macros[i].transformer);
+    for (ChUpvalue *uv = vm->open_upvalues; uv; uv = uv->next) {
+        if (uv->is_closed) {
+            ch_gc_push(&vm->gc, &uv->closed_value);
+        }
     }
     for (size_t i = 0; i < vm->frame_count; i++) {
         if (vm->frames[i].closure) {
@@ -281,9 +278,57 @@ static void push_gc_roots(ChVM *vm) {
         }
         ch_gc_push(&vm->gc, &frame_closure_roots[i]);
     }
-    if (vm->fiber_runtime) {
-        (void)ch_fiber_runtime_push_roots(&vm->gc, vm->fiber_runtime);
+    return vm->gc.root_count - before;
+}
+
+void ch_vm_mark_gc_roots(ChVM *vm) {
+    for (size_t i = 0; i < vm->reg_top; i++) {
+        ch_gc_mark_value(vm->regs[i]);
     }
+    for (size_t i = 0; i < vm->global_count; i++) {
+        ch_gc_mark_value(vm->globals[i].value);
+    }
+    for (size_t i = 0; i < vm->wind_count; i++) {
+        ch_gc_mark_value(vm->wind_stack[i].before);
+        ch_gc_mark_value(vm->wind_stack[i].after);
+    }
+    for (size_t i = 0; i < vm->handler_count; i++) {
+        ch_gc_mark_value(vm->handler_stack[i].handler);
+    }
+    for (size_t i = 0; i < vm->parameter_count; i++) {
+        ch_gc_mark_value(vm->parameter_stack[i].parameter);
+        ch_gc_mark_value(vm->parameter_stack[i].value);
+    }
+    for (size_t i = 0; i < vm->macro_count; i++) {
+        ch_gc_mark_value(vm->macros[i].transformer);
+    }
+    for (ChUpvalue *uv = vm->open_upvalues; uv; uv = uv->next) {
+        if (uv->is_closed) {
+            ch_gc_mark_value(uv->closed_value);
+        }
+    }
+    for (size_t i = 0; i < vm->frame_count; i++) {
+        if (vm->frames[i].closure) {
+            ch_gc_mark_value(ch_make_pointer(&vm->frames[i].closure->header));
+        }
+    }
+    if (vm->fiber_runtime) {
+        ChFiberRuntime *rt = vm->fiber_runtime;
+        for (size_t i = 0; i < rt->ready_count; i++) {
+            size_t idx = (rt->ready_head + i) % CH_FIBER_READY_MAX;
+            ch_gc_mark_value(rt->ready[idx]);
+        }
+        ch_gc_mark_value(rt->current);
+        for (size_t i = 0; i < CH_REACTOR_MAX_TIMERS; i++) {
+            if (rt->reactor.timers[i].active) {
+                ch_gc_mark_value(rt->reactor.timers[i].payload);
+            }
+        }
+    }
+}
+
+static size_t push_gc_roots(ChVM *vm) {
+    return ch_vm_push_gc_roots(vm);
 }
 
 static void pop_gc_roots_n(ChVM *vm, size_t n) {
@@ -390,8 +435,7 @@ ChValue ch_vm_capture_continuation(ChVM *vm, size_t result_slot) {
         max_reg = result_slot + 1;
     }
 
-    push_gc_roots(vm);
-    size_t roots = gc_root_span(vm);
+    size_t roots = push_gc_roots(vm);
     ChValue cont_v = ch_gc_make_continuation(&vm->gc);
     ch_gc_push(&vm->gc, &cont_v);
     ChContinuation *c = ch_as_continuation(cont_v);
@@ -574,16 +618,23 @@ static ChVMStatus run_until(ChVM *vm, size_t target_frames) {
                 uint16_t li = (uint16_t)(idx & ~CH_ENV_LIB_BIT);
                 ChLibEnv *env = resolve_lib_env(vm, frame);
                 if (!env || li >= env->count || !env->bindings[li].defined) {
-                    snprintf(vm->error, sizeof(vm->error), "unbound variable: %s",
-                             env && li < env->count ? env->bindings[li].name->name : "?");
-                    return CH_VM_RUNTIME_ERROR;
+                    const char *name =
+                        env && li < env->count ? env->bindings[li].name->name : "?";
+                    ChVMStatus st = raise_unbound(vm, name, dst, regs);
+                    if (st != CH_VM_OK) {
+                        return st;
+                    }
+                    break;
                 }
                 regs[dst] = env->bindings[li].value;
             } else {
                 if (!vm->globals[idx].defined) {
-                    snprintf(vm->error, sizeof(vm->error), "unbound variable: %s",
-                             vm->globals[idx].name->name);
-                    return CH_VM_RUNTIME_ERROR;
+                    ChVMStatus st =
+                        raise_unbound(vm, vm->globals[idx].name->name, dst, regs);
+                    if (st != CH_VM_OK) {
+                        return st;
+                    }
+                    break;
                 }
                 regs[dst] = vm->globals[idx].value;
             }
@@ -644,8 +695,7 @@ static ChVMStatus run_until(ChVM *vm, size_t target_frames) {
             uint8_t dst = read_u8(frame);
             uint8_t car = read_u8(frame);
             uint8_t cdr = read_u8(frame);
-            push_gc_roots(vm);
-            size_t roots = gc_root_span(vm);
+            size_t roots = push_gc_roots(vm);
             regs[dst] = ch_gc_cons(&vm->gc, regs[car], regs[cdr]);
             pop_gc_roots_n(vm, roots);
             break;
@@ -675,6 +725,8 @@ static ChVMStatus run_until(ChVM *vm, size_t target_frames) {
             uint8_t dst = read_u8(frame);
             uint16_t idx = read_u16(frame);
             ChValue fn_v = frame->closure->fn->constants[idx];
+            size_t roots = push_gc_roots(vm);
+            ch_gc_push(&vm->gc, &fn_v);
             ChFunction *fn = ch_as_function(fn_v);
             ChUpvalue **uvs = NULL;
             if (fn->num_upvalues > 0) {
@@ -691,11 +743,7 @@ static ChVMStatus run_until(ChVM *vm, size_t target_frames) {
                     }
                 }
             }
-            push_gc_roots(vm);
-            size_t roots = gc_root_span(vm);
-            ChValue fn_root = fn_v;
-            ch_gc_push(&vm->gc, &fn_root);
-            regs[dst] = ch_gc_make_closure(&vm->gc, ch_as_function(fn_root), uvs);
+            regs[dst] = ch_gc_make_closure(&vm->gc, ch_as_function(fn_v), uvs);
             {
                 ChLibEnv *home = vm->active_lib_env;
                 if (!home && frame->closure) {
@@ -839,8 +887,7 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
         }
         vm->native_result_slot = result_slot;
         vm->continuation_invoked = false;
-        size_t roots = gc_root_span(vm);
-        push_gc_roots(vm);
+        size_t roots = push_gc_roots(vm);
         ChValue result = n->fn(vm, args, nargs);
         pop_gc_roots_n(vm, roots);
         if (vm->continuation_invoked) {
@@ -868,8 +915,7 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
             vm->frame_count--;
         }
         ChValue result = CH_UNDEFINED;
-        size_t roots = gc_root_span(vm);
-        push_gc_roots(vm);
+        size_t roots = push_gc_roots(vm);
         int rc = ch_ffi_call(vm, proc, args, nargs, &result);
         pop_gc_roots_n(vm, roots);
         if (rc != 0) {
@@ -960,8 +1006,7 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
 
     ChValue rest = CH_NIL;
     if (fn->variadic) {
-        size_t roots = gc_root_span(vm);
-        push_gc_roots(vm);
+        size_t roots = push_gc_roots(vm);
         rest = build_rest_list(vm, &vm->regs[new_base + 1], fixed, nargs);
         pop_gc_roots_n(vm, roots);
     }
@@ -1010,9 +1055,10 @@ ChVMStatus ch_vm_apply(ChVM *vm, ChValue proc, ChValue *args, int nargs, ChValue
 }
 
 ChVMStatus ch_vm_eval_function(ChVM *vm, ChFunction *fn, ChValue *out) {
+    size_t gcount = vm->global_count;
     ChValue fn_v = ch_make_pointer(&fn->header);
     ch_gc_push(&vm->gc, &fn_v);
-    for (size_t i = 0; i < vm->global_count; i++) {
+    for (size_t i = 0; i < gcount; i++) {
         ch_gc_push(&vm->gc, &vm->globals[i].value);
     }
     ChValue cl_v = ch_gc_make_closure(&vm->gc, ch_as_function(fn_v), NULL);
@@ -1024,7 +1070,7 @@ ChVMStatus ch_vm_eval_function(ChVM *vm, ChFunction *fn, ChValue *out) {
     vm->parameter_count = 0;
     vm->continuation_invoked = false;
     vm->regs[0] = cl_v;
-    ch_gc_pop_n(&vm->gc, 1 + vm->global_count);
+    ch_gc_pop_n(&vm->gc, 1 + gcount);
     ChVMStatus st = push_frame(vm, ch_as_closure(vm->regs[0]), 0);
     if (st != CH_VM_OK) {
         return st;

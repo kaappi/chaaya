@@ -232,6 +232,11 @@ chaaya_kaappi_deferred_test(sqrt_exact tests/scheme/kaappi-deferred/compliance/s
 chaaya_kaappi_deferred_test(lists tests/scheme/kaappi-deferred/compliance/lists.scm)
 chaaya_kaappi_deferred_test(vectors tests/scheme/kaappi-deferred/compliance/vectors.scm)
 
+# Tier 2 kaappi-deferred compliance (enable individually once local green)
+chaaya_kaappi_deferred_test(macro_export_scope tests/scheme/kaappi-deferred/compliance/macro-export-scope.scm)
+chaaya_kaappi_deferred_test(chars tests/scheme/kaappi-deferred/compliance/chars.scm)
+chaaya_kaappi_deferred_test(bytevectors tests/scheme/kaappi-deferred/compliance/bytevectors.scm)
+
 # Display probes adapted from Kaappi differential/probes
 function(chaaya_probe_test name)
   add_test(

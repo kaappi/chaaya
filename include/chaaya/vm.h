@@ -12,7 +12,7 @@ extern "C" {
 
 #define CH_VM_MAX_FRAMES 256
 #define CH_VM_MAX_REGS 4096
-#define CH_VM_MAX_GLOBALS 1024
+#define CH_VM_MAX_GLOBALS 4096
 #define CH_VM_MAX_LIB_PATHS 32
 #define CH_VM_MAX_SCRIPT_ARGS 64
 #define CH_VM_MAX_WINDS 64
@@ -124,6 +124,12 @@ int ch_vm_intern_global(ChVM *vm, ChSymbol *sym);
 void ch_vm_define_global(ChVM *vm, int idx, ChValue v);
 
 void ch_vm_register_primitives(ChVM *vm);
+
+/* Push live VM slots onto the GC root stack; returns count for ch_gc_pop_n. */
+size_t ch_vm_push_gc_roots(ChVM *vm);
+
+/* Mark live VM slots during collection without using the root stack. */
+void ch_vm_mark_gc_roots(ChVM *vm);
 
 ChVMStatus ch_vm_call_closure(ChVM *vm, ChValue closure, ChValue *args, int nargs, ChValue *out);
 ChVMStatus ch_vm_eval_function(ChVM *vm, ChFunction *fn, ChValue *out);

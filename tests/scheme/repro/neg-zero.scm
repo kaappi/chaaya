@@ -1,0 +1,5 @@
+(import (scheme base))
+(display (negative? 0))
+(newline)
+(display (negative? +nan.0))
+(newline)

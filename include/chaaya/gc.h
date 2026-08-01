@@ -14,6 +14,8 @@ extern "C" {
 #define CH_GC_DEFAULT_PROMOTION_AGE 2
 #define CH_GC_DEFAULT_MAJOR_INTERVAL 8
 
+struct ChVM;
+
 typedef struct ChGC {
     ChObject *young_objects;
     ChObject *old_objects;
@@ -37,6 +39,9 @@ typedef struct ChGC {
     ChSymbol **symbols;
     size_t symbol_count;
     size_t symbol_cap;
+    struct ChVM *vm; /* live interpreter roots during collection */
+    struct ChFunction *compiling_fns[32];
+    size_t compiling_fn_depth;
 } ChGC;
 
 void ch_gc_init(ChGC *gc);
@@ -45,11 +50,14 @@ void ch_gc_deinit(ChGC *gc);
 void ch_gc_push(ChGC *gc, ChValue *slot);
 void ch_gc_pop(ChGC *gc);
 void ch_gc_pop_n(ChGC *gc, size_t n);
+void ch_gc_pop_to(ChGC *gc, size_t target);
 
 void ch_gc_collect(ChGC *gc);
 void ch_gc_collect_minor(ChGC *gc);
 void ch_gc_collect_major(ChGC *gc);
+void ch_gc_mark_value(ChValue v);
 void ch_gc_write_barrier(ChGC *gc, ChObject *owner, ChValue value);
+void ch_gc_promote_to_old(ChGC *gc, ChObject *obj);
 void *ch_gc_alloc(ChGC *gc, size_t size, ChObjectTag tag);
 
 ChValue ch_gc_cons(ChGC *gc, ChValue car, ChValue cdr);

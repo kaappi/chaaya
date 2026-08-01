@@ -11,6 +11,9 @@ extern "C" {
 /* Rectangular complex; imag == 0.0 → flonum(real). */
 ChValue ch_make_complex(ChGC *gc, double real, double imag);
 
+/* Always allocate a complex object (used when +0.0i must stay complex). */
+ChValue ch_make_complex_raw(ChGC *gc, double real, double imag);
+
 /* Split any number into rectangular parts. Returns 0 if not a number. */
 int ch_complex_parts(ChValue v, double *real_out, double *imag_out);
 

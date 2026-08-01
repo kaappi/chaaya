@@ -41,6 +41,17 @@ static int require_real(ChVM *vm, ChValue v, const char *who, double *out) {
     return 1;
 }
 
+static double gcd_double(double a, double b) {
+    a = fabs(a);
+    b = fabs(b);
+    while (b != 0.0) {
+        double t = fmod(a, b);
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
 /* ---- rounding ---- */
 
 static ChValue rational_trunc_quot(ChGC *gc, ChValue v) {
@@ -485,11 +496,39 @@ static ChValue prim_lcm(ChVM *vm, ChValue *args, int nargs) {
     if (nargs == 0) {
         return ch_make_fixnum(1);
     }
-    ChValue acc = ch_bignum_abs(&vm->gc, args[0]);
+    bool any_inexact = ch_is_flonum(args[0]);
+    for (int i = 1; i < nargs; i++) {
+        if (ch_is_flonum(args[i])) {
+            any_inexact = true;
+            break;
+        }
+    }
+    if (any_inexact) {
+        double acc;
+        if (!require_real(vm, args[0], "lcm", &acc)) {
+            return CH_UNDEFINED;
+        }
+        acc = fabs(acc);
+        for (int i = 1; i < nargs; i++) {
+            double b;
+            if (!require_real(vm, args[i], "lcm", &b)) {
+                return CH_UNDEFINED;
+            }
+            b = fabs(b);
+            if (acc == 0.0 || b == 0.0) {
+                acc = 0.0;
+                continue;
+            }
+            double g = gcd_double(acc, b);
+            acc = (acc / g) * b;
+        }
+        return ch_make_flonum(acc);
+    }
     if (!ch_is_exact_integer(args[0])) {
         snprintf(vm->error, sizeof(vm->error), "lcm: expected exact integers");
         return CH_UNDEFINED;
     }
+    ChValue acc = ch_bignum_abs(&vm->gc, args[0]);
     ch_gc_push(&vm->gc, &acc);
     for (int i = 1; i < nargs; i++) {
         if (!ch_is_exact_integer(args[i])) {
@@ -593,26 +632,6 @@ static ChValue unary_real_math(ChVM *vm, ChValue *args, const char *who, double 
         return CH_UNDEFINED;
     }
     return ch_make_flonum(fn(x));
-}
-
-static ChValue prim_sqrt(ChVM *vm, ChValue *args, int nargs) {
-    (void)nargs;
-    if (ch_is_complex_obj(args[0])) {
-        double re, im;
-        ch_complex_parts(args[0], &re, &im);
-        double r = hypot(re, im);
-        double theta = atan2(im, re) / 2.0;
-        double sr = sqrt(r);
-        return ch_make_complex(&vm->gc, sr * cos(theta), sr * sin(theta));
-    }
-    double x;
-    if (!require_real(vm, args[0], "sqrt", &x)) {
-        return CH_UNDEFINED;
-    }
-    if (x < 0) {
-        return ch_make_complex(&vm->gc, 0.0, sqrt(-x));
-    }
-    return ch_make_flonum(sqrt(x));
 }
 
 static ChValue prim_sin(ChVM *vm, ChValue *args, int nargs) {
@@ -738,11 +757,11 @@ static ChValue bignum_quotient_bs(ChGC *gc, ChValue a, ChValue b) {
     if (is_zero_int(b)) {
         return CH_UNDEFINED;
     }
+    ChValue lo = ch_make_fixnum(0);
+    ChValue hi = ch_make_fixnum(1);
     ch_gc_push(gc, &a);
     ch_gc_push(gc, &b);
-    ChValue lo = ch_make_fixnum(0);
     ch_gc_push(gc, &lo);
-    ChValue hi = ch_make_fixnum(1);
     ch_gc_push(gc, &hi);
     ChValue two = ch_make_fixnum(2);
 
@@ -755,34 +774,27 @@ static ChValue bignum_quotient_bs(ChGC *gc, ChValue a, ChValue b) {
         }
         ch_gc_pop(gc);
         lo = hi;
-        ch_gc_pop(gc);
-        ch_gc_push(gc, &lo);
         hi = ch_bignum_mul(gc, hi, two);
-        ch_gc_pop(gc);
-        ch_gc_push(gc, &hi);
     }
 
     while (ch_bignum_compare(lo, hi) < 0) {
         ChValue sum = ch_bignum_add(gc, lo, hi);
         ch_gc_push(gc, &sum);
-        ChValue mid = ch_bignum_quotient(gc, sum, two);
+        ChValue sum1 = ch_bignum_add(gc, sum, ch_make_fixnum(1));
+        ch_gc_pop(gc);
+        ch_gc_push(gc, &sum1);
+        ChValue mid = ch_bignum_quotient(gc, sum1, two);
         ch_gc_pop(gc);
         ch_gc_push(gc, &mid);
         ChValue prod = ch_bignum_mul(gc, b, mid);
         ch_gc_push(gc, &prod);
         if (ch_bignum_compare(prod, a) <= 0) {
-            ch_gc_pop(gc);
-            ch_gc_pop(gc);
             lo = mid;
-            ch_gc_pop(gc);
-            ch_gc_push(gc, &lo);
         } else {
-            ch_gc_pop(gc);
-            ch_gc_pop(gc);
             hi = ch_bignum_sub(gc, mid, ch_make_fixnum(1));
-            ch_gc_pop(gc);
-            ch_gc_push(gc, &hi);
         }
+        ch_gc_pop(gc);
+        ch_gc_pop(gc);
     }
 
     ChValue out = lo;
@@ -846,15 +858,11 @@ static IsqrtResult isqrt_non_negative(ChVM *vm, ChValue n) {
         if (is_zero_int(s)) {
             break;
         }
-        ch_gc_push(gc, &s);
         ChValue q = bignum_quotient_bs(gc, n, s);
         ch_gc_push(gc, &q);
         ChValue sum = ch_bignum_add(gc, s, q);
         ch_gc_pop(gc);
-        ch_gc_pop(gc);
-        ch_gc_push(gc, &sum);
         ChValue next = ch_bignum_quotient(gc, sum, two);
-        ch_gc_pop(gc);
         if (ch_bignum_compare(next, s) == 0) {
             s = next;
             break;
@@ -862,8 +870,8 @@ static IsqrtResult isqrt_non_negative(ChVM *vm, ChValue n) {
         s = next;
     }
 
-    ch_gc_push(gc, &s);
     ChValue s2 = ch_bignum_mul(gc, s, s);
+    ch_gc_push(gc, &s2);
     while (ch_bignum_compare(s2, n) > 0) {
         s = ch_bignum_sub(gc, s, ch_make_fixnum(1));
         s2 = ch_bignum_mul(gc, s, s);
@@ -871,13 +879,18 @@ static IsqrtResult isqrt_non_negative(ChVM *vm, ChValue n) {
 
     ChValue one = ch_make_fixnum(1);
     ChValue s1 = ch_bignum_add(gc, s, one);
+    ch_gc_push(gc, &s1);
     ChValue s1_sq = ch_bignum_mul(gc, s1, s1);
+    ch_gc_push(gc, &s1_sq);
     while (ch_bignum_compare(s1_sq, n) <= 0) {
         s = s1;
         s2 = s1_sq;
         s1 = ch_bignum_add(gc, s, one);
         s1_sq = ch_bignum_mul(gc, s1, s1);
     }
+    ch_gc_pop(gc);
+    ch_gc_pop(gc);
+    ch_gc_pop(gc);
 
     ChValue rem = ch_bignum_sub(gc, n, s2);
     IsqrtResult out = {ch_bignum_normalize(gc, s), ch_bignum_normalize(gc, rem)};
@@ -885,11 +898,74 @@ static IsqrtResult isqrt_non_negative(ChVM *vm, ChValue n) {
     return out;
 }
 
+static bool isqrt_perfect(const IsqrtResult *r) {
+    return ch_bignum_compare(r->rem, ch_make_fixnum(0)) == 0;
+}
+
+static double rational_to_f64(ChValue num, ChValue den) {
+    return ch_bignum_to_f64(num) / ch_bignum_to_f64(den);
+}
+
+static ChValue prim_sqrt(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChValue arg = args[0];
+    if (ch_is_complex_obj(arg)) {
+        double re, im;
+        ch_complex_parts(arg, &re, &im);
+        double r = hypot(re, im);
+        double theta = atan2(im, re) / 2.0;
+        double sr = sqrt(r);
+        return ch_make_complex(&vm->gc, sr * cos(theta), sr * sin(theta));
+    }
+    if (ch_is_flonum(arg)) {
+        double x = ch_to_flonum(arg);
+        if (x < 0) {
+            return ch_make_complex(&vm->gc, 0.0, sqrt(-x));
+        }
+        return ch_make_flonum(sqrt(x));
+    }
+    if (ch_is_exact_integer(arg)) {
+        if (ch_bignum_compare(arg, ch_make_fixnum(0)) < 0) {
+            double x = ch_bignum_to_f64(arg);
+            return ch_make_complex(&vm->gc, 0.0, sqrt(-x));
+        }
+        IsqrtResult r = isqrt_non_negative(vm, arg);
+        if (isqrt_perfect(&r)) {
+            return r.root;
+        }
+        return ch_make_flonum(sqrt(ch_bignum_to_f64(arg)));
+    }
+    if (ch_is_rational_obj(arg)) {
+        ChRational *rat = ch_as_rational(arg);
+        double mag = rational_to_f64(rat->numerator, rat->denominator);
+        if (mag < 0) {
+            return ch_make_complex(&vm->gc, 0.0, sqrt(-mag));
+        }
+        IsqrtResult num_r = isqrt_non_negative(vm, rat->numerator);
+        IsqrtResult den_r = isqrt_non_negative(vm, rat->denominator);
+        if (isqrt_perfect(&num_r) && isqrt_perfect(&den_r)) {
+            return ch_make_rational(&vm->gc, num_r.root, den_r.root);
+        }
+        double x = rational_to_f64(rat->numerator, rat->denominator);
+        return ch_make_flonum(sqrt(x));
+    }
+    double x;
+    if (!require_real(vm, arg, "sqrt", &x)) {
+        return CH_UNDEFINED;
+    }
+    if (x < 0) {
+        return ch_make_complex(&vm->gc, 0.0, sqrt(-x));
+    }
+    return ch_make_flonum(sqrt(x));
+}
+
 static ChValue prim_exact_integer_sqrt(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
     if (!ch_is_exact_integer(args[0]) || ch_bignum_compare(args[0], ch_make_fixnum(0)) < 0) {
-        snprintf(vm->error, sizeof(vm->error), "exact-integer-sqrt: expected non-negative exact integer");
-        return CH_UNDEFINED;
+        ChValue msg =
+            ch_gc_make_string_cstr(&vm->gc, "exact-integer-sqrt: expected non-negative exact integer");
+        ChValue err = ch_gc_make_error_object(&vm->gc, msg, CH_NIL, 0);
+        return ch_vm_raise(vm, err, 0);
     }
     if (is_zero_int(args[0]) || ch_bignum_compare(args[0], ch_make_fixnum(1)) == 0) {
         ChValue vals[2] = {args[0], ch_make_fixnum(0)};

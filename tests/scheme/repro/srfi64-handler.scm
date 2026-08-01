@@ -1,0 +1,11 @@
+(import (scheme base) (srfi 64))
+
+(test-begin "x")
+(let ((r (test-runner-get)))
+  (display "handler=")
+  (display (procedure? (test-runner-on-test-begin r)))
+  (newline)
+  (display "call=")
+  (display ((test-runner-on-test-begin r) r))
+  (newline))
+(test-end "x")
