@@ -365,7 +365,7 @@ static int cmd_features(int json) {
         printf("{\n");
         printf("  \"implementation\": \"chaaya\",\n");
         printf("  \"version\": \"%s\",\n", CHAAYA_VERSION);
-        printf("  \"language\": \"C17\",\n");
+        printf("  \"language\": \"C23\",\n");
 #ifdef CHAAYA_HAS_LINENOISE
         printf("  \"linenoise\": true,\n");
 #else
@@ -383,7 +383,7 @@ static int cmd_features(int json) {
         printf("}\n");
     } else {
         printf("%s\n", CHAAYA_VERSION_BANNER);
-        printf("language:     C17\n");
+        printf("language:     C23\n");
 #ifdef CHAAYA_HAS_LINENOISE
         printf("linenoise:    yes\n");
 #else

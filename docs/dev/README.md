@@ -15,8 +15,10 @@ Open bugs belong in the issue tracker.
 | Document | Contents |
 |----------|----------|
 | [architecture.md](architecture.md) | Pipeline, values, GC, bytecode VM, source layout, roadmap seams |
+| [c23.md](c23.md) | C23 standard policy, features vs C17, patterns to leverage |
 | [cli.md](cli.md) | CLI help shape, exit codes, implemented vs stubbed commands |
 | [repl.md](repl.md) | REPL prompts, multiline, comma-commands, history |
+| [scheme-tests.md](scheme-tests.md) | Bootstrap suites, probes, deferred Kaappi/R7RS |
 
 ## Design decisions
 

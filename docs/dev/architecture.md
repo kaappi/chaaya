@@ -1,7 +1,7 @@
 # Architecture
 
 Chaaya implements Scheme as a bytecode-compiled language with a register-based
-VM written in C17. This document describes the bootstrap subsystems (v0.1) and
+VM written in C23. This document describes the bootstrap subsystems (v0.1) and
 where later R7RS / Kaappi-class features are expected to plug in.
 
 Chaaya is a free redesign inspired by
@@ -132,8 +132,8 @@ third_party/      Vendored C deps (linenoise)
 lib/              Portable .sld trees (search via --lib-path / ./lib)
 ```
 
-Build: CMake 3.20+ produces `chaaya` and links tests against static
-`chaaya_core`.
+Build: CMake 3.21+ produces `chaaya` (C23) and links tests against static
+`chaaya_core`. Language policy: [c23.md](c23.md).
 
 ---
 
