@@ -1,0 +1,204 @@
+#include "chaaya/value.h"
+
+#include <string.h>
+
+ChValue ch_make_fixnum(int64_t n) {
+    uint64_t u = (uint64_t)n;
+    return CH_NANBOX_FIX | (u & CH_NANBOX_PAYLOAD);
+}
+
+int64_t ch_to_fixnum(ChValue v) {
+    uint64_t payload = v & CH_NANBOX_PAYLOAD;
+    /* sign-extend from 48 bits */
+    if (payload & (1ULL << 47)) {
+        payload |= 0xFFFF000000000000ULL;
+    }
+    return (int64_t)payload;
+}
+
+ChValue ch_make_flonum(double d) {
+    uint64_t bits;
+    memcpy(&bits, &d, sizeof(bits));
+    if ((bits & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL &&
+        (bits & 0x000FFFFFFFFFFFFFULL) != 0) {
+        return CH_CANONICAL_NAN;
+    }
+    return bits;
+}
+
+double ch_to_flonum(ChValue v) {
+    double d;
+    memcpy(&d, &v, sizeof(d));
+    return d;
+}
+
+ChValue ch_make_char(uint32_t codepoint) {
+    return CH_NANBOX_IMM | (0x100ULL + (codepoint & 0x1FFFFFULL));
+}
+
+bool ch_is_char(ChValue v) {
+    if (!ch_is_immediate(v)) {
+        return false;
+    }
+    uint64_t payload = v & CH_NANBOX_PAYLOAD;
+    return payload >= 0x100 && payload <= 0x100 + 0x1FFFFF;
+}
+
+uint32_t ch_to_char(ChValue v) {
+    return (uint32_t)((v & CH_NANBOX_PAYLOAD) - 0x100);
+}
+
+ChValue ch_make_pointer(ChObject *obj) {
+    return CH_NANBOX_PTR | ((uintptr_t)obj & CH_NANBOX_PAYLOAD);
+}
+
+ChObject *ch_to_object(ChValue v) {
+    return (ChObject *)(uintptr_t)(v & CH_NANBOX_PAYLOAD);
+}
+
+#define CH_IS_TAG(v, obj_tag) (ch_is_pointer(v) && ch_to_object(v)->tag == (obj_tag))
+
+bool ch_is_pair(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_PAIR);
+}
+
+bool ch_is_symbol(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_SYMBOL);
+}
+
+bool ch_is_string(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_STRING);
+}
+
+bool ch_is_vector(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_VECTOR);
+}
+
+bool ch_is_closure(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_CLOSURE);
+}
+
+bool ch_is_native(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_NATIVE);
+}
+
+bool ch_is_function(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_FUNCTION);
+}
+
+bool ch_is_procedure(ChValue v) {
+    return ch_is_closure(v) || ch_is_native(v);
+}
+
+ChPair *ch_as_pair(ChValue v) {
+    return (ChPair *)ch_to_object(v);
+}
+
+ChSymbol *ch_as_symbol(ChValue v) {
+    return (ChSymbol *)ch_to_object(v);
+}
+
+ChString *ch_as_string(ChValue v) {
+    return (ChString *)ch_to_object(v);
+}
+
+ChVector *ch_as_vector(ChValue v) {
+    return (ChVector *)ch_to_object(v);
+}
+
+ChFunction *ch_as_function(ChValue v) {
+    return (ChFunction *)ch_to_object(v);
+}
+
+ChClosure *ch_as_closure(ChValue v) {
+    return (ChClosure *)ch_to_object(v);
+}
+
+ChNative *ch_as_native(ChValue v) {
+    return (ChNative *)ch_to_object(v);
+}
+
+ChValue ch_car(ChValue v) {
+    return ch_as_pair(v)->car;
+}
+
+ChValue ch_cdr(ChValue v) {
+    return ch_as_pair(v)->cdr;
+}
+
+void ch_set_car(ChValue pair, ChValue v) {
+    ch_as_pair(pair)->car = v;
+}
+
+void ch_set_cdr(ChValue pair, ChValue v) {
+    ch_as_pair(pair)->cdr = v;
+}
+
+bool ch_eq(ChValue a, ChValue b) {
+    return a == b;
+}
+
+bool ch_eqv(ChValue a, ChValue b) {
+    if (a == b) {
+        return true;
+    }
+    if (ch_is_fixnum(a) && ch_is_fixnum(b)) {
+        return ch_to_fixnum(a) == ch_to_fixnum(b);
+    }
+    if (ch_is_flonum(a) && ch_is_flonum(b)) {
+        double x = ch_to_flonum(a);
+        double y = ch_to_flonum(b);
+        if (x != x && y != y) {
+            return true; /* both NaN */
+        }
+        return x == y;
+    }
+    if (ch_is_char(a) && ch_is_char(b)) {
+        return ch_to_char(a) == ch_to_char(b);
+    }
+    return false;
+}
+
+static bool equal_list(ChValue a, ChValue b);
+
+bool ch_equal(ChValue a, ChValue b) {
+    if (ch_eqv(a, b)) {
+        return true;
+    }
+    if (ch_is_pair(a) && ch_is_pair(b)) {
+        return equal_list(a, b);
+    }
+    if (ch_is_string(a) && ch_is_string(b)) {
+        ChString *sa = ch_as_string(a);
+        ChString *sb = ch_as_string(b);
+        if (sa->len != sb->len) {
+            return false;
+        }
+        return memcmp(sa->data, sb->data, sa->len) == 0;
+    }
+    if (ch_is_vector(a) && ch_is_vector(b)) {
+        ChVector *va = ch_as_vector(a);
+        ChVector *vb = ch_as_vector(b);
+        if (va->len != vb->len) {
+            return false;
+        }
+        for (size_t i = 0; i < va->len; i++) {
+            if (!ch_equal(va->items[i], vb->items[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool equal_list(ChValue a, ChValue b) {
+    while (ch_is_pair(a) && ch_is_pair(b)) {
+        if (!ch_equal(ch_car(a), ch_car(b))) {
+            return false;
+        }
+        a = ch_cdr(a);
+        b = ch_cdr(b);
+    }
+    return ch_equal(a, b);
+}
