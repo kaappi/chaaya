@@ -1,9 +1,11 @@
-# R7RS-small conformance suite (deferred)
+# R7RS-small conformance suite (Phase 7A)
 
 `r7rs-tests.scm` is the chibi/Kaappi R7RS-small suite, vendored from
 `kaappi/tests/scheme/r7rs/r7rs-tests.scm`.
 
-**Status:** not executed by Chaaya CI yet.
+**Status:** wired into CTest as `r7rs_suite` via `tests/scheme/run_r7rs.cmake`.
+Execution is currently partial (section counts are reported even when the
+interpreter exits non-zero) while remaining runtime gaps are closed.
 
 It requires:
 

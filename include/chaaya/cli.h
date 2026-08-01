@@ -25,6 +25,8 @@ typedef enum ChCliCommand {
     CH_CMD_FMT,
     CH_CMD_CACHE_STATUS,
     CH_CMD_CACHE_CLEAR,
+    CH_CMD_LSP,
+    CH_CMD_WASM,
 } ChCliCommand;
 
 typedef struct ChCliOptions {
@@ -41,6 +43,7 @@ typedef struct ChCliOptions {
     const char *script_args[CH_VM_MAX_SCRIPT_ARGS];
     size_t script_arg_count;
     /* Flags accepted but not implemented (set → exit with message) */
+    int flag_native;
     int flag_compile;
     int flag_emit_llvm;
     int flag_disassemble;
@@ -56,6 +59,7 @@ typedef struct ChCliOptions {
     int flag_max_memory;
     int flag_profile_json;
     int flag_coverage_xml;
+    int flag_fmt_check; /* fmt --check */
     const char *nyi_flag; /* first not-yet-implemented flag name seen */
 } ChCliOptions;
 

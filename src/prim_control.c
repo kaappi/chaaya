@@ -1,7 +1,6 @@
 #include "chaaya/prim.h"
 
 #include "chaaya/eval.h"
-#include "chaaya/printer.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,68 +92,14 @@ static ChValue prim_with_exception_handler(ChVM *vm, ChValue *args, int nargs) {
     return finish_apply(vm, st, result);
 }
 
-static ChValue raise_common(ChVM *vm, ChValue obj, int continuable) {
-    if (vm->handler_count == 0) {
-        char *printed = ch_value_to_string(obj, false);
-        snprintf(vm->error, sizeof(vm->error), "uncaught exception: %s",
-                 printed ? printed : "#<unknown>");
-        free(printed);
-        return CH_UNDEFINED;
-    }
-
-    ChExceptionHandler eh = vm->handler_stack[vm->handler_count - 1];
-    if (!continuable) {
-        vm->handler_count--;
-        while (vm->wind_count > eh.wind_count) {
-            vm->wind_count--;
-            ChValue ignored = CH_VOID;
-            ChVMStatus st =
-                ch_vm_apply(vm, vm->wind_stack[vm->wind_count].after, NULL, 0, &ignored);
-            if (st == CH_VM_CONTINUATION_INVOKED) {
-                vm->continuation_invoked = true;
-                return CH_UNDEFINED;
-            }
-        }
-    }
-
-    ChValue call_args[1] = {obj};
-    ChValue result = CH_VOID;
-    ChVMStatus st = ch_vm_apply(vm, eh.handler, call_args, 1, &result);
-    if (st != CH_VM_OK) {
-        return finish_apply(vm, st, result);
-    }
-    if (!continuable) {
-        snprintf(vm->error, sizeof(vm->error),
-                 "exception handler returned (non-continuable exception)");
-        return CH_UNDEFINED;
-    }
-    return result;
-}
-
 static ChValue prim_raise(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    return raise_common(vm, args[0], 0);
+    return ch_vm_raise(vm, args[0], 0);
 }
 
 static ChValue prim_raise_continuable(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    return raise_common(vm, args[0], 1);
-}
-
-static ChValue prim_error(ChVM *vm, ChValue *args, int nargs) {
-    ChValue msg = nargs >= 1 ? args[0] : CH_NIL;
-    ChValue irritants = CH_NIL;
-    ch_gc_push(&vm->gc, &msg);
-    ch_gc_push(&vm->gc, &irritants);
-    for (int i = nargs - 1; i >= 1; i--) {
-        ChValue item = args[i];
-        ch_gc_push(&vm->gc, &item);
-        irritants = ch_gc_cons(&vm->gc, item, irritants);
-        ch_gc_pop(&vm->gc);
-    }
-    ChValue err = ch_gc_cons(&vm->gc, msg, irritants);
-    ch_gc_pop_n(&vm->gc, 2);
-    return raise_common(vm, err, 0);
+    return ch_vm_raise(vm, args[0], 1);
 }
 
 /* Kaappi-style Scheme dynamic-wind over %push-wind / %pop-wind. */
@@ -176,7 +121,6 @@ void ch_register_control_primitives(ChVM *vm) {
     define_prim(vm, "with-exception-handler", prim_with_exception_handler, 2, 2);
     define_prim(vm, "raise", prim_raise, 1, 1);
     define_prim(vm, "raise-continuable", prim_raise_continuable, 1, 1);
-    define_prim(vm, "error", prim_error, -1, 1);
 
     /* Install Scheme dynamic-wind (must run after %push-wind / %pop-wind). */
     if (ch_eval_source(vm, dynamic_wind_src, strlen(dynamic_wind_src), 0) != 0) {

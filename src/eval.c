@@ -1,6 +1,7 @@
 #include "chaaya/eval.h"
 
 #include "chaaya/compiler.h"
+#include "chaaya/environment.h"
 #include "chaaya/library.h"
 #include "chaaya/printer.h"
 #include "chaaya/reader.h"
@@ -61,7 +62,113 @@ const char *ch_value_type_name(ChValue v) {
     if (ch_is_function(v)) {
         return "function";
     }
+    if (ch_is_environment(v)) {
+        return "environment";
+    }
+    if (ch_is_error_object(v)) {
+        return "error-object";
+    }
+    if (ch_is_parameter(v)) {
+        return "parameter";
+    }
+    if (ch_is_hashtable(v)) {
+        return "hashtable";
+    }
+    if (ch_is_bytevector(v)) {
+        return "bytevector";
+    }
+    if (ch_is_time(v)) {
+        return "time";
+    }
     return "unknown";
+}
+
+static int is_toplevel_keyword(ChValue expr, const char *name) {
+    return ch_is_pair(expr) && ch_is_symbol(ch_car(expr)) &&
+           strcmp(ch_symbol_basename(ch_as_symbol(ch_car(expr))), name) == 0;
+}
+
+static int eval_import_into_env(ChVM *vm, ChValue sets, ChLibEnv *env) {
+    while (ch_is_pair(sets)) {
+        if (ch_import_set_into_env(vm, ch_car(sets), env) != 0) {
+            return -1;
+        }
+        sets = ch_cdr(sets);
+    }
+    if (!ch_is_nil(sets)) {
+        snprintf(vm->error, sizeof(vm->error), "import: improper list");
+        return -1;
+    }
+    return 0;
+}
+
+int ch_eval_datum(ChVM *vm, ChValue expr, ChValue env_or_void, ChValue *out) {
+    if (out) {
+        *out = CH_VOID;
+    }
+
+    ChEnvironment *env_obj = NULL;
+    ChLibEnv *eval_env = NULL;
+    if (env_or_void != CH_VOID) {
+        if (!ch_is_environment(env_or_void)) {
+            snprintf(vm->error, sizeof(vm->error), "eval: expected environment");
+            return -1;
+        }
+        env_obj = ch_as_environment(env_or_void);
+        if (env_obj->kind != CH_ENV_INTERACTION) {
+            eval_env = &env_obj->env;
+        }
+    }
+
+    ChLibEnv *saved_active_env = vm->active_lib_env;
+    vm->active_lib_env = eval_env;
+
+    ChValue expr_root = expr;
+    ch_gc_push(&vm->gc, &expr_root);
+
+    int rc = 0;
+    ChValue result = CH_VOID;
+
+    if (is_toplevel_keyword(expr_root, "import")) {
+        if (eval_env) {
+            rc = eval_import_into_env(vm, ch_cdr(expr_root), eval_env);
+        } else if (ch_handle_import(vm, ch_cdr(expr_root)) != 0) {
+            rc = -1;
+        }
+    } else if (is_toplevel_keyword(expr_root, "define-library") ||
+               is_toplevel_keyword(expr_root, "include") ||
+               is_toplevel_keyword(expr_root, "include-ci") ||
+               is_toplevel_keyword(expr_root, "cond-expand")) {
+        if (ch_eval_toplevel_form(vm, expr_root) != 0) {
+            rc = -1;
+        }
+    } else {
+        ChCompiler compiler;
+        ch_compiler_init(&compiler, vm);
+        ChFunction *fn = NULL;
+        if (ch_compile_toplevel(&compiler, expr_root, &fn) != CH_COMPILE_OK) {
+            snprintf(vm->error, sizeof(vm->error), "%s", ch_compiler_error(&compiler));
+            rc = -1;
+        } else {
+            ch_gc_push(&vm->gc, &result);
+            ChVMStatus st = ch_vm_eval_function(vm, fn, &result);
+            ch_gc_pop(&vm->gc);
+            if (st != CH_VM_OK || (vm->error[0] != '\0' && result == CH_UNDEFINED)) {
+                rc = -1;
+            }
+        }
+    }
+
+    ch_gc_pop(&vm->gc);
+    vm->active_lib_env = saved_active_env;
+
+    if (rc != 0) {
+        return -1;
+    }
+    if (out) {
+        *out = result;
+    }
+    return 0;
 }
 
 int ch_eval_source(ChVM *vm, const char *source, size_t len, int print_results) {
@@ -90,41 +197,10 @@ int ch_eval_source(ChVM *vm, const char *source, size_t len, int print_results) 
             return 1;
         }
 
-        if (ch_is_pair(expr) && ch_is_symbol(ch_car(expr))) {
-            const char *head = ch_symbol_basename(ch_as_symbol(ch_car(expr)));
-            if (strcmp(head, "import") == 0 || strcmp(head, "define-library") == 0 ||
-                strcmp(head, "include") == 0 || strcmp(head, "include-ci") == 0 ||
-                strcmp(head, "cond-expand") == 0) {
-                if (ch_eval_toplevel_form(vm, expr) != 0) {
-                    fprintf(stderr, "error: %s\n", ch_vm_error(vm));
-                    ch_gc_pop(&vm->gc);
-                    return 1;
-                }
-                ch_gc_pop(&vm->gc);
-                continue;
-            }
-        }
-
-        ChCompiler compiler;
-        ch_compiler_init(&compiler, vm);
-        ChFunction *fn = NULL;
-        if (ch_compile_toplevel(&compiler, expr, &fn) != CH_COMPILE_OK) {
-            fprintf(stderr, "compile error: %s\n", ch_compiler_error(&compiler));
-            ch_gc_pop(&vm->gc);
-            return 1;
-        }
-
         ChValue result = CH_VOID;
-        ch_gc_push(&vm->gc, &result);
-        ChVMStatus vs = ch_vm_eval_function(vm, fn, &result);
-        if (vs != CH_VM_OK) {
-            fprintf(stderr, "runtime error: %s\n", ch_vm_error(vm));
-            ch_gc_pop_n(&vm->gc, 2);
-            return 1;
-        }
-        if (vm->error[0] != '\0' && result == CH_UNDEFINED) {
-            fprintf(stderr, "runtime error: %s\n", ch_vm_error(vm));
-            ch_gc_pop_n(&vm->gc, 2);
+        if (ch_eval_datum(vm, expr, CH_VOID, &result) != 0) {
+            fprintf(stderr, "error: %s\n", ch_vm_error(vm));
+            ch_gc_pop(&vm->gc);
             return 1;
         }
         if (result != CH_VOID) {
@@ -134,9 +210,70 @@ int ch_eval_source(ChVM *vm, const char *source, size_t len, int print_results) 
                 fputc('\n', stdout);
             }
         }
-        ch_gc_pop_n(&vm->gc, 2);
+        ch_gc_pop(&vm->gc);
     }
     return 0;
+}
+
+int ch_eval_file(ChVM *vm, const char *path, ChValue env_or_void, ChValue *last_out) {
+    if (last_out) {
+        *last_out = CH_VOID;
+    }
+
+    size_t len = 0;
+    char *source = ch_read_file(path, &len);
+    if (!source) {
+        snprintf(vm->error, sizeof(vm->error), "load: cannot read %s", path);
+        return -1;
+    }
+
+    ChReader reader;
+    ch_reader_init(&reader, &vm->gc, source, len);
+
+    ChValue last = CH_VOID;
+    ch_gc_push(&vm->gc, &last);
+
+    int rc = 0;
+    for (;;) {
+        ChValue expr = CH_NIL;
+        ch_gc_push(&vm->gc, &expr);
+        for (size_t i = 0; i < vm->global_count; i++) {
+            ch_gc_push(&vm->gc, &vm->globals[i].value);
+        }
+        for (size_t i = 0; i < vm->macro_count; i++) {
+            ch_gc_push(&vm->gc, &vm->macros[i].transformer);
+        }
+        size_t lib_roots = ch_library_push_gc_roots(vm);
+        ChReadStatus rs = ch_read_datum(&reader, &expr);
+        ch_gc_pop_n(&vm->gc, vm->global_count + vm->macro_count + lib_roots);
+        if (rs == CH_READ_EOF) {
+            ch_gc_pop(&vm->gc);
+            break;
+        }
+        if (rs != CH_READ_OK) {
+            snprintf(vm->error, sizeof(vm->error), "load: read error in %s: %s", path,
+                     ch_reader_error(&reader));
+            ch_gc_pop(&vm->gc);
+            rc = -1;
+            break;
+        }
+
+        ChValue result = CH_VOID;
+        if (ch_eval_datum(vm, expr, env_or_void, &result) != 0) {
+            ch_gc_pop(&vm->gc);
+            rc = -1;
+            break;
+        }
+        last = result;
+        ch_gc_pop(&vm->gc);
+    }
+
+    if (rc == 0 && last_out) {
+        *last_out = last;
+    }
+    ch_gc_pop(&vm->gc);
+    free(source);
+    return rc;
 }
 
 char *ch_read_file(const char *path, size_t *out_len) {

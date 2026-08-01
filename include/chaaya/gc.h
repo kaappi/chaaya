@@ -11,13 +11,22 @@ extern "C" {
 
 #define CH_GC_ROOT_MAX 4096
 #define CH_GC_DEFAULT_THRESHOLD 1024
+#define CH_GC_DEFAULT_PROMOTION_AGE 2
+#define CH_GC_DEFAULT_MAJOR_INTERVAL 8
 
 typedef struct ChGC {
-    ChObject *objects;
+    ChObject *young_objects;
+    ChObject *old_objects;
+    size_t young_count;
+    size_t old_count;
     size_t object_count;
     size_t alloc_count;
     size_t threshold;
     size_t collections;
+    size_t minor_collections;
+    size_t major_collections;
+    uint8_t promotion_age;
+    uint8_t major_interval;
     ChValue *roots[CH_GC_ROOT_MAX];
     size_t root_count;
     /* symbol intern table */
@@ -34,6 +43,9 @@ void ch_gc_pop(ChGC *gc);
 void ch_gc_pop_n(ChGC *gc, size_t n);
 
 void ch_gc_collect(ChGC *gc);
+void ch_gc_collect_minor(ChGC *gc);
+void ch_gc_collect_major(ChGC *gc);
+void ch_gc_write_barrier(ChGC *gc, ChObject *owner, ChValue value);
 void *ch_gc_alloc(ChGC *gc, size_t size, ChObjectTag tag);
 
 ChValue ch_gc_cons(ChGC *gc, ChValue car, ChValue cdr);
@@ -50,11 +62,18 @@ ChValue ch_gc_make_values(ChGC *gc, ChValue *items, size_t count);
 ChValue ch_gc_make_stdio_port(ChGC *gc, FILE *file, int input, int output);
 ChValue ch_gc_make_string_input_port(ChGC *gc, const char *bytes, size_t len);
 ChValue ch_gc_make_string_output_port(ChGC *gc);
+ChValue ch_gc_make_bytevector_input_port(ChGC *gc, const uint8_t *bytes, size_t len);
+ChValue ch_gc_make_bytevector_output_port(ChGC *gc);
 ChValue ch_gc_make_transformer(ChGC *gc);
 ChValue ch_gc_make_record_type(ChGC *gc, ChValue name, uint16_t num_fields);
 ChValue ch_gc_make_record(ChGC *gc, ChRecordType *rtype, ChValue *fields, uint16_t nfields);
 ChValue ch_gc_make_promise(ChGC *gc, int forced, ChValue value);
 ChValue ch_gc_make_file_port(ChGC *gc, FILE *file, int input, int output);
+ChValue ch_gc_make_error_object(ChGC *gc, ChValue message, ChValue irritants, uint8_t error_type);
+ChValue ch_gc_make_parameter(ChGC *gc, ChValue init, ChValue converter);
+ChValue ch_gc_make_hashtable(ChGC *gc, size_t capacity);
+ChValue ch_gc_make_bytevector(ChGC *gc, size_t len, uint8_t fill);
+ChValue ch_gc_make_time(ChGC *gc, int64_t seconds, int32_t nanoseconds, ChValue type_sym);
 
 #ifdef __cplusplus
 }

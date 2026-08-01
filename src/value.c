@@ -129,6 +129,42 @@ bool ch_is_complex_obj(ChValue v) {
     return CH_IS_TAG(v, CH_TAG_COMPLEX);
 }
 
+bool ch_is_error_object(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_ERROR_OBJ);
+}
+
+bool ch_is_parameter(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_PARAMETER);
+}
+
+bool ch_is_hashtable(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_HASHTABLE);
+}
+
+bool ch_is_bytevector(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_BYTEVECTOR);
+}
+
+bool ch_is_time(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_TIME);
+}
+
+bool ch_is_fiber(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_FIBER);
+}
+
+bool ch_is_channel(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_CHANNEL);
+}
+
+bool ch_is_foreign_library(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_FOREIGN_LIBRARY);
+}
+
+bool ch_is_foreign_procedure(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_FOREIGN_PROC);
+}
+
 bool ch_is_exact_integer(ChValue v) {
     return ch_is_fixnum(v) || ch_is_bignum(v);
 }
@@ -143,7 +179,8 @@ bool ch_is_number(ChValue v) {
 }
 
 bool ch_is_procedure(ChValue v) {
-    return ch_is_closure(v) || ch_is_native(v) || ch_is_continuation(v);
+    return ch_is_closure(v) || ch_is_native(v) || ch_is_continuation(v) || ch_is_parameter(v) ||
+           ch_is_foreign_procedure(v);
 }
 
 ChPair *ch_as_pair(ChValue v) {
@@ -214,6 +251,42 @@ ChComplex *ch_as_complex(ChValue v) {
     return (ChComplex *)ch_to_object(v);
 }
 
+ChErrorObject *ch_as_error_object(ChValue v) {
+    return (ChErrorObject *)ch_to_object(v);
+}
+
+ChParameter *ch_as_parameter(ChValue v) {
+    return (ChParameter *)ch_to_object(v);
+}
+
+ChHashtable *ch_as_hashtable(ChValue v) {
+    return (ChHashtable *)ch_to_object(v);
+}
+
+ChBytevector *ch_as_bytevector(ChValue v) {
+    return (ChBytevector *)ch_to_object(v);
+}
+
+ChTime *ch_as_time(ChValue v) {
+    return (ChTime *)ch_to_object(v);
+}
+
+ChFiber *ch_as_fiber(ChValue v) {
+    return (ChFiber *)ch_to_object(v);
+}
+
+ChChannel *ch_as_channel(ChValue v) {
+    return (ChChannel *)ch_to_object(v);
+}
+
+ChForeignLibrary *ch_as_foreign_library(ChValue v) {
+    return (ChForeignLibrary *)ch_to_object(v);
+}
+
+ChForeignProcedure *ch_as_foreign_procedure(ChValue v) {
+    return (ChForeignProcedure *)ch_to_object(v);
+}
+
 const char *ch_symbol_basename(ChSymbol *sym) {
     const char *name = sym->name;
     if (strncmp(name, "__hyg_", 6) != 0) {
@@ -260,6 +333,14 @@ bool ch_eq(ChValue a, ChValue b) {
     return a == b;
 }
 
+static bool inexact_bits_equal(double x, double y) {
+    uint64_t xb = 0;
+    uint64_t yb = 0;
+    memcpy(&xb, &x, sizeof(xb));
+    memcpy(&yb, &y, sizeof(yb));
+    return xb == yb;
+}
+
 bool ch_eqv(ChValue a, ChValue b) {
     if (a == b) {
         return true;
@@ -284,17 +365,13 @@ bool ch_eqv(ChValue a, ChValue b) {
         }
     }
     if (ch_is_flonum(a) && ch_is_flonum(b)) {
-        double x = ch_to_flonum(a);
-        double y = ch_to_flonum(b);
-        if (x != x && y != y) {
-            return true; /* both NaN */
-        }
-        return x == y;
+        /* Preserve IEEE distinctions such as +0.0 vs -0.0. */
+        return inexact_bits_equal(ch_to_flonum(a), ch_to_flonum(b));
     }
     if (ch_is_complex_obj(a) && ch_is_complex_obj(b)) {
         ChComplex *ca = ch_as_complex(a);
         ChComplex *cb = ch_as_complex(b);
-        return ca->real == cb->real && ca->imag == cb->imag;
+        return inexact_bits_equal(ca->real, cb->real) && inexact_bits_equal(ca->imag, cb->imag);
     }
     if (ch_is_char(a) && ch_is_char(b)) {
         return ch_to_char(a) == ch_to_char(b);
@@ -331,6 +408,17 @@ bool ch_equal(ChValue a, ChValue b) {
             }
         }
         return true;
+    }
+    if (ch_is_bytevector(a) && ch_is_bytevector(b)) {
+        ChBytevector *ba = ch_as_bytevector(a);
+        ChBytevector *bb = ch_as_bytevector(b);
+        if (ba->len != bb->len) {
+            return false;
+        }
+        if (ba->len == 0) {
+            return true;
+        }
+        return memcmp(ba->data, bb->data, ba->len) == 0;
     }
     return false;
 }

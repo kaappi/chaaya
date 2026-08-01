@@ -1,0 +1,15 @@
+(define-library (srfi 2)
+  (import (scheme base))
+  (export and-let*)
+  (begin
+    (define-syntax and-let*
+      (syntax-rules ()
+        ((and-let* () body ...)
+         (begin #t body ...))
+        ((and-let* ((var expr) rest ...) body ...)
+         (let ((var expr))
+           (if var (and-let* (rest ...) body ...) #f)))
+        ((and-let* ((expr) rest ...) body ...)
+         (if expr (and-let* (rest ...) body ...) #f))
+        ((and-let* (bound-var rest ...) body ...)
+         (if bound-var (and-let* (rest ...) body ...) #f))))))

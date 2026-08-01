@@ -17,10 +17,13 @@ extern "C" {
 #define CH_VM_MAX_SCRIPT_ARGS 64
 #define CH_VM_MAX_WINDS 64
 #define CH_VM_MAX_HANDLERS 64
+#define CH_VM_MAX_PARAMETER_BINDINGS 256
 #define CH_VM_MAX_MACROS 256
+#define CH_VM_MAX_BREAKPOINTS 32
 
 struct ChLibEnv;
 struct ChLibraryRegistry;
+struct ChFiberRuntime;
 
 typedef enum ChVMStatus {
     CH_VM_OK = 0,
@@ -64,6 +67,8 @@ typedef struct ChVM {
     size_t wind_count;
     ChExceptionHandler handler_stack[CH_VM_MAX_HANDLERS];
     size_t handler_count;
+    ChParameterBinding parameter_stack[CH_VM_MAX_PARAMETER_BINDINGS];
+    size_t parameter_count;
 
     /* compile-time macros (define-syntax) */
     ChMacroEntry macros[CH_VM_MAX_MACROS];
@@ -87,6 +92,15 @@ typedef struct ChVM {
     const char *script_path;
     const char *script_args[CH_VM_MAX_SCRIPT_ARGS];
     size_t script_arg_count;
+
+    /* Phase 10: cooperative fibers + timer reactor. */
+    struct ChFiberRuntime *fiber_runtime;
+
+    /* REPL debugger (Phase 8 MVP). */
+    bool debug_mode;
+    bool step_trace;
+    char breakpoints[CH_VM_MAX_BREAKPOINTS][64];
+    size_t breakpoint_count;
 } ChVM;
 
 void ch_vm_init(ChVM *vm);
@@ -102,6 +116,15 @@ ChVMStatus ch_vm_eval_function(ChVM *vm, ChFunction *fn, ChValue *out);
 
 /* Call a procedure without clearing the existing stack (for dynamic-wind etc.). */
 ChVMStatus ch_vm_apply(ChVM *vm, ChValue proc, ChValue *args, int nargs, ChValue *out);
+
+/* Parameter object dynamic binding helpers. */
+ChValue ch_vm_parameter_ref(ChVM *vm, ChValue parameter);
+int ch_vm_parameter_set(ChVM *vm, ChValue parameter, ChValue value);
+int ch_vm_parameter_push(ChVM *vm, ChValue parameter, ChValue value);
+int ch_vm_parameter_pop(ChVM *vm, ChValue parameter);
+
+/* Raise a Scheme condition object through the handler stack. */
+ChValue ch_vm_raise(ChVM *vm, ChValue obj, int continuable);
 
 ChValue ch_vm_capture_continuation(ChVM *vm, size_t result_slot);
 ChVMStatus ch_vm_invoke_continuation(ChVM *vm, ChContinuation *cont, ChValue value);

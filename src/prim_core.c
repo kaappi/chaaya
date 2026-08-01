@@ -47,7 +47,13 @@ static ChValue prim_set_car(ChVM *vm, ChValue *args, int nargs) {
         snprintf(vm->error, sizeof(vm->error), "set-car!: not a pair");
         return CH_UNDEFINED;
     }
-    ch_set_car(args[0], args[1]);
+    if (ch_object_is_immutable(&ch_as_pair(args[0])->header)) {
+        snprintf(vm->error, sizeof(vm->error), "set-car!: immutable pair");
+        return CH_UNDEFINED;
+    }
+    ChPair *pair = ch_as_pair(args[0]);
+    pair->car = args[1];
+    ch_gc_write_barrier(&vm->gc, &pair->header, args[1]);
     return CH_VOID;
 }
 
@@ -57,7 +63,13 @@ static ChValue prim_set_cdr(ChVM *vm, ChValue *args, int nargs) {
         snprintf(vm->error, sizeof(vm->error), "set-cdr!: not a pair");
         return CH_UNDEFINED;
     }
-    ch_set_cdr(args[0], args[1]);
+    if (ch_object_is_immutable(&ch_as_pair(args[0])->header)) {
+        snprintf(vm->error, sizeof(vm->error), "set-cdr!: immutable pair");
+        return CH_UNDEFINED;
+    }
+    ChPair *pair = ch_as_pair(args[0]);
+    pair->cdr = args[1];
+    ch_gc_write_barrier(&vm->gc, &pair->header, args[1]);
     return CH_VOID;
 }
 

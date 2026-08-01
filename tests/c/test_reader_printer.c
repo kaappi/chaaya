@@ -145,6 +145,9 @@ int main(void) {
     if (!check_roundtrip(&gc, "#(1 2)", "#(1 2)")) {
         return 1;
     }
+    if (!check_roundtrip(&gc, "#u8(1 2 255)", "#u8(1 2 255)")) {
+        return 1;
+    }
     if (!check_roundtrip(&gc, "(1 . 2)", "(1 . 2)")) {
         return 1;
     }

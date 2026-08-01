@@ -7,6 +7,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 option(CHAAYA_WARNINGS_AS_ERRORS "Treat warnings as errors" ON)
 option(CHAAYA_USE_LINENOISE "Use linenoise for interactive REPL (POSIX)" ON)
+option(CHAAYA_WASM "Enable wasm32-wasi target (or stub target)" OFF)
 
 set(CHAAYA_HAS_LINENOISE_VALUE 0)
 if(CHAAYA_USE_LINENOISE AND NOT WIN32)
@@ -16,25 +17,44 @@ endif()
 add_library(chaaya_core STATIC
   src/value.c
   src/gc.c
+  src/hashtable.c
   src/bignum.c
   src/rational.c
   src/complex.c
   src/reader.c
   src/printer.c
+  src/ir.c
+  src/ir_lower.c
+  src/ir_analyze.c
+  src/ir_opt.c
+  src/ir_emit.c
   src/compiler.c
   src/expander.c
+  src/environment.c
   src/library.c
   src/features.c
+  src/fiber.c
+  src/reactor.c
+  src/ffi.c
+  src/llvm_backend.c
+  src/lsp.c
   src/vm.c
   src/prim_core.c
   src/prim_control.c
+  src/prim_fiber.c
+  src/prim_ffi.c
   src/prim_list.c
   src/prim_data.c
+  src/prim_bytevector.c
   src/prim_math.c
   src/prim_port.c
+  src/prim_error.c
   src/prim_record.c
   src/prim_lazy.c
+  src/prim_eval.c
+  src/prim_hashtable.c
   src/eval.c
+  src/cache.c
   src/cli.c
   src/repl.c
 )
@@ -57,12 +77,35 @@ if(CHAAYA_HAS_LINENOISE_VALUE)
   target_compile_definitions(chaaya_core PUBLIC CHAAYA_HAS_LINENOISE=1)
 endif()
 
+if(UNIX AND NOT APPLE)
+  target_link_libraries(chaaya_core PUBLIC dl)
+endif()
+
 add_executable(chaaya src/main.c)
 target_link_libraries(chaaya PRIVATE chaaya_core)
 target_compile_options(chaaya PRIVATE
   -Wall -Wextra -Wpedantic
   $<$<BOOL:${CHAAYA_WARNINGS_AS_ERRORS}>:-Werror>
 )
+
+if(CHAAYA_WASM)
+  if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
+    add_executable(chaaya_wasm src/main.c)
+    target_link_libraries(chaaya_wasm PRIVATE chaaya_core)
+    target_compile_options(chaaya_wasm PRIVATE
+      -Wall -Wextra -Wpedantic
+      $<$<BOOL:${CHAAYA_WARNINGS_AS_ERRORS}>:-Werror>
+    )
+    set_target_properties(chaaya_wasm PROPERTIES OUTPUT_NAME chaaya-wasm)
+  else()
+    add_executable(chaaya_wasm src/wasm_stub.c)
+    target_compile_options(chaaya_wasm PRIVATE
+      -Wall -Wextra -Wpedantic
+      $<$<BOOL:${CHAAYA_WARNINGS_AS_ERRORS}>:-Werror>
+    )
+    set_target_properties(chaaya_wasm PROPERTIES OUTPUT_NAME chaaya-wasm)
+  endif()
+endif()
 
 enable_testing()
 
@@ -79,6 +122,7 @@ endfunction()
 chaaya_add_test(test_smoke tests/c/test_smoke.c)
 chaaya_add_test(test_value_gc tests/c/test_value_gc.c)
 chaaya_add_test(test_reader_printer tests/c/test_reader_printer.c)
+chaaya_add_test(test_ir tests/c/test_ir.c)
 chaaya_add_test(test_vm tests/c/test_vm.c)
 chaaya_add_test(test_primitives tests/c/test_primitives.c)
 chaaya_add_test(test_cli tests/c/test_cli.c)
@@ -123,6 +167,9 @@ chaaya_bootstrap_test(control-cont)
 chaaya_bootstrap_test(wave2)
 chaaya_bootstrap_test(macros)
 chaaya_bootstrap_test(derived)
+chaaya_bootstrap_test(base-audit)
+chaaya_bootstrap_test(fibers)
+chaaya_bootstrap_test(ffi)
 
 function(chaaya_bootstrap_test_libpath name)
   add_test(
@@ -137,11 +184,29 @@ function(chaaya_bootstrap_test_libpath name)
 endfunction()
 
 chaaya_bootstrap_test_libpath(libraries)
+chaaya_bootstrap_test_libpath(srfi-smoke)
 chaaya_bootstrap_test(include-cond)
 chaaya_bootstrap_test(records)
 chaaya_bootstrap_test(case-lambda)
 chaaya_bootstrap_test(lazy)
 chaaya_bootstrap_test(file-ports)
+chaaya_bootstrap_test(bytevectors)
+chaaya_bootstrap_test(eval)
+chaaya_bootstrap_test(exceptions)
+chaaya_bootstrap_test(hashtables)
+chaaya_bootstrap_test(numeric-io)
+
+# Phase 7A: wire the vendored R7RS suite into CTest. The wrapper records
+# section pass/fail counts even when execution is still partial.
+add_test(
+  NAME r7rs_suite
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -DINPUT=${CMAKE_SOURCE_DIR}/tests/scheme/r7rs/r7rs-tests.scm
+    -DLIB_PATH=${CMAKE_SOURCE_DIR}/lib
+    -P ${CMAKE_SOURCE_DIR}/tests/scheme/run_r7rs.cmake
+)
+set_tests_properties(r7rs_suite PROPERTIES TIMEOUT 300)
 
 # Display probes adapted from Kaappi differential/probes
 function(chaaya_probe_test name)
@@ -172,10 +237,57 @@ set_tests_properties(cli_features PROPERTIES PASS_REGULAR_EXPRESSION "bootstrap"
 add_test(NAME cli_ast COMMAND $<TARGET_FILE:chaaya> ast ${CMAKE_SOURCE_DIR}/tests/scheme/fact.scm)
 set_tests_properties(cli_ast PROPERTIES PASS_REGULAR_EXPRESSION "define")
 
+add_test(NAME cli_expand
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -DINPUT=${CMAKE_SOURCE_DIR}/tests/cli/expand_input.scm
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/run_expand.cmake
+)
+
+add_test(NAME cli_check
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -DINPUT=${CMAKE_SOURCE_DIR}/tests/cli/check_ok.scm
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/run_check_ok.cmake
+)
+
+add_test(NAME cli_check_compile_error
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -DINPUT=${CMAKE_SOURCE_DIR}/tests/cli/check_compile_error.scm
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/expect_check_compile_error.cmake
+)
+
+add_test(NAME cli_fmt_check
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -DINPUT=${CMAKE_SOURCE_DIR}/tests/cli/fmt_ok.scm
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/run_fmt_check.cmake
+)
+
 add_test(NAME cli_nyi_compile
   COMMAND ${CMAKE_COMMAND}
     -DCHAAYA=$<TARGET_FILE:chaaya>
     -P ${CMAKE_SOURCE_DIR}/tests/cli/expect_nyi_compile.cmake
+)
+
+add_test(NAME cli_nyi_native
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -DINPUT=${CMAKE_SOURCE_DIR}/tests/cli/check_ok.scm
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/expect_nyi_native.cmake
+)
+
+add_test(NAME cli_nyi_wasm
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/expect_nyi_wasm.cmake
+)
+
+add_test(NAME cli_lsp_initialize_shutdown
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/run_lsp_init_shutdown.cmake
 )
 
 add_test(NAME cli_stdin

@@ -2,6 +2,8 @@
 
 #include "chaaya/library.h"
 
+#include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +11,8 @@
 static const char *const k_features[] = {
     "r7rs",
     "chaaya",
+    "chaaya-fibers",
+    "chaaya-ffi",
     "ieee-float",
     "exact-closed",
 #if defined(__APPLE__)
@@ -38,6 +42,9 @@ int ch_feature_present(const char *name) {
     return 0;
 }
 
+static int parse_srfi_feature_number(const char *name, int64_t *out);
+static int parse_srfi261_suffix_number(const char *name, int64_t *out);
+
 static int library_available(ChVM *vm, ChValue name_list) {
     char *dotted = ch_library_name_to_string(name_list);
     if (!dotted) {
@@ -54,12 +61,109 @@ static int library_available(ChVM *vm, ChValue name_list) {
     }
     int ok = ch_library_file_exists(vm, rel);
     free(rel);
-    return ok;
+    if (ok) {
+        return 1;
+    }
+
+    /* SRFI 261 fallback: (srfi <mnemonic>-<n>) -> (srfi <n>) when direct form is absent. */
+    if (ch_is_pair(name_list) && ch_is_symbol(ch_car(name_list)) &&
+        strcmp(ch_symbol_basename(ch_as_symbol(ch_car(name_list))), "srfi") == 0) {
+        ChValue rest = ch_cdr(name_list);
+        if (ch_is_pair(rest) && ch_is_symbol(ch_car(rest))) {
+            int64_t n = 0;
+            if (parse_srfi261_suffix_number(ch_as_symbol(ch_car(rest))->name, &n)) {
+                if (n == 261) {
+                    return 1;
+                }
+                char fallback_rel[64];
+                if (snprintf(fallback_rel, sizeof(fallback_rel), "srfi/%lld.sld", (long long)n) <
+                    (int)sizeof(fallback_rel)) {
+                    return ch_library_file_exists(vm, fallback_rel);
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int parse_srfi_feature_number(const char *name, int64_t *out) {
+    static const char prefix[] = "srfi-";
+    const size_t prefix_len = sizeof(prefix) - 1;
+    if (strncmp(name, prefix, prefix_len) != 0) {
+        return 0;
+    }
+
+    const char *digits = name + prefix_len;
+    if (*digits == '\0') {
+        return 0;
+    }
+    for (const char *p = digits; *p; p++) {
+        if (!isdigit((unsigned char)*p)) {
+            return 0;
+        }
+    }
+
+    errno = 0;
+    char *end = NULL;
+    long long parsed = strtoll(digits, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || parsed < 0 || parsed > CH_FIXNUM_MAX) {
+        return 0;
+    }
+    *out = (int64_t)parsed;
+    return 1;
+}
+
+static int parse_srfi261_suffix_number(const char *name, int64_t *out) {
+    const char *dash = strrchr(name, '-');
+    if (!dash || dash == name || dash[1] == '\0') {
+        return 0;
+    }
+    for (const char *p = dash + 1; *p; p++) {
+        if (!isdigit((unsigned char)*p)) {
+            return 0;
+        }
+    }
+    errno = 0;
+    char *end = NULL;
+    long long parsed = strtoll(dash + 1, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || parsed < 0 || parsed > CH_FIXNUM_MAX) {
+        return 0;
+    }
+    *out = (int64_t)parsed;
+    return 1;
+}
+
+static int srfi_feature_available(ChVM *vm, const char *name) {
+    int64_t srfi_num = 0;
+    if (!parse_srfi_feature_number(name, &srfi_num)) {
+        return 0;
+    }
+    if (srfi_num == 261) {
+        return 1; /* SRFI 261 is a naming convention (no .sld required). */
+    }
+
+    char dotted[64];
+    if (snprintf(dotted, sizeof(dotted), "srfi.%lld", (long long)srfi_num) >= (int)sizeof(dotted)) {
+        return 0;
+    }
+    if (vm->libraries && ch_library_lookup(vm->libraries, dotted)) {
+        return 1;
+    }
+
+    char rel[64];
+    if (snprintf(rel, sizeof(rel), "srfi/%lld.sld", (long long)srfi_num) >= (int)sizeof(rel)) {
+        return 0;
+    }
+    return ch_library_file_exists(vm, rel);
 }
 
 int ch_eval_feature_req(ChVM *vm, ChValue req) {
     if (ch_is_symbol(req)) {
-        return ch_feature_present(ch_as_symbol(req)->name);
+        const char *name = ch_as_symbol(req)->name;
+        if (ch_feature_present(name)) {
+            return 1;
+        }
+        return srfi_feature_available(vm, name);
     }
     if (!ch_is_pair(req) || !ch_is_symbol(ch_car(req))) {
         return 0;

@@ -198,6 +198,72 @@ static ChValue prim_list_tail(ChVM *vm, ChValue *args, int nargs) {
     return lst;
 }
 
+static ChValue prim_list_set(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_fixnum(args[1])) {
+        snprintf(vm->error, sizeof(vm->error), "list-set!: index not an integer");
+        return CH_UNDEFINED;
+    }
+    int64_t k = ch_to_fixnum(args[1]);
+    if (k < 0) {
+        snprintf(vm->error, sizeof(vm->error), "list-set!: negative index");
+        return CH_UNDEFINED;
+    }
+    ChValue lst = args[0];
+    int64_t i = 0;
+    while (ch_is_pair(lst)) {
+        if (ch_object_is_immutable(ch_to_object(lst))) {
+            snprintf(vm->error, sizeof(vm->error), "list-set!: immutable pair");
+            return CH_UNDEFINED;
+        }
+        if (i == k) {
+            ch_set_car(lst, args[2]);
+            return CH_VOID;
+        }
+        i++;
+        lst = ch_cdr(lst);
+    }
+    snprintf(vm->error, sizeof(vm->error), "list-set!: index out of range");
+    return CH_UNDEFINED;
+}
+
+static ChValue prim_list_copy(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChValue src = args[0];
+    if (ch_is_nil(src)) {
+        return CH_NIL;
+    }
+    if (!ch_is_pair(src)) {
+        return src;
+    }
+
+    ChValue head = CH_NIL;
+    ChValue tail = CH_NIL;
+    ch_gc_push(&vm->gc, &head);
+    ch_gc_push(&vm->gc, &tail);
+    size_t steps = 0;
+    while (ch_is_pair(src)) {
+        if (steps++ > 1000000) {
+            ch_gc_pop_n(&vm->gc, 2);
+            snprintf(vm->error, sizeof(vm->error), "list-copy: list too long");
+            return CH_UNDEFINED;
+        }
+        ChValue cell = ch_gc_cons(&vm->gc, ch_car(src), CH_NIL);
+        if (ch_is_nil(head)) {
+            head = cell;
+        } else {
+            ch_set_cdr(tail, cell);
+        }
+        tail = cell;
+        src = ch_cdr(src);
+    }
+    if (!ch_is_nil(src)) {
+        ch_set_cdr(tail, src);
+    }
+    ch_gc_pop_n(&vm->gc, 2);
+    return head;
+}
+
 static ChValue prim_caar(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
     if (!ch_is_pair(args[0]) || !ch_is_pair(ch_car(args[0]))) {
@@ -386,6 +452,8 @@ void ch_register_list_primitives(ChVM *vm) {
     define_prim(vm, "reverse", prim_reverse, 1, 1);
     define_prim(vm, "list-ref", prim_list_ref, 2, 2);
     define_prim(vm, "list-tail", prim_list_tail, 2, 2);
+    define_prim(vm, "list-set!", prim_list_set, 3, 3);
+    define_prim(vm, "list-copy", prim_list_copy, 1, 1);
     define_prim(vm, "caar", prim_caar, 1, 1);
     define_prim(vm, "cadr", prim_cadr, 1, 1);
     define_prim(vm, "cdar", prim_cdar, 1, 1);

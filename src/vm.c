@@ -1,10 +1,15 @@
 #include "chaaya/vm.h"
 
 #include "chaaya/features.h"
+#include "chaaya/fiber.h"
+#include "chaaya/ffi.h"
 #include "chaaya/library.h"
 #include "chaaya/opcode.h"
+#include "chaaya/printer.h"
+#include "chaaya/environment.h"
 #include "chaaya/prim.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +18,10 @@ void ch_vm_init(ChVM *vm) {
     memset(vm, 0, sizeof(*vm));
     ch_gc_init(&vm->gc);
     vm->result = CH_VOID;
+    vm->fiber_runtime = (ChFiberRuntime *)calloc(1, sizeof(ChFiberRuntime));
+    if (vm->fiber_runtime) {
+        ch_fiber_runtime_init(vm->fiber_runtime);
+    }
     vm->libraries = (ChLibraryRegistry *)calloc(1, sizeof(ChLibraryRegistry));
     if (vm->libraries) {
         ch_library_registry_init(vm->libraries);
@@ -35,6 +44,11 @@ void ch_vm_deinit(ChVM *vm) {
         free(vm->loading_libs[i]);
     }
     free(vm->current_lib_dir);
+    if (vm->fiber_runtime) {
+        ch_fiber_runtime_deinit(vm->fiber_runtime);
+        free(vm->fiber_runtime);
+        vm->fiber_runtime = NULL;
+    }
     ch_gc_deinit(&vm->gc);
 }
 
@@ -71,11 +85,17 @@ void ch_vm_register_primitives(ChVM *vm) {
     ch_register_core_primitives(vm);
     ch_register_list_primitives(vm);
     ch_register_data_primitives(vm);
+    ch_register_bytevector_primitives(vm);
     ch_register_math_primitives(vm);
     ch_register_port_primitives(vm);
     ch_register_control_primitives(vm);
+    ch_register_error_primitives(vm);
     ch_register_record_primitives(vm);
     ch_register_lazy_primitives(vm);
+    ch_register_eval_primitives(vm);
+    ch_register_hashtable_primitives(vm);
+    ch_register_fiber_primitives(vm);
+    ch_register_ffi_primitives(vm);
     ch_register_features_primitives(vm);
     if (vm->libraries) {
         (void)ch_register_builtin_libraries(vm);
@@ -89,6 +109,100 @@ const char *ch_vm_error(const ChVM *vm) {
 static ChVMStatus runtime_error(ChVM *vm, const char *msg) {
     snprintf(vm->error, sizeof(vm->error), "%s", msg);
     return CH_VM_RUNTIME_ERROR;
+}
+
+ChValue ch_vm_parameter_ref(ChVM *vm, ChValue parameter) {
+    for (size_t i = vm->parameter_count; i > 0; i--) {
+        size_t idx = i - 1;
+        if (vm->parameter_stack[idx].parameter == parameter) {
+            return vm->parameter_stack[idx].value;
+        }
+    }
+    return ch_as_parameter(parameter)->value;
+}
+
+int ch_vm_parameter_set(ChVM *vm, ChValue parameter, ChValue value) {
+    for (size_t i = vm->parameter_count; i > 0; i--) {
+        size_t idx = i - 1;
+        if (vm->parameter_stack[idx].parameter == parameter) {
+            vm->parameter_stack[idx].value = value;
+            return 0;
+        }
+    }
+    ChParameter *param = ch_as_parameter(parameter);
+    param->value = value;
+    ch_gc_write_barrier(&vm->gc, &param->header, value);
+    return 0;
+}
+
+int ch_vm_parameter_push(ChVM *vm, ChValue parameter, ChValue value) {
+    if (vm->parameter_count >= CH_VM_MAX_PARAMETER_BINDINGS) {
+        snprintf(vm->error, sizeof(vm->error), "parameter stack overflow");
+        return -1;
+    }
+    vm->parameter_stack[vm->parameter_count].parameter = parameter;
+    vm->parameter_stack[vm->parameter_count].value = value;
+    vm->parameter_count++;
+    return 0;
+}
+
+int ch_vm_parameter_pop(ChVM *vm, ChValue parameter) {
+    if (vm->parameter_count == 0) {
+        snprintf(vm->error, sizeof(vm->error), "parameter stack underflow");
+        return -1;
+    }
+    size_t top = vm->parameter_count - 1;
+    if (vm->parameter_stack[top].parameter != parameter) {
+        snprintf(vm->error, sizeof(vm->error), "parameter stack mismatch");
+        return -1;
+    }
+    vm->parameter_count--;
+    return 0;
+}
+
+ChValue ch_vm_raise(ChVM *vm, ChValue obj, int continuable) {
+    if (vm->handler_count == 0) {
+        char *printed = ch_value_to_string(obj, false);
+        snprintf(vm->error, sizeof(vm->error), "uncaught exception: %s",
+                 printed ? printed : "#<unknown>");
+        free(printed);
+        return CH_UNDEFINED;
+    }
+
+    ChExceptionHandler eh = vm->handler_stack[vm->handler_count - 1];
+    if (!continuable) {
+        vm->handler_count--;
+        while (vm->wind_count > eh.wind_count) {
+            vm->wind_count--;
+            ChValue ignored = CH_VOID;
+            ChVMStatus st =
+                ch_vm_apply(vm, vm->wind_stack[vm->wind_count].after, NULL, 0, &ignored);
+            if (st == CH_VM_CONTINUATION_INVOKED) {
+                vm->continuation_invoked = true;
+                return CH_UNDEFINED;
+            }
+            if (st != CH_VM_OK) {
+                return CH_UNDEFINED;
+            }
+        }
+    }
+
+    ChValue call_args[1] = {obj};
+    ChValue result = CH_VOID;
+    ChVMStatus st = ch_vm_apply(vm, eh.handler, call_args, 1, &result);
+    if (st == CH_VM_CONTINUATION_INVOKED) {
+        vm->continuation_invoked = true;
+        return CH_UNDEFINED;
+    }
+    if (st != CH_VM_OK) {
+        return CH_UNDEFINED;
+    }
+    if (!continuable) {
+        snprintf(vm->error, sizeof(vm->error),
+                 "exception handler returned (non-continuable exception)");
+        return CH_UNDEFINED;
+    }
+    return result;
 }
 
 static uint8_t read_u8(ChCallFrame *frame) {
@@ -112,14 +226,12 @@ static ChValue *frame_regs(ChVM *vm, ChCallFrame *frame) {
 static ChValue frame_closure_roots[CH_VM_MAX_FRAMES];
 
 static size_t gc_root_span(ChVM *vm) {
-    size_t lib_exports = 0;
-    if (vm->libraries) {
-        for (size_t i = 0; i < vm->libraries->count; i++) {
-            lib_exports += vm->libraries->libs[i]->export_count;
-        }
+    size_t span = vm->reg_top + vm->global_count + vm->wind_count * 2 + vm->handler_count +
+                  vm->parameter_count * 2 + vm->macro_count + vm->frame_count;
+    if (vm->fiber_runtime) {
+        span += ch_fiber_runtime_root_count(vm->fiber_runtime);
     }
-    return vm->reg_top + vm->global_count + vm->wind_count * 2 + vm->handler_count +
-           vm->macro_count + vm->frame_count + lib_exports;
+    return span;
 }
 
 static void push_gc_roots(ChVM *vm) {
@@ -136,6 +248,10 @@ static void push_gc_roots(ChVM *vm) {
     for (size_t i = 0; i < vm->handler_count; i++) {
         ch_gc_push(&vm->gc, &vm->handler_stack[i].handler);
     }
+    for (size_t i = 0; i < vm->parameter_count; i++) {
+        ch_gc_push(&vm->gc, &vm->parameter_stack[i].parameter);
+        ch_gc_push(&vm->gc, &vm->parameter_stack[i].value);
+    }
     for (size_t i = 0; i < vm->macro_count; i++) {
         ch_gc_push(&vm->gc, &vm->macros[i].transformer);
     }
@@ -147,7 +263,9 @@ static void push_gc_roots(ChVM *vm) {
         }
         ch_gc_push(&vm->gc, &frame_closure_roots[i]);
     }
-    (void)ch_library_push_gc_roots(vm);
+    if (vm->fiber_runtime) {
+        (void)ch_fiber_runtime_push_roots(&vm->gc, vm->fiber_runtime);
+    }
 }
 
 static void pop_gc_roots_n(ChVM *vm, size_t n) {
@@ -282,6 +400,12 @@ ChValue ch_vm_capture_continuation(ChVM *vm, size_t result_slot) {
     c->handlers = (ChExceptionHandler *)alloc_or_abort(vm->handler_count, sizeof(ChExceptionHandler));
     memcpy(c->handlers, vm->handler_stack, vm->handler_count * sizeof(ChExceptionHandler));
 
+    c->parameter_binding_count = vm->parameter_count;
+    c->parameter_bindings =
+        (ChParameterBinding *)alloc_or_abort(vm->parameter_count, sizeof(ChParameterBinding));
+    memcpy(c->parameter_bindings, vm->parameter_stack,
+           vm->parameter_count * sizeof(ChParameterBinding));
+
     size_t nuv = 0;
     for (ChUpvalue *uv = vm->open_upvalues; uv; uv = uv->next) {
         nuv++;
@@ -341,7 +465,8 @@ ChVMStatus ch_vm_invoke_continuation(ChVM *vm, ChContinuation *cont, ChValue val
     close_all_open_upvalues(vm);
 
     if (cont->register_count > CH_VM_MAX_REGS || cont->frame_count > CH_VM_MAX_FRAMES ||
-        cont->wind_count > CH_VM_MAX_WINDS || cont->handler_count > CH_VM_MAX_HANDLERS) {
+        cont->wind_count > CH_VM_MAX_WINDS || cont->handler_count > CH_VM_MAX_HANDLERS ||
+        cont->parameter_binding_count > CH_VM_MAX_PARAMETER_BINDINGS) {
         return CH_VM_STACK_OVERFLOW;
     }
     if (cont->result_slot >= CH_VM_MAX_REGS) {
@@ -363,6 +488,10 @@ ChVMStatus ch_vm_invoke_continuation(ChVM *vm, ChContinuation *cont, ChValue val
 
     memcpy(vm->handler_stack, cont->handlers, cont->handler_count * sizeof(ChExceptionHandler));
     vm->handler_count = cont->handler_count;
+
+    memcpy(vm->parameter_stack, cont->parameter_bindings,
+           cont->parameter_binding_count * sizeof(ChParameterBinding));
+    vm->parameter_count = cont->parameter_binding_count;
 
     /* Re-sync from snapshot in case before/after thunks mutated the wind stack. */
     memcpy(vm->wind_stack, cont->winds, cont->wind_count * sizeof(ChWindRecord));
@@ -598,7 +727,8 @@ static ChVMStatus run_until(ChVM *vm, size_t target_frames) {
             vm->frame_count = 0;
             return CH_VM_OK;
         default:
-            return runtime_error(vm, "invalid opcode");
+            (void)runtime_error(vm, "invalid opcode");
+            unreachable();
         }
     }
 }
@@ -616,7 +746,43 @@ static ChValue build_rest_list(ChVM *vm, ChValue *args, int start, int nargs) {
     return list;
 }
 
+static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int nargs, bool tail);
+
+static void vm_debug_on_call(ChVM *vm, ChValue callee) {
+    if (vm->step_trace) {
+        fputs("; step ", stderr);
+        ch_print_value(stderr, callee, false);
+        fputc('\n', stderr);
+        vm->step_trace = false;
+    }
+    if (!vm->debug_mode || vm->breakpoint_count == 0) {
+        return;
+    }
+    for (size_t b = 0; b < vm->breakpoint_count; b++) {
+        const char *bp = vm->breakpoints[b];
+        if (ch_is_native(callee)) {
+            if (strcmp(ch_as_native(callee)->name, bp) == 0) {
+                fprintf(stderr, "; break at %s\n", bp);
+                continue;
+            }
+        }
+        for (size_t g = 0; g < vm->global_count; g++) {
+            if (!vm->globals[g].defined) {
+                continue;
+            }
+            if (strcmp(vm->globals[g].name->name, bp) != 0) {
+                continue;
+            }
+            if (ch_eqv(vm->globals[g].value, callee)) {
+                fprintf(stderr, "; break at %s\n", bp);
+                break;
+            }
+        }
+    }
+}
+
 static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int nargs, bool tail) {
+    vm_debug_on_call(vm, callee);
     if (ch_is_continuation(callee)) {
         if (nargs != 1) {
             snprintf(vm->error, sizeof(vm->error), "continuation: expected 1 argument, got %d", nargs);
@@ -658,6 +824,72 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
         }
         if (vm->error[0] != '\0' && result == CH_UNDEFINED) {
             return CH_VM_RUNTIME_ERROR;
+        }
+        vm->regs[result_slot] = result;
+        if (tail && vm->frame_count == 0) {
+            vm->result = result;
+        }
+        return CH_VM_OK;
+    }
+
+    if (ch_is_foreign_procedure(callee)) {
+        ChForeignProcedure *proc = ch_as_foreign_procedure(callee);
+        ChValue *args = &vm->regs[arg_base + 1];
+        size_t result_slot = arg_base;
+        if (tail && vm->frame_count > 0) {
+            ChCallFrame *frame = &vm->frames[vm->frame_count - 1];
+            close_upvalues(vm, frame_regs(vm, frame));
+            result_slot = frame->reg_base;
+            vm->frame_count--;
+        }
+        ChValue result = CH_UNDEFINED;
+        size_t roots = gc_root_span(vm);
+        push_gc_roots(vm);
+        int rc = ch_ffi_call(vm, proc, args, nargs, &result);
+        pop_gc_roots_n(vm, roots);
+        if (rc != 0) {
+            return CH_VM_RUNTIME_ERROR;
+        }
+        vm->regs[result_slot] = result;
+        if (tail && vm->frame_count == 0) {
+            vm->result = result;
+        }
+        return CH_VM_OK;
+    }
+
+    if (ch_is_parameter(callee)) {
+        if (nargs < 0 || nargs > 1) {
+            snprintf(vm->error, sizeof(vm->error),
+                     "parameter: expected 0 or 1 arguments, got %d", nargs);
+            return CH_VM_RUNTIME_ERROR;
+        }
+        ChParameter *param = ch_as_parameter(callee);
+        size_t result_slot = arg_base;
+        if (tail && vm->frame_count > 0) {
+            ChCallFrame *frame = &vm->frames[vm->frame_count - 1];
+            close_upvalues(vm, frame_regs(vm, frame));
+            result_slot = frame->reg_base;
+            vm->frame_count--;
+        }
+
+        ChValue result = CH_VOID;
+        if (nargs == 0) {
+            result = ch_vm_parameter_ref(vm, callee);
+        } else {
+            ChValue new_value = vm->regs[arg_base + 1];
+            if (!ch_is_nil(param->converter)) {
+                ChValue converted = CH_VOID;
+                ChValue convert_args[1] = {new_value};
+                ChVMStatus st = ch_vm_apply(vm, param->converter, convert_args, 1, &converted);
+                if (st != CH_VM_OK) {
+                    return st;
+                }
+                new_value = converted;
+            }
+            if (ch_vm_parameter_set(vm, callee, new_value) != 0) {
+                return CH_VM_RUNTIME_ERROR;
+            }
+            result = CH_VOID;
         }
         vm->regs[result_slot] = result;
         if (tail && vm->frame_count == 0) {
@@ -764,6 +996,7 @@ ChVMStatus ch_vm_eval_function(ChVM *vm, ChFunction *fn, ChValue *out) {
     vm->frame_count = 0;
     vm->wind_count = 0;
     vm->handler_count = 0;
+    vm->parameter_count = 0;
     vm->continuation_invoked = false;
     vm->regs[0] = cl_v;
     ch_gc_pop_n(&vm->gc, 1 + vm->global_count);
@@ -791,6 +1024,7 @@ ChVMStatus ch_vm_call_closure(ChVM *vm, ChValue closure, ChValue *args, int narg
     vm->frame_count = 0;
     vm->wind_count = 0;
     vm->handler_count = 0;
+    vm->parameter_count = 0;
 
     ChVMStatus st = call_value(vm, closure, base, nargs, false);
     if (st == CH_VM_CONTINUATION_INVOKED) {

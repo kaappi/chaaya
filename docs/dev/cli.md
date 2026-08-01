@@ -16,7 +16,7 @@ Chaaya Scheme v0.1.0
 | Code | Meaning |
 |------|---------|
 | 0 | Success (`--help`, `--version`, `--completions`, successful run) |
-| 1 | Runtime/script error, or **not implemented yet** (bootstrap) |
+| 1 | Runtime/script error, `check` failure, or unimplemented command |
 | 2 | Usage error (unknown option, missing args) |
 
 ## Default dispatch
@@ -27,9 +27,14 @@ Chaaya Scheme v0.1.0
 
 ## Implemented vs stubbed
 
-**Working now:** run/REPL/stdin, `features`, `doctor`, `ast`, `cache status|clear` (honest stubs), `--lib-path` (stored), `--completions bash|zsh|fish`.
+**Working now:** run/REPL/stdin, `features`, `doctor`, `ast`, `expand`, `check`, `fmt`,
+`cache status|clear` (filesystem-backed status + clear; cache writer still NYI),
+`lsp` (minimal initialize/shutdown JSON-RPC), `--lib-path` (stored),
+`--completions bash|zsh|fish`.
 
-**Accepted in help, exit 1 if invoked:** `compile`, `check`, `explain`, `test`, `expand`, `ir`, `fmt`, and engine flags (`--compile`, `--emit-llvm`, `--sandbox`, `--profile`, …).
+**Accepted in help, exit 1 if invoked:** `compile`, `explain`, `test`, `ir`,
+`wasm`, and engine flags (`--compile`, `--emit-llvm`, `--sandbox`,
+`--profile`, …). `--native` is routed to an explicit LLVM backend stub.
 
 ## Environment
 

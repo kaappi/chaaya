@@ -87,10 +87,12 @@ independent. Note that Kaappi’s R7RS `(scheme …)` libraries are built-in (no
 Contributor documentation lives in [docs/dev/](docs/dev/):
 
 - [Architecture](docs/dev/architecture.md) — pipeline, values, GC, VM, layout
+- [Backends](docs/dev/backends.md) — LLVM `--native` + WASM target stub status
 - [C23](docs/dev/c23.md) — language standard, C23 vs C17 features to leverage
 - [CLI](docs/dev/cli.md) — help shape, exit codes, stubs
 - [REPL](docs/dev/repl.md) — prompts, comma-commands, history
 - [Scheme tests](docs/dev/scheme-tests.md) — bootstrap suites, probes, deferred Kaappi/R7RS
+- [Thottam](docs/dev/thottam.md) — using sibling Kaappi thottam with Chaaya
 
 ## License
 

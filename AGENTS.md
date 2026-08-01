@@ -13,7 +13,7 @@ Requires CMake 3.21+, a C23-capable compiler, and libc. POSIX REPL uses vendored
 
 ```bash
 make            # configure + build → build/chaaya
-make test       # build + ctest (39 tests)
+make test       # build + ctest (57 tests)
 make bootstrap-scheme   # Kaappi-shaped bootstrap suites (17 files)
 make run        # REPL
 ```
@@ -103,7 +103,7 @@ stop-the-world mark-and-sweep with no write barrier.
 
 | Suite | Command | Notes |
 |-------|---------|-------|
-| C + Scheme (CTest) | `make test` | 39 tests; CI runs this |
+| C + Scheme (CTest) | `make test` | 57 tests; CI runs this |
 | Bootstrap | `make bootstrap-scheme` | Uses `run-bootstrap.sh`; needs suite-dir cwd for `include` fixtures |
 | Single bootstrap file | See `tests/scheme/run_bootstrap.cmake` | CTest prepends `harness.scm` |
 
@@ -132,13 +132,29 @@ compatibility. Kaappi's built-in `(scheme …)` libraries are C/Zig natives; Cha
 registers them similarly. Portable `.sld` files are for SRFIs and user code under
 `lib/`.
 
+### Package manager (thottam)
+
+**Do not re-implement thottam in Chaaya.** When ecosystem packaging is needed,
+use Kaappi's existing **thottam** implementation (Zig) in the sibling repo
+[`../kaappi/`](../kaappi/) — sources under `src/thottam*.zig` (e.g.
+`thottam.zig`, `thottam_proc.zig`, `thottam_fs.zig`). Build with `zig build`
+in that repo; the `thottam` binary handles `kaappi.pkg` manifests, install paths,
+lockfiles, and native `build:` steps for ecosystem libraries. Chaaya only needs
+`--lib-path` (and compatible `.sld` / `.scm` layouts) to consume what thottam
+installs; wiring Chaaya into thottam's toolchain is a separate integration task,
+not a greenfield package manager in C.
+
 ## Roadmap (phase table)
 
 | Phase | Status |
 |------:|--------|
 | 0–6 | Scaffold through R7RS libraries — **done** |
-| 7 | Full R7RS-small surface — **in progress** (numeric tower + math libs done) |
-| 8+ | IR/opts, SRFIs, FFI, fibers, LLVM, WASM, LSP, packages — **deferred** |
+| 7A | R7RS-small surface (eval, exceptions, bytevectors, hashtables, base audit) — **done** |
+| 7B | Numeric tower + I/O hardening — **done** |
+| 8 | IR/opts + generational GC + CLI tooling (`check`, `expand`, `fmt`, cache, REPL debugger MVP) — **MVP done** |
+| 9 | Portable SRFI subset + import resolution — **partial** (13 libraries vendored; full 162 deferred) |
+| 10 | Fibers + FFI + reactor — **MVP done** (cooperative fibers/channels, dlopen FFI; SRFI-18 threads NYI) |
+| 11 | LLVM/WASM/LSP/thottam — **MVP done** (stubs + docs; no C thottam reimplementation) |
 
 See [README.md](README.md) for the full phase table.
 
@@ -160,4 +176,5 @@ See [README.md](README.md) for the full phase table.
 - Enable deferred R7RS/Kaappi suites without checking the gate list in
   `docs/dev/scheme-tests.md`.
 - Expand scope into IR, FFI, fibers, or LLVM unless explicitly requested.
+- Re-implement **thottam** or a Chaaya-native package manager — use Kaappi's thottam in `../kaappi/` instead (see above).
 - Introduce C17-only patterns or non-standard extensions when an equivalent C23 feature exists (see [docs/dev/c23.md](docs/dev/c23.md)).

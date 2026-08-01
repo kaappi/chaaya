@@ -2,6 +2,8 @@
 
 #include "chaaya/bignum.h"
 #include "chaaya/complex.h"
+#include "chaaya/ffi.h"
+#include "chaaya/fiber.h"
 #include "chaaya/rational.h"
 
 #include <stdio.h>
@@ -158,6 +160,18 @@ static void print_value_rec(FILE *out, ChValue v, bool display) {
         fputc(')', out);
         return;
     }
+    if (ch_is_bytevector(v)) {
+        ChBytevector *bv = ch_as_bytevector(v);
+        fputs("#u8(", out);
+        for (size_t i = 0; i < bv->len; i++) {
+            if (i > 0) {
+                fputc(' ', out);
+            }
+            fprintf(out, "%u", (unsigned)bv->data[i]);
+        }
+        fputc(')', out);
+        return;
+    }
     if (ch_is_record(v)) {
         ChRecord *r = ch_as_record(v);
         const char *nm = "?";
@@ -191,6 +205,42 @@ static void print_value_rec(FILE *out, ChValue v, bool display) {
     }
     if (ch_is_port(v)) {
         fputs("#<port>", out);
+        return;
+    }
+    if (ch_is_fiber(v)) {
+        ChFiber *fiber = ch_as_fiber(v);
+        const char *state = "ready";
+        if (fiber->state == CH_FIBER_RUNNING) {
+            state = "running";
+        } else if (fiber->state == CH_FIBER_DONE) {
+            state = "done";
+        } else if (fiber->state == CH_FIBER_FAILED) {
+            state = "failed";
+        }
+        fprintf(out, "#<fiber %llu %s>", (unsigned long long)fiber->id, state);
+        return;
+    }
+    if (ch_is_channel(v)) {
+        ChChannel *channel = ch_as_channel(v);
+        if (channel->capacity == 0) {
+            fprintf(out, "#<channel %zu/unbounded>", channel->count);
+        } else {
+            fprintf(out, "#<channel %zu/%zu>", channel->count, channel->capacity);
+        }
+        return;
+    }
+    if (ch_is_foreign_library(v)) {
+        ChForeignLibrary *lib = ch_as_foreign_library(v);
+        fputs(lib->closed ? "#<foreign-library closed>" : "#<foreign-library>", out);
+        return;
+    }
+    if (ch_is_foreign_procedure(v)) {
+        ChForeignProcedure *proc = ch_as_foreign_procedure(v);
+        if (ch_is_string(proc->name)) {
+            fprintf(out, "#<foreign-procedure %s>", ch_as_string(proc->name)->data);
+        } else {
+            fputs("#<foreign-procedure>", out);
+        }
         return;
     }
     if (ch_is_promise(v)) {

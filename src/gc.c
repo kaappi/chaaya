@@ -1,4 +1,7 @@
 #include "chaaya/gc.h"
+#include "chaaya/environment.h"
+#include "chaaya/ffi.h"
+#include "chaaya/fiber.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +10,8 @@
 void ch_gc_init(ChGC *gc) {
     memset(gc, 0, sizeof(*gc));
     gc->threshold = CH_GC_DEFAULT_THRESHOLD;
+    gc->promotion_age = CH_GC_DEFAULT_PROMOTION_AGE;
+    gc->major_interval = CH_GC_DEFAULT_MAJOR_INTERVAL;
     gc->symbol_cap = 64;
     gc->symbols = (ChSymbol **)calloc(gc->symbol_cap, sizeof(ChSymbol *));
 }
@@ -37,6 +42,7 @@ static void free_object(ChObject *obj) {
         free(c->frames);
         free(c->winds);
         free(c->handlers);
+        free(c->parameter_bindings);
         free(c->open_uvs);
         break;
     }
@@ -51,7 +57,7 @@ static void free_object(ChObject *obj) {
             fclose(p->file);
             p->file = NULL;
         }
-        if (p->kind != CH_PORT_STDIO && p->kind != CH_PORT_FILE && p->buf) {
+        if (p->buf) {
             free(p->buf);
         }
         break;
@@ -73,19 +79,54 @@ static void free_object(ChObject *obj) {
         break;
     case CH_TAG_COMPLEX:
         break;
+    case CH_TAG_ENVIRONMENT:
+        break;
+    case CH_TAG_ERROR_OBJ:
+        break;
+    case CH_TAG_PARAMETER:
+        break;
+    case CH_TAG_HASHTABLE: {
+        ChHashtable *ht = (ChHashtable *)obj;
+        free(ht->keys);
+        free(ht->vals);
+        free(ht->used);
+        break;
+    }
+    case CH_TAG_BYTEVECTOR:
+        break;
+    case CH_TAG_TIME:
+        break;
+    case CH_TAG_FIBER:
+        break;
+    case CH_TAG_CHANNEL: {
+        ChChannel *channel = (ChChannel *)obj;
+        free(channel->items);
+        break;
+    }
+    case CH_TAG_FOREIGN_LIBRARY: {
+        ChForeignLibrary *lib = (ChForeignLibrary *)obj;
+        ch_ffi_finalize_library(lib);
+        break;
+    }
+    case CH_TAG_FOREIGN_PROC:
+        break;
     default:
         break;
     }
     free(obj);
 }
 
-void ch_gc_deinit(ChGC *gc) {
-    ChObject *obj = gc->objects;
+static void free_object_list(ChObject *obj) {
     while (obj) {
         ChObject *next = obj->next;
         free_object(obj);
         obj = next;
     }
+}
+
+void ch_gc_deinit(ChGC *gc) {
+    free_object_list(gc->young_objects);
+    free_object_list(gc->old_objects);
     free(gc->symbols);
     memset(gc, 0, sizeof(*gc));
 }
@@ -169,6 +210,10 @@ static void mark_object(ChObject *obj) {
         for (size_t i = 0; i < c->handler_count; i++) {
             mark_value(c->handlers[i].handler);
         }
+        for (size_t i = 0; i < c->parameter_binding_count; i++) {
+            mark_value(c->parameter_bindings[i].parameter);
+            mark_value(c->parameter_bindings[i].value);
+        }
         for (size_t i = 0; i < c->open_uv_count; i++) {
             ChUpvalue *uv = c->open_uvs[i].uv;
             if (uv && uv->is_closed) {
@@ -232,6 +277,75 @@ static void mark_object(ChObject *obj) {
     }
     case CH_TAG_COMPLEX:
         break;
+    case CH_TAG_ENVIRONMENT: {
+        ChEnvironment *env = (ChEnvironment *)obj;
+        for (size_t i = 0; i < env->env.count; i++) {
+            if (env->env.bindings[i].name) {
+                mark_object(&env->env.bindings[i].name->header);
+            }
+            if (env->env.bindings[i].defined) {
+                mark_value(env->env.bindings[i].value);
+            }
+        }
+        break;
+    }
+    case CH_TAG_ERROR_OBJ: {
+        ChErrorObject *err = (ChErrorObject *)obj;
+        mark_value(err->message);
+        mark_value(err->irritants);
+        break;
+    }
+    case CH_TAG_PARAMETER: {
+        ChParameter *param = (ChParameter *)obj;
+        mark_value(param->init);
+        mark_value(param->converter);
+        mark_value(param->value);
+        break;
+    }
+    case CH_TAG_HASHTABLE: {
+        ChHashtable *ht = (ChHashtable *)obj;
+        for (size_t i = 0; i < ht->cap; i++) {
+            if (!ht->used || !ht->used[i] || ht->keys[i] == CH_UNDEFINED) {
+                continue;
+            }
+            mark_value(ht->keys[i]);
+            mark_value(ht->vals[i]);
+        }
+        break;
+    }
+    case CH_TAG_BYTEVECTOR:
+        break;
+    case CH_TAG_TIME: {
+        ChTime *time = (ChTime *)obj;
+        mark_value(time->type_sym);
+        break;
+    }
+    case CH_TAG_FIBER: {
+        ChFiber *fiber = (ChFiber *)obj;
+        mark_value(fiber->thunk);
+        mark_value(fiber->result);
+        mark_value(fiber->error);
+        break;
+    }
+    case CH_TAG_CHANNEL: {
+        ChChannel *channel = (ChChannel *)obj;
+        if (channel->storage_cap == 0 || !channel->items) {
+            break;
+        }
+        for (size_t i = 0; i < channel->count; i++) {
+            size_t idx = (channel->head + i) % channel->storage_cap;
+            mark_value(channel->items[idx]);
+        }
+        break;
+    }
+    case CH_TAG_FOREIGN_LIBRARY:
+        break;
+    case CH_TAG_FOREIGN_PROC: {
+        ChForeignProcedure *proc = (ChForeignProcedure *)obj;
+        mark_value(proc->library);
+        mark_value(proc->name);
+        break;
+    }
     }
 }
 
@@ -241,7 +355,7 @@ static void mark_value(ChValue v) {
     }
 }
 
-void ch_gc_collect(ChGC *gc) {
+static void mark_roots_and_symbols(ChGC *gc) {
     for (size_t i = 0; i < gc->root_count; i++) {
         mark_value(*gc->roots[i]);
     }
@@ -250,27 +364,121 @@ void ch_gc_collect(ChGC *gc) {
             mark_object(&gc->symbols[i]->header);
         }
     }
+}
 
-    ChObject **link = &gc->objects;
+static void sweep_list_major(ChGC *gc, ChObject **head, size_t *count) {
+    ChObject **link = head;
     while (*link) {
         ChObject *obj = *link;
         if (!obj->marked) {
             *link = obj->next;
             free_object(obj);
+            (*count)--;
             gc->object_count--;
         } else {
             obj->marked = 0;
             link = &obj->next;
         }
     }
+}
+
+static void clear_marks(ChObject *list) {
+    for (ChObject *obj = list; obj; obj = obj->next) {
+        obj->marked = 0;
+    }
+}
+
+static void sweep_young_minor(ChGC *gc) {
+    ChObject **link = &gc->young_objects;
+    while (*link) {
+        ChObject *obj = *link;
+        if (!obj->marked) {
+            *link = obj->next;
+            free_object(obj);
+            gc->young_count--;
+            gc->object_count--;
+            continue;
+        }
+
+        obj->marked = 0;
+        obj->age = (uint8_t)(obj->age + 1);
+        if (obj->age >= gc->promotion_age) {
+            *link = obj->next;
+            gc->young_count--;
+            obj->generation = CH_OBJ_GEN_OLD;
+            obj->age = 0;
+            obj->next = gc->old_objects;
+            gc->old_objects = obj;
+            gc->old_count++;
+            continue;
+        }
+        link = &obj->next;
+    }
+}
+
+void ch_gc_collect_minor(ChGC *gc) {
+    mark_roots_and_symbols(gc);
+    for (ChObject *obj = gc->old_objects; obj; obj = obj->next) {
+        mark_object(obj);
+    }
+    sweep_young_minor(gc);
+    clear_marks(gc->old_objects);
     gc->alloc_count = 0;
+    gc->minor_collections++;
     gc->collections++;
     gc->threshold = gc->object_count * 2 + CH_GC_DEFAULT_THRESHOLD;
 }
 
+void ch_gc_collect_major(ChGC *gc) {
+    mark_roots_and_symbols(gc);
+    sweep_list_major(gc, &gc->young_objects, &gc->young_count);
+    sweep_list_major(gc, &gc->old_objects, &gc->old_count);
+    gc->alloc_count = 0;
+    gc->major_collections++;
+    gc->collections++;
+    gc->threshold = gc->object_count * 2 + CH_GC_DEFAULT_THRESHOLD;
+}
+
+void ch_gc_collect(ChGC *gc) {
+    ch_gc_collect_major(gc);
+}
+
+void ch_gc_write_barrier(ChGC *gc, ChObject *owner, ChValue value) {
+    if (!gc || !owner || !ch_object_is_old(owner) || !ch_is_pointer(value)) {
+        return;
+    }
+    ChObject *child = ch_to_object(value);
+    if (!child || child->generation != CH_OBJ_GEN_YOUNG) {
+        return;
+    }
+
+    /* MVP remembered-set fallback: eagerly promote young children written into
+     * old objects so minor collections keep these references alive. */
+    ChObject **link = &gc->young_objects;
+    while (*link && *link != child) {
+        link = &(*link)->next;
+    }
+    if (*link != child) {
+        return;
+    }
+    *link = child->next;
+    if (gc->young_count > 0) {
+        gc->young_count--;
+    }
+    child->generation = CH_OBJ_GEN_OLD;
+    child->age = 0;
+    child->next = gc->old_objects;
+    gc->old_objects = child;
+    gc->old_count++;
+}
+
 void *ch_gc_alloc(ChGC *gc, size_t size, ChObjectTag tag) {
     if (gc->alloc_count >= gc->threshold) {
-        ch_gc_collect(gc);
+        ch_gc_collect_minor(gc);
+        if (gc->major_interval != 0 &&
+            (gc->minor_collections % (size_t)gc->major_interval) == 0) {
+            ch_gc_collect_major(gc);
+        }
     }
     ChObject *obj = (ChObject *)calloc(1, size);
     if (!obj) {
@@ -278,8 +486,11 @@ void *ch_gc_alloc(ChGC *gc, size_t size, ChObjectTag tag) {
     }
     obj->tag = (uint8_t)tag;
     obj->marked = 0;
-    obj->next = gc->objects;
-    gc->objects = obj;
+    obj->generation = CH_OBJ_GEN_YOUNG;
+    obj->age = 0;
+    obj->next = gc->young_objects;
+    gc->young_objects = obj;
+    gc->young_count++;
     gc->object_count++;
     gc->alloc_count++;
     return obj;
@@ -395,22 +606,28 @@ ChValue ch_gc_make_values(ChGC *gc, ChValue *items, size_t count) {
     return ch_make_pointer(&vs->header);
 }
 
-ChValue ch_gc_make_stdio_port(ChGC *gc, FILE *file, int input, int output) {
-    ChPort *p = (ChPort *)ch_gc_alloc(gc, sizeof(ChPort), CH_TAG_PORT);
-    p->kind = CH_PORT_STDIO;
+static void init_port_common(ChPort *p, ChPortKind kind, int input, int output) {
+    p->kind = kind;
     p->input = (uint8_t)(input ? 1 : 0);
     p->output = (uint8_t)(output ? 1 : 0);
     p->closed = 0;
+    p->file = NULL;
+    p->buf = NULL;
+    p->len = 0;
+    p->cap = 0;
+    p->pos = 0;
+}
+
+ChValue ch_gc_make_stdio_port(ChGC *gc, FILE *file, int input, int output) {
+    ChPort *p = (ChPort *)ch_gc_alloc(gc, sizeof(ChPort), CH_TAG_PORT);
+    init_port_common(p, CH_PORT_STDIO, input, output);
     p->file = file;
     return ch_make_pointer(&p->header);
 }
 
 ChValue ch_gc_make_string_input_port(ChGC *gc, const char *bytes, size_t len) {
     ChPort *p = (ChPort *)ch_gc_alloc(gc, sizeof(ChPort), CH_TAG_PORT);
-    p->kind = CH_PORT_STRING_IN;
-    p->input = 1;
-    p->output = 0;
-    p->closed = 0;
+    init_port_common(p, CH_PORT_STRING_IN, 1, 0);
     p->buf = (char *)malloc(len + 1);
     if (!p->buf) {
         abort();
@@ -427,16 +644,42 @@ ChValue ch_gc_make_string_input_port(ChGC *gc, const char *bytes, size_t len) {
 
 ChValue ch_gc_make_string_output_port(ChGC *gc) {
     ChPort *p = (ChPort *)ch_gc_alloc(gc, sizeof(ChPort), CH_TAG_PORT);
-    p->kind = CH_PORT_STRING_OUT;
-    p->input = 0;
-    p->output = 1;
-    p->closed = 0;
+    init_port_common(p, CH_PORT_STRING_OUT, 0, 1);
     p->cap = 64;
     p->buf = (char *)malloc(p->cap);
     if (!p->buf) {
         abort();
     }
     p->buf[0] = '\0';
+    p->len = 0;
+    p->pos = 0;
+    return ch_make_pointer(&p->header);
+}
+
+ChValue ch_gc_make_bytevector_input_port(ChGC *gc, const uint8_t *bytes, size_t len) {
+    ChPort *p = (ChPort *)ch_gc_alloc(gc, sizeof(ChPort), CH_TAG_PORT);
+    init_port_common(p, CH_PORT_BYTEVECTOR, 1, 0);
+    p->cap = len;
+    if (len > 0) {
+        p->buf = (char *)malloc(len);
+        if (!p->buf) {
+            abort();
+        }
+        memcpy(p->buf, bytes, len);
+    }
+    p->len = len;
+    p->pos = 0;
+    return ch_make_pointer(&p->header);
+}
+
+ChValue ch_gc_make_bytevector_output_port(ChGC *gc) {
+    ChPort *p = (ChPort *)ch_gc_alloc(gc, sizeof(ChPort), CH_TAG_PORT);
+    init_port_common(p, CH_PORT_BYTEVECTOR, 0, 1);
+    p->cap = 64;
+    p->buf = (char *)malloc(p->cap);
+    if (!p->buf) {
+        abort();
+    }
     p->len = 0;
     p->pos = 0;
     return ch_make_pointer(&p->header);
@@ -487,14 +730,70 @@ ChValue ch_gc_make_promise(ChGC *gc, int forced, ChValue value) {
 
 ChValue ch_gc_make_file_port(ChGC *gc, FILE *file, int input, int output) {
     ChPort *p = (ChPort *)ch_gc_alloc(gc, sizeof(ChPort), CH_TAG_PORT);
-    p->kind = CH_PORT_FILE;
-    p->input = (uint8_t)(input ? 1 : 0);
-    p->output = (uint8_t)(output ? 1 : 0);
-    p->closed = 0;
+    init_port_common(p, CH_PORT_FILE, input, output);
     p->file = file;
-    p->buf = NULL;
-    p->len = 0;
-    p->cap = 0;
-    p->pos = 0;
     return ch_make_pointer(&p->header);
+}
+
+ChValue ch_gc_make_error_object(ChGC *gc, ChValue message, ChValue irritants, uint8_t error_type) {
+    ch_gc_push(gc, &message);
+    ch_gc_push(gc, &irritants);
+    ChErrorObject *err = (ChErrorObject *)ch_gc_alloc(gc, sizeof(ChErrorObject), CH_TAG_ERROR_OBJ);
+    ch_gc_pop_n(gc, 2);
+    err->message = message;
+    err->irritants = irritants;
+    err->error_type = error_type;
+    return ch_make_pointer(&err->header);
+}
+
+ChValue ch_gc_make_parameter(ChGC *gc, ChValue init, ChValue converter) {
+    ch_gc_push(gc, &init);
+    ch_gc_push(gc, &converter);
+    ChParameter *param = (ChParameter *)ch_gc_alloc(gc, sizeof(ChParameter), CH_TAG_PARAMETER);
+    ch_gc_pop_n(gc, 2);
+    param->init = init;
+    param->converter = converter;
+    param->value = init;
+    return ch_make_pointer(&param->header);
+}
+
+ChValue ch_gc_make_hashtable(ChGC *gc, size_t capacity) {
+    if (capacity == 0) {
+        capacity = 8;
+    }
+    ChHashtable *ht = (ChHashtable *)ch_gc_alloc(gc, sizeof(ChHashtable), CH_TAG_HASHTABLE);
+    ht->count = 0;
+    ht->cap = capacity;
+    ht->mode = CH_HASHTABLE_EQV;
+    ht->keys = (ChValue *)calloc(capacity, sizeof(ChValue));
+    ht->vals = (ChValue *)calloc(capacity, sizeof(ChValue));
+    ht->used = (bool *)calloc(capacity, sizeof(bool));
+    if (!ht->keys || !ht->vals || !ht->used) {
+        abort();
+    }
+    for (size_t i = 0; i < capacity; i++) {
+        ht->keys[i] = CH_UNDEFINED;
+        ht->vals[i] = CH_UNDEFINED;
+    }
+    return ch_make_pointer(&ht->header);
+}
+
+ChValue ch_gc_make_bytevector(ChGC *gc, size_t len, uint8_t fill) {
+    ChBytevector *bv =
+        (ChBytevector *)ch_gc_alloc(gc, sizeof(ChBytevector) + len, CH_TAG_BYTEVECTOR);
+    bv->len = len;
+    if (len > 0) {
+        memset(bv->data, fill, len);
+    }
+    return ch_make_pointer(&bv->header);
+}
+
+ChValue ch_gc_make_time(ChGC *gc, int64_t seconds, int32_t nanoseconds, ChValue type_sym) {
+    ch_gc_push(gc, &type_sym);
+    ChTime *time = (ChTime *)ch_gc_alloc(gc, sizeof(ChTime), CH_TAG_TIME);
+    ch_gc_pop(gc);
+    time->seconds = seconds;
+    time->nanoseconds = nanoseconds;
+    time->type_sym = type_sym;
+    return ch_make_pointer(&time->header);
 }

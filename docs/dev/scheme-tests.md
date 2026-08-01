@@ -11,7 +11,7 @@ an R7RS library MVP; fuller Kaappi/R7RS suites stay deferred.
 | `tests/scheme/*.scm` + `*.expected` | Early smoke (fact, lists, …) | yes |
 | `tests/scheme/bootstrap/` | Kaappi-shaped `check-*` suites (`libraries.scm` uses `import`) | yes |
 | `tests/scheme/probes/` | Adapted Kaappi differential probes (stdout golden) | yes |
-| `tests/scheme/r7rs/` | Canonical R7RS-small suite (vendored) | **no** (deferred) |
+| `tests/scheme/r7rs/` | Canonical R7RS-small suite (vendored) | **partial** (`r7rs_suite` reports pass/fail; not fully green) |
 | `tests/scheme/kaappi-deferred/` | Full Kaappi smoke/compliance/probe copies | **no** (deferred) |
 
 ## Bootstrap harness
@@ -47,5 +47,9 @@ See `tests/scheme/kaappi-deferred/README.md`. Rough gates:
 5. Rationals + exact `/` — **done** (MVP)
 6. Complexes (inexact rectangular) — **done** (MVP)
 7. `(scheme inexact)` / `(scheme exact)` + math prims — **done** (MVP)
-8. SRFI-64 or `(chibi test)`
-9. Re-run Kaappi’s `tests/scheme/run-all.sh` corpus against `chaaya`
+8. SRFI-64 or `(chibi test)` — **in progress** (`(chibi test)` shim vendored; `r7rs_suite`
+   runs under CTest and reports section pass/fail counts while runtime gaps remain)
+9. Re-run Kaappi’s `tests/scheme/run-all.sh` corpus against `chaaya` — **in progress**
+   (Phase 9 partial: portable SRFI subset vendored under `lib/srfi/` and
+   `bootstrap/srfi-smoke.scm` exercises `(import (srfi 1))` plus SRFI-261 alias
+   resolution)

@@ -1,7 +1,12 @@
 #include "chaaya/cli.h"
 
+#include "chaaya/cache.h"
+#include "chaaya/compiler.h"
 #include "chaaya/eval.h"
 #include "chaaya/expander.h"
+#include "chaaya/library.h"
+#include "chaaya/llvm_backend.h"
+#include "chaaya/lsp.h"
 #include "chaaya/opcode.h"
 #include "chaaya/printer.h"
 #include "chaaya/reader.h"
@@ -32,6 +37,8 @@ void ch_cli_print_help(const char *argv0) {
     printf("       %s test [paths...]\n", argv0);
     printf("       %s ast|expand|ir <file.scm>\n", argv0);
     printf("       %s doctor [--json]\n", argv0);
+    printf("       %s lsp\n", argv0);
+    printf("       %s wasm\n", argv0);
     printf("       %s fmt [--check] [files...]\n", argv0);
     printf("       %s cache <status|clear>\n", argv0);
     printf("\n");
@@ -45,6 +52,8 @@ void ch_cli_print_help(const char *argv0) {
     printf("  expand <file>      Print the program after full macro expansion\n");
     printf("  ir <file> [--no-opt]  Print the IR tree\n");
     printf("  doctor [--json]    Check the installation and environment\n");
+    printf("  lsp                Run a minimal stdio JSON-RPC loop\n");
+    printf("  wasm               WebAssembly backend stub (MVP)\n");
     printf("  fmt [files...]     Canonically format Scheme in place; --check\n");
     printf("  cache status       Show the bytecode cache location and entries\n");
     printf("  cache clear        Remove all bytecode cache entries\n");
@@ -54,6 +63,7 @@ void ch_cli_print_help(const char *argv0) {
     printf("  --version          Show version\n");
     printf("  -v                 Show version (alias)\n");
     printf("  --lib-path <path>  Add library search path (repeatable)\n");
+    printf("  --native           Route file execution through LLVM backend stub\n");
     printf("  --compile          Compile file to bytecode (.sbc)\n");
     printf("  --emit-llvm        Emit LLVM IR text (.ll)\n");
     printf("  -o <file>          Output path\n");
@@ -91,7 +101,8 @@ static int is_subcommand(const char *s) {
     return strcmp(s, "compile") == 0 || strcmp(s, "check") == 0 || strcmp(s, "explain") == 0 ||
            strcmp(s, "features") == 0 || strcmp(s, "test") == 0 || strcmp(s, "ast") == 0 ||
            strcmp(s, "expand") == 0 || strcmp(s, "ir") == 0 || strcmp(s, "doctor") == 0 ||
-           strcmp(s, "fmt") == 0 || strcmp(s, "cache") == 0;
+           strcmp(s, "lsp") == 0 || strcmp(s, "wasm") == 0 || strcmp(s, "fmt") == 0 ||
+           strcmp(s, "cache") == 0;
 }
 
 int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
@@ -121,6 +132,10 @@ int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
             out->command = CH_CMD_IR;
         } else if (strcmp(cmd, "doctor") == 0) {
             out->command = CH_CMD_DOCTOR;
+        } else if (strcmp(cmd, "lsp") == 0) {
+            out->command = CH_CMD_LSP;
+        } else if (strcmp(cmd, "wasm") == 0) {
+            out->command = CH_CMD_WASM;
         } else if (strcmp(cmd, "fmt") == 0) {
             out->command = CH_CMD_FMT;
         } else if (strcmp(cmd, "cache") == 0) {
@@ -167,6 +182,10 @@ int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
                 return CH_EXIT_USAGE;
             }
             out->lib_paths[out->lib_path_count++] = argv[++i];
+            continue;
+        }
+        if (strcmp(a, "--native") == 0) {
+            out->flag_native = 1;
             continue;
         }
         if (strcmp(a, "--completions") == 0) {
@@ -283,8 +302,11 @@ int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
             continue;
         }
         if (strcmp(a, "--check") == 0) {
-            /* fmt --check */
-            mark_nyi(out, "--check");
+            if (out->command == CH_CMD_FMT) {
+                out->flag_fmt_check = 1;
+            } else {
+                mark_nyi(out, "--check");
+            }
             continue;
         }
         if (a[0] == '-') {
@@ -325,14 +347,33 @@ static int not_implemented(const char *what) {
     return CH_EXIT_ERROR;
 }
 
+static int cmd_test_stub(const char *argv0, const ChCliOptions *opts) {
+    fprintf(stderr, "chaaya: 'test' subcommand is bootstrap-only right now.\n");
+    fprintf(stderr, "Run bundled suites through CTest, e.g.:\n");
+    fprintf(stderr, "  ctest --output-on-failure -R r7rs_suite\n");
+    if (opts->file) {
+        fprintf(stderr, "For direct execution, run:\n");
+        fprintf(stderr, "  %s --lib-path ./lib %s\n", argv0, opts->file);
+    }
+    return CH_EXIT_ERROR;
+}
+
+static int cmd_wasm_stub(void) {
+    fprintf(stderr, "chaaya: 'wasm' backend is not implemented yet (MVP stub).\n");
+    fprintf(stderr, "Enable -DCHAAYA_WASM=ON to build the wasm target scaffold.\n");
+    return CH_EXIT_ERROR;
+}
+
 static void print_completions(const char *shell) {
     if (strcmp(shell, "bash") == 0) {
         puts("# chaaya bash completion");
         puts("_chaaya() {");
         puts("  local cur=\"${COMP_WORDS[COMP_CWORD]}\"");
-        puts("  local cmds=\"compile check explain features test ast expand ir doctor fmt cache\"");
-        puts("  local opts=\"--help --version --lib-path --completions --compile --emit-llvm -o "
-             "--disassemble --sandbox --gc-stats --profile --timings --coverage --json\"");
+        puts("  local cmds=\"compile check explain features test ast expand ir doctor lsp wasm fmt "
+             "cache\"");
+        puts("  local opts=\"--help --version --lib-path --native --completions --compile "
+             "--emit-llvm -o --disassemble --sandbox --gc-stats --profile --timings --coverage "
+             "--json\"");
         puts("  COMPREPLY=( $(compgen -W \"$cmds $opts\" -- \"$cur\") )");
         puts("}");
         puts("complete -F _chaaya chaaya");
@@ -344,17 +385,20 @@ static void print_completions(const char *shell) {
         puts("  '(-h --help)'{-h,--help}'[show help]' \\");
         puts("  '--version[show version]' \\");
         puts("  '--lib-path[library path]:path:_files' \\");
+        puts("  '--native[run via LLVM backend stub]' \\");
         puts("  '--completions[shell completions]:shell:(bash zsh fish)' \\");
-        puts("  '1:command:(compile check explain features test ast expand ir doctor fmt cache)'");
+        puts("  '1:command:(compile check explain features test ast expand ir doctor lsp wasm fmt "
+             "cache)'");
         return;
     }
     if (strcmp(shell, "fish") == 0) {
         puts("complete -c chaaya -s h -l help -d 'Show help'");
         puts("complete -c chaaya -l version -d 'Show version'");
         puts("complete -c chaaya -l lib-path -r -d 'Library search path'");
+        puts("complete -c chaaya -l native -d 'Run via LLVM backend stub'");
         puts("complete -c chaaya -l completions -xa 'bash zsh fish'");
-        puts("complete -c chaaya -a 'compile check explain features test ast expand ir doctor fmt "
-             "cache'");
+        puts("complete -c chaaya -a 'compile check explain features test ast expand ir doctor lsp "
+             "wasm fmt cache'");
         return;
     }
     fprintf(stderr, "unknown shell for --completions: %s (want bash, zsh, or fish)\n", shell);
@@ -379,7 +423,9 @@ static int cmd_features(int json) {
         printf("  \"r7rs_small\": false,\n");
         printf("  \"libraries\": true,\n");
         printf("  \"macros\": true,\n");
-        printf("  \"native_backend\": false\n");
+        printf("  \"native_backend\": \"stub\",\n");
+        printf("  \"wasm_backend\": \"stub\",\n");
+        printf("  \"lsp\": \"stub\"\n");
         printf("}\n");
     } else {
         printf("%s\n", CHAAYA_VERSION_BANNER);
@@ -397,7 +443,9 @@ static int cmd_features(int json) {
         printf("r7rs-small:   partial\n");
         printf("libraries:    yes\n");
         printf("macros:       yes\n");
-        printf("native:       not yet\n");
+        printf("native:       stub (--native)\n");
+        printf("wasm:         stub (chaaya wasm)\n");
+        printf("lsp:          stub (chaaya lsp)\n");
     }
     return CH_EXIT_OK;
 }
@@ -491,6 +539,24 @@ static int cmd_doctor(ChCliOptions *opts) {
     return fails ? CH_EXIT_ERROR : CH_EXIT_OK;
 }
 
+static size_t push_cli_vm_roots(ChVM *vm) {
+    for (size_t i = 0; i < vm->global_count; i++) {
+        ch_gc_push(&vm->gc, &vm->globals[i].value);
+    }
+    for (size_t i = 0; i < vm->macro_count; i++) {
+        ch_gc_push(&vm->gc, &vm->macros[i].transformer);
+    }
+    size_t lib_roots = ch_library_push_gc_roots(vm);
+    return vm->global_count + vm->macro_count + lib_roots;
+}
+
+static ChReadStatus read_cli_datum(ChVM *vm, ChReader *reader, ChValue *out) {
+    size_t sticky_roots = push_cli_vm_roots(vm);
+    ChReadStatus st = ch_read_datum(reader, out);
+    ch_gc_pop_n(&vm->gc, sticky_roots);
+    return st;
+}
+
 static int cmd_ast(const char *path) {
     size_t len = 0;
     char *src = ch_read_file(path, &len);
@@ -505,7 +571,7 @@ static int cmd_ast(const char *path) {
     for (;;) {
         ChValue v = CH_NIL;
         ch_gc_push(&vm.gc, &v);
-        ChReadStatus st = ch_read_datum(&reader, &v);
+        ChReadStatus st = read_cli_datum(&vm, &reader, &v);
         if (st == CH_READ_EOF) {
             ch_gc_pop(&vm.gc);
             break;
@@ -526,7 +592,7 @@ static int cmd_ast(const char *path) {
     return CH_EXIT_OK;
 }
 
-static int cmd_expand(const char *path) {
+static int cmd_expand(const char *path, const ChCliOptions *opts) {
     size_t len = 0;
     char *src = ch_read_file(path, &len);
     if (!src) {
@@ -536,12 +602,16 @@ static int cmd_expand(const char *path) {
     ChVM vm;
     ch_vm_init(&vm);
     ch_vm_register_primitives(&vm);
+    vm.script_path = path;
+    for (size_t i = 0; i < opts->lib_path_count; i++) {
+        vm.lib_paths[vm.lib_path_count++] = opts->lib_paths[i];
+    }
     ChReader reader;
     ch_reader_init(&reader, &vm.gc, src, len);
     for (;;) {
         ChValue v = CH_NIL;
         ch_gc_push(&vm.gc, &v);
-        ChReadStatus st = ch_read_datum(&reader, &v);
+        ChReadStatus st = read_cli_datum(&vm, &reader, &v);
         if (st == CH_READ_EOF) {
             ch_gc_pop(&vm.gc);
             break;
@@ -555,14 +625,17 @@ static int cmd_expand(const char *path) {
         }
         ChValue out = CH_NIL;
         ch_gc_push(&vm.gc, &out);
+        size_t sticky_roots = push_cli_vm_roots(&vm);
         char err[256];
         if (ch_expand_toplevel(&vm, v, &out, err, sizeof(err)) != CH_EXPAND_OK) {
+            ch_gc_pop_n(&vm.gc, sticky_roots);
             fprintf(stderr, "expand error: %s\n", err);
             ch_gc_pop_n(&vm.gc, 2);
             free(src);
             ch_vm_deinit(&vm);
             return CH_EXIT_ERROR;
         }
+        ch_gc_pop_n(&vm.gc, sticky_roots);
         if (out != CH_VOID) {
             ch_print_value(stdout, out, false);
             fputc('\n', stdout);
@@ -574,16 +647,174 @@ static int cmd_expand(const char *path) {
     return CH_EXIT_OK;
 }
 
-static int cmd_cache_status(void) {
-    printf("Bytecode cache: not implemented yet (bootstrap)\n");
-    printf("Future location: ~/.chaaya/cache (or $CHAAYA_HOME/cache)\n");
-    printf("Entries: 0\n");
+static int write_fmt_output(const char *path, const char *buf, size_t len) {
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "fmt: cannot write '%s'\n", path);
+        return CH_EXIT_ERROR;
+    }
+    if (len > 0 && fwrite(buf, 1, len, f) != len) {
+        fclose(f);
+        fprintf(stderr, "fmt: write error on '%s'\n", path);
+        return CH_EXIT_ERROR;
+    }
+    fclose(f);
     return CH_EXIT_OK;
 }
 
-static int cmd_cache_clear(void) {
-    printf("Bytecode cache: nothing to clear (not implemented yet)\n");
-    return CH_EXIT_OK;
+static int cmd_fmt(const char *path, const ChCliOptions *opts) {
+    size_t src_len = 0;
+    char *src = ch_read_file(path, &src_len);
+    if (!src) {
+        fprintf(stderr, "Error opening file '%s'\n", path);
+        return CH_EXIT_ERROR;
+    }
+
+    ChVM vm;
+    ch_vm_init(&vm);
+    ch_vm_register_primitives(&vm);
+    vm.script_path = path;
+    for (size_t i = 0; i < opts->lib_path_count; i++) {
+        vm.lib_paths[vm.lib_path_count++] = opts->lib_paths[i];
+    }
+
+    char *out_buf = NULL;
+    size_t out_len = 0;
+    FILE *mem = open_memstream(&out_buf, &out_len);
+    if (!mem) {
+        free(src);
+        ch_vm_deinit(&vm);
+        return CH_EXIT_ERROR;
+    }
+
+    ChReader reader;
+    ch_reader_init(&reader, &vm.gc, src, src_len);
+    int rc = CH_EXIT_OK;
+    for (;;) {
+        ChValue v = CH_NIL;
+        ch_gc_push(&vm.gc, &v);
+        ChReadStatus st = read_cli_datum(&vm, &reader, &v);
+        if (st == CH_READ_EOF) {
+            ch_gc_pop(&vm.gc);
+            break;
+        }
+        if (st != CH_READ_OK) {
+            fprintf(stderr, "read error: %s\n", ch_reader_error(&reader));
+            ch_gc_pop(&vm.gc);
+            rc = CH_EXIT_ERROR;
+            break;
+        }
+
+        ChValue expanded = CH_NIL;
+        ch_gc_push(&vm.gc, &expanded);
+        size_t sticky_roots = push_cli_vm_roots(&vm);
+        char err[256];
+        if (ch_expand_toplevel(&vm, v, &expanded, err, sizeof(err)) != CH_EXPAND_OK) {
+            ch_gc_pop_n(&vm.gc, sticky_roots);
+            fprintf(stderr, "fmt error: %s\n", err);
+            ch_gc_pop_n(&vm.gc, 2);
+            rc = CH_EXIT_ERROR;
+            break;
+        }
+        ch_gc_pop_n(&vm.gc, sticky_roots);
+        if (expanded != CH_VOID) {
+            ch_print_value(mem, expanded, false);
+            fputc('\n', mem);
+        }
+        ch_gc_pop_n(&vm.gc, 2);
+    }
+    fclose(mem);
+
+    if (rc == CH_EXIT_OK) {
+        if (opts->flag_fmt_check) {
+            size_t compare_len = src_len;
+            while (compare_len > 0 && (src[compare_len - 1] == '\n' || src[compare_len - 1] == '\r')) {
+                compare_len--;
+            }
+            size_t formatted_len = out_len;
+            while (formatted_len > 0 &&
+                   (out_buf[formatted_len - 1] == '\n' || out_buf[formatted_len - 1] == '\r')) {
+                formatted_len--;
+            }
+            if (compare_len != formatted_len || memcmp(src, out_buf, compare_len) != 0) {
+                fprintf(stderr, "fmt: %s would be reformatted\n", path);
+                rc = CH_EXIT_ERROR;
+            } else {
+                printf("fmt: ok %s\n", path);
+            }
+        } else if (opts->output) {
+            rc = write_fmt_output(opts->output, out_buf, out_len);
+        } else {
+            rc = write_fmt_output(path, out_buf, out_len);
+            if (rc == CH_EXIT_OK) {
+                printf("fmt: wrote %s\n", path);
+            }
+        }
+    }
+
+    free(out_buf);
+    free(src);
+    ch_vm_deinit(&vm);
+    return rc;
+}
+
+static int cmd_check(const char *path, const ChCliOptions *opts) {
+    size_t len = 0;
+    char *src = ch_read_file(path, &len);
+    if (!src) {
+        fprintf(stderr, "Error opening file '%s'\n", path);
+        return CH_EXIT_ERROR;
+    }
+
+    ChVM vm;
+    ch_vm_init(&vm);
+    ch_vm_register_primitives(&vm);
+    vm.script_path = path;
+    for (size_t i = 0; i < opts->lib_path_count; i++) {
+        vm.lib_paths[vm.lib_path_count++] = opts->lib_paths[i];
+    }
+
+    ChReader reader;
+    ch_reader_init(&reader, &vm.gc, src, len);
+
+    size_t forms = 0;
+    int rc = CH_EXIT_OK;
+    for (;;) {
+        ChValue v = CH_NIL;
+        ch_gc_push(&vm.gc, &v);
+        ChReadStatus st = read_cli_datum(&vm, &reader, &v);
+        if (st == CH_READ_EOF) {
+            ch_gc_pop(&vm.gc);
+            break;
+        }
+        if (st != CH_READ_OK) {
+            fprintf(stderr, "read error: %s\n", ch_reader_error(&reader));
+            ch_gc_pop(&vm.gc);
+            rc = CH_EXIT_ERROR;
+            break;
+        }
+
+        ChCompiler compiler;
+        ch_compiler_init(&compiler, &vm);
+        ChFunction *fn = NULL;
+        if (ch_compile_toplevel(&compiler, v, &fn) != CH_COMPILE_OK) {
+            fprintf(stderr, "check error: %s\n", ch_compiler_error(&compiler));
+            ch_gc_pop(&vm.gc);
+            rc = CH_EXIT_ERROR;
+            break;
+        }
+        (void)fn;
+        forms++;
+        ch_gc_pop(&vm.gc);
+    }
+
+    if (rc == CH_EXIT_OK) {
+        printf("check: ok (%zu form%s)\n", forms, forms == 1 ? "" : "s");
+    }
+
+    free(src);
+    ch_vm_deinit(&vm);
+    return rc;
 }
 
 static int run_file(ChVM *vm, const char *path) {
@@ -660,6 +891,19 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
         return CH_EXIT_OK;
     }
 
+    if (opts->flag_native) {
+        if (opts->command != CH_CMD_RUN) {
+            fprintf(stderr, "chaaya: --native is only supported for file execution\n");
+            return CH_EXIT_USAGE;
+        }
+        if (!opts->file) {
+            fprintf(stderr, "chaaya: --native requires a Scheme file argument\n");
+            usage_hint(argv0);
+            return CH_EXIT_USAGE;
+        }
+        return ch_llvm_backend_run_file(opts->file);
+    }
+
     /* NYI flags on an otherwise valid command */
     if (opts->nyi_flag) {
         return not_implemented(opts->nyi_flag);
@@ -670,6 +914,10 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
         return cmd_features(opts->json);
     case CH_CMD_DOCTOR:
         return cmd_doctor(opts);
+    case CH_CMD_LSP:
+        return ch_lsp_run_stdio();
+    case CH_CMD_WASM:
+        return cmd_wasm_stub();
     case CH_CMD_AST:
         if (!opts->file) {
             fprintf(stderr, "ast: missing file\n");
@@ -678,28 +926,38 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
         }
         return cmd_ast(opts->file);
     case CH_CMD_CACHE_STATUS:
-        return cmd_cache_status();
+        return ch_cache_status();
     case CH_CMD_CACHE_CLEAR:
-        return cmd_cache_clear();
+        return ch_cache_clear();
     case CH_CMD_COMPILE:
         return not_implemented("compile");
     case CH_CMD_CHECK:
-        return not_implemented("check");
+        if (!opts->file) {
+            fprintf(stderr, "check: missing file\n");
+            usage_hint(argv0);
+            return CH_EXIT_USAGE;
+        }
+        return cmd_check(opts->file, opts);
     case CH_CMD_EXPLAIN:
         return not_implemented("explain");
     case CH_CMD_TEST:
-        return not_implemented("test");
+        return cmd_test_stub(argv0, opts);
     case CH_CMD_EXPAND:
         if (!opts->file) {
             fprintf(stderr, "expand: missing file\n");
             usage_hint(argv0);
             return CH_EXIT_USAGE;
         }
-        return cmd_expand(opts->file);
+        return cmd_expand(opts->file, opts);
     case CH_CMD_IR:
         return not_implemented("ir");
     case CH_CMD_FMT:
-        return not_implemented("fmt");
+        if (!opts->file) {
+            fprintf(stderr, "fmt: missing file\n");
+            usage_hint(argv0);
+            return CH_EXIT_USAGE;
+        }
+        return cmd_fmt(opts->file, opts);
     case CH_CMD_RUN:
         break;
     }

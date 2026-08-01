@@ -15,32 +15,81 @@ void ch_reader_init(ChReader *r, ChGC *gc, const char *src, size_t len) {
     r->len = len;
     r->pos = 0;
     r->fold_case = 0;
+    r->refill = NULL;
+    r->refill_ctx = NULL;
     r->error[0] = '\0';
+}
+
+void ch_reader_set_refill(ChReader *r, ChReaderRefillFn refill, void *ctx) {
+    r->refill = refill;
+    r->refill_ctx = ctx;
 }
 
 const char *ch_reader_error(const ChReader *r) {
     return r->error;
 }
 
+static bool try_refill(ChReader *r) {
+    if (!r->refill) {
+        return false;
+    }
+    const char *old_src = r->src;
+    size_t old_len = r->len;
+    size_t old_pos = r->pos;
+    if (!r->refill(r, r->refill_ctx)) {
+        return false;
+    }
+    if (r->pos < r->len) {
+        return true;
+    }
+    return r->src != old_src || r->len != old_len || r->pos != old_pos;
+}
+
 static int peek(ChReader *r) {
-    if (r->pos >= r->len) {
-        return -1;
+    while (r->pos >= r->len) {
+        if (!try_refill(r)) {
+            return -1;
+        }
     }
     return (unsigned char)r->src[r->pos];
 }
 
-static int advance(ChReader *r) {
-    if (r->pos >= r->len) {
-        return -1;
+static int peek_n(ChReader *r, size_t ahead) {
+    size_t want = r->pos + ahead;
+    while (want >= r->len) {
+        if (!try_refill(r)) {
+            return -1;
+        }
     }
-    return (unsigned char)r->src[r->pos++];
+    return (unsigned char)r->src[want];
 }
 
-static void skip_ws_and_comments(ChReader *r) {
+static int advance(ChReader *r) {
+    int c = peek(r);
+    if (c < 0) {
+        return -1;
+    }
+    r->pos++;
+    return c;
+}
+
+static ChReadStatus read_datum(ChReader *r, ChValue *out);
+
+static bool is_utf8_lead_byte(int c) {
+    unsigned char u = (unsigned char)c;
+    return u >= 0xC2 && u <= 0xF4;
+}
+
+static bool is_utf8_continuation_byte(int c) {
+    unsigned char u = (unsigned char)c;
+    return u >= 0x80 && u <= 0xBF;
+}
+
+static ChReadStatus skip_ws_and_comments(ChReader *r) {
     for (;;) {
         int c = peek(r);
         if (c < 0) {
-            return;
+            return CH_READ_OK;
         }
         if (c == ';') {
             while (peek(r) >= 0 && peek(r) != '\n') {
@@ -48,14 +97,30 @@ static void skip_ws_and_comments(ChReader *r) {
             }
             continue;
         }
-        if (isspace(c)) {
+        if (isspace((unsigned char)c)) {
             advance(r);
             continue;
         }
+        if (c == '#' && peek_n(r, 1) == ';') {
+            advance(r);
+            advance(r);
+            ChValue ignored = CH_NIL;
+            ch_gc_push(r->gc, &ignored);
+            ChReadStatus st = read_datum(r, &ignored);
+            ch_gc_pop(r->gc);
+            if (st == CH_READ_EOF) {
+                snprintf(r->error, sizeof(r->error), "#;: expected datum");
+                return CH_READ_ERROR;
+            }
+            if (st != CH_READ_OK) {
+                return st;
+            }
+            continue;
+        }
         /* #!fold-case / #!no-fold-case directives */
-        if (c == '#' && r->pos + 1 < r->len && r->src[r->pos + 1] == '!') {
+        if (c == '#' && peek_n(r, 1) == '!') {
             size_t start = r->pos;
-            while (peek(r) >= 0 && peek(r) != '\n' && !isspace(peek(r))) {
+            while (peek(r) >= 0 && peek(r) != '\n' && !isspace((unsigned char)peek(r))) {
                 advance(r);
             }
             size_t n = r->pos - start;
@@ -73,7 +138,7 @@ static void skip_ws_and_comments(ChReader *r) {
             }
             continue;
         }
-        return;
+        return CH_READ_OK;
     }
 }
 
@@ -86,13 +151,21 @@ static bool is_ident_start(int c) {
     if (c < 0) {
         return false;
     }
-    if (isalpha(c) || (unsigned char)c >= 0x80) {
+    if (isalpha((unsigned char)c) || is_utf8_lead_byte(c)) {
         return true;
     }
     return strchr("!$%&*/:<=>?^_~+-.@", c) != NULL;
 }
 
-static ChReadStatus read_datum(ChReader *r, ChValue *out);
+static bool is_ident_subsequent(int c) {
+    if (is_ident_start(c) || isdigit((unsigned char)c)) {
+        return true;
+    }
+    if (is_utf8_continuation_byte(c)) {
+        return true;
+    }
+    return strchr("+-.@", c) != NULL;
+}
 
 static ChReadStatus fail(ChReader *r, const char *msg) {
     snprintf(r->error, sizeof(r->error), "%s", msg);
@@ -307,7 +380,11 @@ bool ch_parse_number(ChGC *gc, const char *text, size_t len, ChValue *out) {
 
 static ChReadStatus read_atom(ChReader *r, ChValue *out) {
     size_t start = r->pos;
+    bool ident_mode = is_ident_start(peek(r));
     while (!is_delim(peek(r))) {
+        if (ident_mode && !is_ident_subsequent(peek(r))) {
+            break;
+        }
         advance(r);
     }
     size_t len = r->pos - start;
@@ -377,7 +454,10 @@ static ChReadStatus read_atom(ChReader *r, ChValue *out) {
 
 static ChReadStatus read_list(ChReader *r, ChValue *out) {
     advance(r); /* ( */
-    skip_ws_and_comments(r);
+    ChReadStatus ws = skip_ws_and_comments(r);
+    if (ws != CH_READ_OK) {
+        return ws;
+    }
     if (peek(r) == ')') {
         advance(r);
         *out = CH_NIL;
@@ -390,7 +470,11 @@ static ChReadStatus read_list(ChReader *r, ChValue *out) {
     ch_gc_push(r->gc, &tail);
 
     while (peek(r) >= 0 && peek(r) != ')') {
-        skip_ws_and_comments(r);
+        ws = skip_ws_and_comments(r);
+        if (ws != CH_READ_OK) {
+            ch_gc_pop_n(r->gc, 2);
+            return ws;
+        }
         if (peek(r) == ')') {
             break;
         }
@@ -400,7 +484,11 @@ static ChReadStatus read_list(ChReader *r, ChValue *out) {
                 /* not a dotted pair — put back conceptually by reading as atom starting with . */
                 r->pos--;
             } else {
-                skip_ws_and_comments(r);
+                ws = skip_ws_and_comments(r);
+                if (ws != CH_READ_OK) {
+                    ch_gc_pop_n(r->gc, 2);
+                    return ws;
+                }
                 ChValue rest = CH_NIL;
                 ch_gc_push(r->gc, &rest);
                 ChReadStatus st = read_datum(r, &rest);
@@ -408,7 +496,11 @@ static ChReadStatus read_list(ChReader *r, ChValue *out) {
                     ch_gc_pop_n(r->gc, 3);
                     return st;
                 }
-                skip_ws_and_comments(r);
+                ws = skip_ws_and_comments(r);
+                if (ws != CH_READ_OK) {
+                    ch_gc_pop_n(r->gc, 3);
+                    return ws;
+                }
                 if (peek(r) != ')') {
                     ch_gc_pop_n(r->gc, 3);
                     return fail(r, "expected ) after dotted pair");
@@ -441,7 +533,11 @@ static ChReadStatus read_list(ChReader *r, ChValue *out) {
             ch_set_cdr(tail, cell);
             tail = cell;
         }
-        skip_ws_and_comments(r);
+        ws = skip_ws_and_comments(r);
+        if (ws != CH_READ_OK) {
+            ch_gc_pop_n(r->gc, 2);
+            return ws;
+        }
     }
     if (peek(r) != ')') {
         ch_gc_pop_n(r->gc, 2);
@@ -458,7 +554,10 @@ static ChReadStatus read_vector(ChReader *r, ChValue *out) {
     advance(r); /* ( */
     ChValue items[256];
     size_t n = 0;
-    skip_ws_and_comments(r);
+    ChReadStatus ws = skip_ws_and_comments(r);
+    if (ws != CH_READ_OK) {
+        return ws;
+    }
     while (peek(r) >= 0 && peek(r) != ')') {
         if (n >= 256) {
             return fail(r, "vector too large");
@@ -468,7 +567,10 @@ static ChReadStatus read_vector(ChReader *r, ChValue *out) {
             return st;
         }
         n++;
-        skip_ws_and_comments(r);
+        ws = skip_ws_and_comments(r);
+        if (ws != CH_READ_OK) {
+            return ws;
+        }
     }
     if (peek(r) != ')') {
         return fail(r, "unterminated vector");
@@ -480,6 +582,80 @@ static ChReadStatus read_vector(ChReader *r, ChValue *out) {
         v->items[i] = items[i];
     }
     *out = vec;
+    return CH_READ_OK;
+}
+
+static ChReadStatus read_bytevector(ChReader *r, ChValue *out) {
+    /* already consumed #, next is u/U */
+    int u = advance(r);
+    if (u != 'u' && u != 'U') {
+        return fail(r, "expected u8 bytevector literal");
+    }
+    if (advance(r) != '8') {
+        return fail(r, "expected u8 bytevector literal");
+    }
+    if (peek(r) != '(') {
+        return fail(r, "expected ( after #u8");
+    }
+    advance(r); /* ( */
+
+    size_t cap = 16;
+    size_t len = 0;
+    uint8_t *bytes = (uint8_t *)malloc(cap);
+    if (!bytes) {
+        return fail(r, "out of memory");
+    }
+
+    ChReadStatus ws = skip_ws_and_comments(r);
+    if (ws != CH_READ_OK) {
+        free(bytes);
+        return ws;
+    }
+    while (peek(r) >= 0 && peek(r) != ')') {
+        ChValue item = CH_NIL;
+        ch_gc_push(r->gc, &item);
+        ChReadStatus st = read_datum(r, &item);
+        ch_gc_pop(r->gc);
+        if (st != CH_READ_OK) {
+            free(bytes);
+            return st;
+        }
+        if (!ch_is_fixnum(item)) {
+            free(bytes);
+            return fail(r, "bytevector element is not an exact integer");
+        }
+        int64_t n = ch_to_fixnum(item);
+        if (n < 0 || n > 255) {
+            free(bytes);
+            return fail(r, "bytevector element out of range");
+        }
+        if (len >= cap) {
+            cap *= 2;
+            uint8_t *nb = (uint8_t *)realloc(bytes, cap);
+            if (!nb) {
+                free(bytes);
+                return fail(r, "out of memory");
+            }
+            bytes = nb;
+        }
+        bytes[len++] = (uint8_t)n;
+        ws = skip_ws_and_comments(r);
+        if (ws != CH_READ_OK) {
+            free(bytes);
+            return ws;
+        }
+    }
+    if (peek(r) != ')') {
+        free(bytes);
+        return fail(r, "unterminated bytevector");
+    }
+    advance(r);
+    ChValue bv = ch_gc_make_bytevector(r->gc, len, 0);
+    if (len > 0) {
+        memcpy(ch_as_bytevector(bv)->data, bytes, len);
+    }
+    free(bytes);
+    *out = bv;
     return CH_READ_OK;
 }
 
@@ -501,7 +677,10 @@ static ChReadStatus read_abbrev(ChReader *r, const char *name, ChValue *out) {
 }
 
 static ChReadStatus read_datum(ChReader *r, ChValue *out) {
-    skip_ws_and_comments(r);
+    ChReadStatus ws = skip_ws_and_comments(r);
+    if (ws != CH_READ_OK) {
+        return ws;
+    }
     int c = peek(r);
     if (c < 0) {
         return CH_READ_EOF;
@@ -535,6 +714,9 @@ static ChReadStatus read_datum(ChReader *r, ChValue *out) {
         if (n == '(') {
             return read_vector(r, out);
         }
+        if ((n == 'u' || n == 'U') && peek_n(r, 1) == '8' && peek_n(r, 2) == '(') {
+            return read_bytevector(r, out);
+        }
         r->pos = save;
         return read_atom(r, out);
     }
@@ -548,7 +730,10 @@ static ChReadStatus read_datum(ChReader *r, ChValue *out) {
 }
 
 ChReadStatus ch_read_datum(ChReader *r, ChValue *out) {
-    skip_ws_and_comments(r);
+    ChReadStatus ws = skip_ws_and_comments(r);
+    if (ws != CH_READ_OK) {
+        return ws;
+    }
     if (peek(r) < 0) {
         return CH_READ_EOF;
     }

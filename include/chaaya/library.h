@@ -66,12 +66,16 @@ int ch_eval_toplevel_form(ChVM *vm, ChValue expr);
 
 /* Resolve and load a library by name list; returns library or NULL. */
 ChLibrary *ch_ensure_library(ChVM *vm, ChValue name_list);
+int ch_library_file_exists(ChVM *vm, const char *rel_path);
 
 /* Push all registered library export values as GC roots; returns count pushed. */
 size_t ch_library_push_gc_roots(ChVM *vm);
 
-/* True if a relative .sld path resolves on disk (does not load). */
-int ch_library_file_exists(ChVM *vm, const char *rel_path);
+/* Resolve import-set into env (does not touch globals). */
+int ch_import_set_into_env(ChVM *vm, ChValue set, ChLibEnv *out);
+
+/* Merge multiple import-sets into env. */
+int ch_environment_from_imports(ChVM *vm, ChValue *import_sets, int nsets, ChLibEnv *out);
 
 /* Top-level (include ...) / (include-ci ...) / (cond-expand ...). */
 int ch_handle_include(ChVM *vm, ChValue args, int fold_case);

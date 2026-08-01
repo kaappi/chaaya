@@ -50,14 +50,49 @@ typedef enum ChObjectTag {
     CH_TAG_BIGNUM = 14,
     CH_TAG_RATIONAL = 15,
     CH_TAG_COMPLEX = 16,
+    CH_TAG_ENVIRONMENT = 17,
+    CH_TAG_ERROR_OBJ = 18,
+    CH_TAG_PARAMETER = 19,
+    CH_TAG_HASHTABLE = 20,
+    CH_TAG_BYTEVECTOR = 21,
+    CH_TAG_TIME = 22,
+    CH_TAG_FIBER = 23,
+    CH_TAG_CHANNEL = 24,
+    CH_TAG_FOREIGN_LIBRARY = 25,
+    CH_TAG_FOREIGN_PROC = 26,
 } ChObjectTag;
 
 typedef struct ChObject {
     uint8_t tag;
     uint8_t marked;
+    uint8_t generation;
+    uint8_t age;
     uint16_t reserved;
     struct ChObject *next; /* GC heap list */
 } ChObject;
+
+#define CH_OBJ_GEN_YOUNG 0u
+#define CH_OBJ_GEN_OLD 1u
+#define CH_OBJ_FLAG_IMMUTABLE 0x0001u
+
+static inline bool ch_object_is_immutable(const ChObject *obj) {
+    return obj && (obj->reserved & CH_OBJ_FLAG_IMMUTABLE) != 0;
+}
+
+static inline bool ch_object_is_old(const ChObject *obj) {
+    return obj && obj->generation == CH_OBJ_GEN_OLD;
+}
+
+static inline void ch_object_set_immutable(ChObject *obj, bool immutable) {
+    if (!obj) {
+        return;
+    }
+    if (immutable) {
+        obj->reserved = (uint16_t)(obj->reserved | CH_OBJ_FLAG_IMMUTABLE);
+    } else {
+        obj->reserved = (uint16_t)(obj->reserved & (uint16_t)~CH_OBJ_FLAG_IMMUTABLE);
+    }
+}
 
 typedef struct ChPair {
     ChObject header;
@@ -85,6 +120,10 @@ typedef struct ChVector {
 
 struct ChVM;
 struct ChFunction;
+typedef struct ChFiber ChFiber;
+typedef struct ChChannel ChChannel;
+typedef struct ChForeignLibrary ChForeignLibrary;
+typedef struct ChForeignProcedure ChForeignProcedure;
 
 typedef ChValue (*ChNativeFn)(struct ChVM *vm, ChValue *args, int nargs);
 
@@ -142,6 +181,11 @@ typedef struct ChExceptionHandler {
     size_t wind_count;
 } ChExceptionHandler;
 
+typedef struct ChParameterBinding {
+    ChValue parameter; /* CH_TAG_PARAMETER object */
+    ChValue value;
+} ChParameterBinding;
+
 typedef struct ChSavedUpvalue {
     ChUpvalue *uv;
     size_t reg_index; /* absolute index into vm->regs at capture */
@@ -157,6 +201,8 @@ typedef struct ChContinuation {
     size_t wind_count;
     ChExceptionHandler *handlers;
     size_t handler_count;
+    ChParameterBinding *parameter_bindings;
+    size_t parameter_binding_count;
     ChSavedUpvalue *open_uvs;
     size_t open_uv_count;
     size_t result_slot; /* absolute register index for call/cc result */
@@ -173,6 +219,7 @@ typedef enum ChPortKind {
     CH_PORT_STRING_IN = 1,
     CH_PORT_STRING_OUT = 2,
     CH_PORT_FILE = 3, /* owned FILE* — fclose on close */
+    CH_PORT_BYTEVECTOR = 4,
 } ChPortKind;
 
 typedef struct ChPort {
@@ -182,7 +229,7 @@ typedef struct ChPort {
     uint8_t output;
     uint8_t closed;
     FILE *file; /* CH_PORT_STDIO */
-    char *buf;  /* string ports (owned) */
+    char *buf;  /* string/bytevector ports (owned) */
     size_t len;
     size_t cap;
     size_t pos;
@@ -244,6 +291,48 @@ typedef struct ChComplex {
     double imag;
 } ChComplex;
 
+typedef struct ChErrorObject {
+    ChObject header;
+    ChValue message;   /* string */
+    ChValue irritants; /* list */
+    uint8_t error_type; /* 0=generic 1=file 2=read */
+} ChErrorObject;
+
+typedef struct ChParameter {
+    ChObject header;
+    ChValue init;
+    ChValue converter; /* procedure or NIL */
+    ChValue value;
+} ChParameter;
+
+typedef enum ChHashtableMode {
+    CH_HASHTABLE_EQ = 0,
+    CH_HASHTABLE_EQV = 1,
+} ChHashtableMode;
+
+typedef struct ChHashtable {
+    ChObject header;
+    size_t count;
+    size_t cap;
+    ChHashtableMode mode;
+    ChValue *keys;
+    ChValue *vals;
+    bool *used;
+} ChHashtable;
+
+typedef struct ChBytevector {
+    ChObject header;
+    size_t len;
+    uint8_t data[]; /* flexible array */
+} ChBytevector;
+
+typedef struct ChTime {
+    ChObject header;
+    int64_t seconds;
+    int32_t nanoseconds;
+    ChValue type_sym; /* time-utc, time-monotonic, etc. */
+} ChTime;
+
 /* Signed i48 fixnum range. */
 #define CH_FIXNUM_MIN (-((int64_t)1 << 47))
 #define CH_FIXNUM_MAX (((int64_t)1 << 47) - 1)
@@ -304,6 +393,15 @@ bool ch_is_promise(ChValue v);
 bool ch_is_bignum(ChValue v);
 bool ch_is_rational_obj(ChValue v); /* heap rational only */
 bool ch_is_complex_obj(ChValue v);  /* heap complex only */
+bool ch_is_error_object(ChValue v);
+bool ch_is_parameter(ChValue v);
+bool ch_is_hashtable(ChValue v);
+bool ch_is_bytevector(ChValue v);
+bool ch_is_time(ChValue v);
+bool ch_is_fiber(ChValue v);
+bool ch_is_channel(ChValue v);
+bool ch_is_foreign_library(ChValue v);
+bool ch_is_foreign_procedure(ChValue v);
 bool ch_is_exact_integer(ChValue v);
 bool ch_is_exact(ChValue v); /* integer or rational */
 bool ch_is_number(ChValue v);
@@ -326,6 +424,15 @@ ChPromise *ch_as_promise(ChValue v);
 ChBignum *ch_as_bignum(ChValue v);
 ChRational *ch_as_rational(ChValue v);
 ChComplex *ch_as_complex(ChValue v);
+ChErrorObject *ch_as_error_object(ChValue v);
+ChParameter *ch_as_parameter(ChValue v);
+ChHashtable *ch_as_hashtable(ChValue v);
+ChBytevector *ch_as_bytevector(ChValue v);
+ChTime *ch_as_time(ChValue v);
+ChFiber *ch_as_fiber(ChValue v);
+ChChannel *ch_as_channel(ChValue v);
+ChForeignLibrary *ch_as_foreign_library(ChValue v);
+ChForeignProcedure *ch_as_foreign_procedure(ChValue v);
 
 /* Collapse multiple values to the first (or void if none). */
 ChValue ch_coerce_single(ChValue v);

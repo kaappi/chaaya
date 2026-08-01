@@ -6,6 +6,8 @@
 #include "chaaya/features.h"
 #include "chaaya/reader.h"
 
+#include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -202,12 +204,36 @@ int ch_register_scheme_base_library(ChVM *vm) {
     return ch_library_register(vm->libraries, lib);
 }
 
+static int register_scheme_r5rs_library(ChVM *vm) {
+    ChLibrary *lib = (ChLibrary *)calloc(1, sizeof(ChLibrary));
+    if (!lib) {
+        return -1;
+    }
+    lib->name = strdup("scheme.r5rs");
+    for (size_t i = 0; i < vm->global_count && lib->export_count < CH_LIB_MAX_EXPORTS; i++) {
+        if (!vm->globals[i].defined) {
+            continue;
+        }
+        const char *n = vm->globals[i].name->name;
+        if (n[0] == '%') {
+            continue;
+        }
+        lib->export_names[lib->export_count] = vm->globals[i].name;
+        lib->export_values[lib->export_count] = vm->globals[i].value;
+        lib->export_count++;
+    }
+    return ch_library_register(vm->libraries, lib);
+}
+
 int ch_register_builtin_libraries(ChVM *vm) {
     if (ch_register_scheme_base_library(vm) != 0) {
         return -1;
     }
-    static const char *const write_exports[] = {"display", "write", "newline"};
-    static const char *const read_exports[] = {"read", "read-char", "peek-char", "eof-object",
+    static const char *const write_exports[] = {"display", "write", "newline", "write-u8",
+                                                "write-bytevector"};
+    static const char *const read_exports[] = {"read",           "read-char",      "peek-char",
+                                               "read-u8",        "peek-u8",         "read-bytevector",
+                                               "read-bytevector!", "u8-ready?",     "eof-object",
                                                "eof-object?"};
     static const char *const cxr_exports[] = {"caar", "cadr", "cdar", "cddr"};
     static const char *const char_exports[] = {"char?", "char=?", "char<?", "char->integer",
@@ -224,6 +250,20 @@ int ch_register_builtin_libraries(ChVM *vm) {
         "acos", "asin", "atan", "cos", "exp", "finite?", "infinite?", "log", "nan?", "sin", "sqrt",
         "tan"};
     static const char *const exact_exports[] = {"exact", "exact-integer-sqrt", "inexact"};
+    static const char *const eval_exports[] = {"eval", "environment"};
+    static const char *const load_exports[] = {"load"};
+    static const char *const repl_exports[] = {"interaction-environment"};
+    static const char *const time_exports[] = {"current-second", "current-jiffy", "jiffies-per-second",
+                                               "time?", "make-time", "time-type", "time-second",
+                                               "time-nanosecond"};
+    static const char *const chaaya_fibers_exports[] = {
+        "spawn-fiber", "fiber-yield", "fiber?", "make-channel",
+        "channel?",    "channel-send!", "channel-recv"};
+    static const char *const chaaya_ffi_exports[] = {"open-foreign-library",
+                                                      "close-foreign-library!",
+                                                      "foreign-library?",
+                                                      "foreign-procedure",
+                                                      "foreign-procedure?"};
     if (register_exports_from_globals(vm, "scheme.write", write_exports,
                                       sizeof(write_exports) / sizeof(write_exports[0])) != 0) {
         return -1;
@@ -264,8 +304,37 @@ int ch_register_builtin_libraries(ChVM *vm) {
                                       sizeof(exact_exports) / sizeof(exact_exports[0])) != 0) {
         return -1;
     }
+    if (register_exports_from_globals(vm, "scheme.eval", eval_exports,
+                                      sizeof(eval_exports) / sizeof(eval_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "scheme.load", load_exports,
+                                      sizeof(load_exports) / sizeof(load_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "scheme.repl", repl_exports,
+                                      sizeof(repl_exports) / sizeof(repl_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "scheme.time", time_exports,
+                                      sizeof(time_exports) / sizeof(time_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "chaaya.fibers", chaaya_fibers_exports,
+                                      sizeof(chaaya_fibers_exports) /
+                                          sizeof(chaaya_fibers_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "chaaya.ffi", chaaya_ffi_exports,
+                                      sizeof(chaaya_ffi_exports) / sizeof(chaaya_ffi_exports[0])) !=
+        0) {
+        return -1;
+    }
     /* case-lambda is a compiler special form; library exists for R7RS import. */
     if (register_exports_from_globals(vm, "scheme.case-lambda", NULL, 0) != 0) {
+        return -1;
+    }
+    if (register_scheme_r5rs_library(vm) != 0) {
         return -1;
     }
     return 0;
@@ -289,6 +358,13 @@ static int merge_env_into_globals(ChVM *vm, const ChLibEnv *env) {
         }
         int idx = ch_vm_intern_global(vm, env->bindings[i].name);
         ch_vm_define_global(vm, idx, env->bindings[i].value);
+        if (ch_is_transformer(env->bindings[i].value)) {
+            if (ch_vm_define_macro(vm, env->bindings[i].name,
+                                   ch_as_transformer(env->bindings[i].value)) != 0) {
+                snprintf(vm->error, sizeof(vm->error), "import: macro table full");
+                return -1;
+            }
+        }
     }
     return 0;
 }
@@ -520,6 +596,62 @@ static void loading_pop(ChVM *vm) {
     vm->loading_libs[vm->loading_lib_count] = NULL;
 }
 
+static int parse_srfi261_suffix_number(const char *name, int64_t *out_number) {
+    const char *dash = strrchr(name, '-');
+    if (!dash || dash == name || dash[1] == '\0') {
+        return 0;
+    }
+    for (const char *p = dash + 1; *p; p++) {
+        if (!isdigit((unsigned char)*p)) {
+            return 0;
+        }
+    }
+    errno = 0;
+    char *end = NULL;
+    long long parsed = strtoll(dash + 1, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || parsed < 0 || parsed > CH_FIXNUM_MAX) {
+        return 0;
+    }
+    *out_number = (int64_t)parsed;
+    return 1;
+}
+
+static int srfi261_normalize_library_name(ChVM *vm, ChValue name_list, ChValue *out_name) {
+    if (!ch_is_pair(name_list) || !ch_is_symbol(ch_car(name_list))) {
+        return 0;
+    }
+    ChSymbol *head = ch_as_symbol(ch_car(name_list));
+    if (strcmp(ch_symbol_basename(head), "srfi") != 0) {
+        return 0;
+    }
+
+    ChValue tail = ch_cdr(name_list);
+    if (!ch_is_pair(tail)) {
+        return 0;
+    }
+    ChValue second = ch_car(tail);
+    if (!ch_is_symbol(second)) {
+        return 0;
+    }
+
+    int64_t number = 0;
+    if (!parse_srfi261_suffix_number(ch_as_symbol(second)->name, &number)) {
+        return 0;
+    }
+
+    ChValue normalized_tail = ch_cdr(tail);
+    ChValue first = ch_car(name_list);
+    ChValue normalized_name = CH_NIL;
+    ch_gc_push(&vm->gc, &normalized_tail);
+    ch_gc_push(&vm->gc, &first);
+    ch_gc_push(&vm->gc, &normalized_name);
+    normalized_name = ch_gc_cons(&vm->gc, ch_make_fixnum(number), normalized_tail);
+    normalized_name = ch_gc_cons(&vm->gc, first, normalized_name);
+    ch_gc_pop_n(&vm->gc, 3);
+    *out_name = normalized_name;
+    return 1;
+}
+
 ChLibrary *ch_ensure_library(ChVM *vm, ChValue name_list) {
     char *dotted = ch_library_name_to_string(name_list);
     if (!dotted) {
@@ -531,25 +663,60 @@ ChLibrary *ch_ensure_library(ChVM *vm, ChValue name_list) {
         free(dotted);
         return lib;
     }
-    if (loading_push(vm, dotted) != 0) {
-        free(dotted);
-        return NULL;
-    }
+
     char *rel = ch_library_name_to_path(name_list);
     if (!rel) {
         snprintf(vm->error, sizeof(vm->error), "import: bad library name");
-        loading_pop(vm);
         free(dotted);
         return NULL;
     }
     char *path = resolve_library_path(vm, rel);
     free(rel);
+
+    if (!path) {
+        ChValue normalized_name = CH_NIL;
+        if (srfi261_normalize_library_name(vm, name_list, &normalized_name)) {
+            char *norm_dotted = ch_library_name_to_string(normalized_name);
+            if (!norm_dotted) {
+                snprintf(vm->error, sizeof(vm->error), "import: bad library name");
+                free(dotted);
+                return NULL;
+            }
+
+            lib = ch_library_lookup(vm->libraries, norm_dotted);
+            if (lib) {
+                free(norm_dotted);
+                free(dotted);
+                return lib;
+            }
+
+            char *norm_rel = ch_library_name_to_path(normalized_name);
+            if (norm_rel) {
+                char *norm_path = resolve_library_path(vm, norm_rel);
+                free(norm_rel);
+                if (norm_path) {
+                    free(dotted);
+                    dotted = norm_dotted;
+                    norm_dotted = NULL;
+                    path = norm_path;
+                }
+            }
+            free(norm_dotted);
+        }
+    }
+
     if (!path) {
         snprintf(vm->error, sizeof(vm->error), "library not found: %s", dotted);
-        loading_pop(vm);
         free(dotted);
         return NULL;
     }
+
+    if (loading_push(vm, dotted) != 0) {
+        free(path);
+        free(dotted);
+        return NULL;
+    }
+
     int rc = load_library_file(vm, path);
     free(path);
     loading_pop(vm);
@@ -567,6 +734,23 @@ ChLibrary *ch_ensure_library(ChVM *vm, ChValue name_list) {
 }
 
 static int resolve_import_set(ChVM *vm, ChValue set, ChLibEnv *out);
+
+int ch_import_set_into_env(ChVM *vm, ChValue set, ChLibEnv *out) {
+    return resolve_import_set(vm, set, out);
+}
+
+int ch_environment_from_imports(ChVM *vm, ChValue *import_sets, int nsets, ChLibEnv *out) {
+    if (!out) {
+        snprintf(vm->error, sizeof(vm->error), "environment: missing target environment");
+        return -1;
+    }
+    for (int i = 0; i < nsets; i++) {
+        if (ch_import_set_into_env(vm, import_sets[i], out) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
 
 static int resolve_import_only(ChVM *vm, ChValue args, ChLibEnv *out) {
     /* (only <import-set> id ...) */
@@ -787,6 +971,13 @@ static int eval_library_begin(ChVM *vm, ChLibEnv *env, ChValue body) {
         if (env->bindings[i].defined) {
             int g = ch_vm_intern_global(vm, env->bindings[i].name);
             ch_vm_define_global(vm, g, env->bindings[i].value);
+            if (ch_is_transformer(env->bindings[i].value)) {
+                if (ch_vm_define_macro(vm, env->bindings[i].name,
+                                       ch_as_transformer(env->bindings[i].value)) != 0) {
+                    snprintf(vm->error, sizeof(vm->error), "define-library: macro table full");
+                    return -1;
+                }
+            }
         }
     }
 
@@ -820,6 +1011,14 @@ static int eval_library_begin(ChVM *vm, ChLibEnv *env, ChValue body) {
                 return -1;
             }
             ch_lib_env_define(env, idx, vm->globals[i].value);
+        }
+        for (size_t i = 0; i < vm->macro_count; i++) {
+            int idx = ch_lib_env_intern(env, vm->macros[i].name);
+            if (idx < 0) {
+                snprintf(vm->error, sizeof(vm->error), "define-library: environment full");
+                return -1;
+            }
+            ch_lib_env_define(env, idx, vm->macros[i].transformer);
         }
     }
     (void)globals_before;

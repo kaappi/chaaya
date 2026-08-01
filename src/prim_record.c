@@ -100,6 +100,7 @@ static ChValue prim_record_set(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
     r->fields[idx] = args[2];
+    ch_gc_write_barrier(&vm->gc, &r->header, args[2]);
     return CH_VOID;
 }
 

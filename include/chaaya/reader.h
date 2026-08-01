@@ -14,16 +14,22 @@ typedef enum ChReadStatus {
     CH_READ_ERROR,
 } ChReadStatus;
 
+struct ChReader;
+typedef bool (*ChReaderRefillFn)(struct ChReader *reader, void *ctx);
+
 typedef struct ChReader {
     ChGC *gc;
     const char *src;
     size_t len;
     size_t pos;
     int fold_case; /* ASCII fold for identifiers when non-zero */
+    ChReaderRefillFn refill;
+    void *refill_ctx;
     char error[256];
 } ChReader;
 
 void ch_reader_init(ChReader *r, ChGC *gc, const char *src, size_t len);
+void ch_reader_set_refill(ChReader *r, ChReaderRefillFn refill, void *ctx);
 ChReadStatus ch_read_datum(ChReader *r, ChValue *out);
 const char *ch_reader_error(const ChReader *r);
 

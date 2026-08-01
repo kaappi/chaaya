@@ -31,10 +31,43 @@ int main(void) {
         return 1;
     }
 
+    char *argv_expand[] = {"chaaya", "expand", "x.scm", NULL};
+    if (ch_cli_parse(3, argv_expand, &opts) != CH_EXIT_OK || opts.command != CH_CMD_EXPAND ||
+        !opts.file || strcmp(opts.file, "x.scm") != 0) {
+        fprintf(stderr, "parse expand failed\n");
+        return 1;
+    }
+
+    char *argv_check[] = {"chaaya", "check", "x.scm", NULL};
+    if (ch_cli_parse(3, argv_check, &opts) != CH_EXIT_OK || opts.command != CH_CMD_CHECK ||
+        !opts.file || strcmp(opts.file, "x.scm") != 0) {
+        fprintf(stderr, "parse check failed\n");
+        return 1;
+    }
+
+    char *argv_lsp[] = {"chaaya", "lsp", NULL};
+    if (ch_cli_parse(2, argv_lsp, &opts) != CH_EXIT_OK || opts.command != CH_CMD_LSP) {
+        fprintf(stderr, "parse lsp failed\n");
+        return 1;
+    }
+
+    char *argv_wasm[] = {"chaaya", "wasm", NULL};
+    if (ch_cli_parse(2, argv_wasm, &opts) != CH_EXIT_OK || opts.command != CH_CMD_WASM) {
+        fprintf(stderr, "parse wasm failed\n");
+        return 1;
+    }
+
     char *argv_run[] = {"chaaya", "prog.scm", "a", "b", NULL};
     if (ch_cli_parse(4, argv_run, &opts) != CH_EXIT_OK || opts.command != CH_CMD_RUN ||
         opts.script_arg_count != 2) {
         fprintf(stderr, "parse script args failed\n");
+        return 1;
+    }
+
+    char *argv_native[] = {"chaaya", "--native", "prog.scm", NULL};
+    if (ch_cli_parse(3, argv_native, &opts) != CH_EXIT_OK || !opts.flag_native || !opts.file ||
+        strcmp(opts.file, "prog.scm") != 0) {
+        fprintf(stderr, "parse --native failed\n");
         return 1;
     }
 

@@ -1,6 +1,7 @@
 #include "chaaya/compiler.h"
 
 #include "chaaya/expander.h"
+#include "chaaya/ir.h"
 #include "chaaya/library.h"
 #include "chaaya/opcode.h"
 
@@ -12,6 +13,13 @@
 #define CH_MAX_UPVALUES 64
 #define CH_MAX_CONSTS 512
 #define CH_CODE_INIT 256
+#define CH_MAX_DERIVED_BINDINGS 64
+#define CH_MAX_GUARD_CLAUSES 128
+
+static size_t guard_gensym_counter = 0;
+static size_t parameterize_gensym_counter = 0;
+static size_t do_gensym_counter = 0;
+static size_t case_gensym_counter = 0;
 
 typedef struct ChLocal {
     ChSymbol *name;
@@ -147,7 +155,37 @@ static void reset_regs(ChFuncCompiler *fc, uint8_t saved) {
     fc->next_reg = saved;
 }
 
+static void mark_literal_objects(ChValue v) {
+    if (!ch_is_pointer(v)) {
+        return;
+    }
+    ChObject *obj = ch_to_object(v);
+    switch ((ChObjectTag)obj->tag) {
+    case CH_TAG_BYTEVECTOR:
+        ch_object_set_immutable(obj, true);
+        return;
+    case CH_TAG_PAIR: {
+        ch_object_set_immutable(obj, true);
+        ChPair *pair = (ChPair *)obj;
+        mark_literal_objects(pair->car);
+        mark_literal_objects(pair->cdr);
+        return;
+    }
+    case CH_TAG_VECTOR: {
+        ch_object_set_immutable(obj, true);
+        ChVector *vec = (ChVector *)obj;
+        for (size_t i = 0; i < vec->len; i++) {
+            mark_literal_objects(vec->items[i]);
+        }
+        return;
+    }
+    default:
+        return;
+    }
+}
+
 static int add_constant(ChCompiler *c, ChFuncCompiler *fc, ChValue v) {
+    mark_literal_objects(v);
     for (size_t i = 0; i < fc->const_count; i++) {
         if (ch_eq(fc->constants[i], v)) {
             return (int)i;
@@ -241,6 +279,16 @@ static void ensure_temps_from(ChFuncCompiler *fc) {
 
 static ChCompileStatus compile_expr(ChCompiler *c, ChFuncCompiler *fc, ChValue expr, uint8_t dst,
                                     bool tail);
+
+typedef struct ChIrLegacyEmitCtx {
+    ChCompiler *compiler;
+    ChFuncCompiler *fc;
+} ChIrLegacyEmitCtx;
+
+static ChCompileStatus emit_ir_with_legacy(void *ctx, ChValue expr, uint8_t dst, bool tail) {
+    ChIrLegacyEmitCtx *emit_ctx = (ChIrLegacyEmitCtx *)ctx;
+    return compile_expr(emit_ctx->compiler, emit_ctx->fc, expr, dst, tail);
+}
 
 static size_t list_length(ChValue v) {
     size_t n = 0;
@@ -1151,6 +1199,123 @@ static ChCompileStatus compile_cond(ChCompiler *c, ChFuncCompiler *fc, ChValue a
     return compile_expr(c, fc, form, dst, tail);
 }
 
+static ChCompileStatus build_case_chain(ChCompiler *c, ChValue key_sym, ChValue clauses,
+                                        ChValue *out_form) {
+    if (ch_is_nil(clauses)) {
+        *out_form = CH_VOID;
+        return CH_COMPILE_OK;
+    }
+    if (!ch_is_pair(clauses)) {
+        return fail(c, "case: bad syntax");
+    }
+
+    ChValue clause = ch_car(clauses);
+    ChValue rest = ch_cdr(clauses);
+    if (!ch_is_pair(clause)) {
+        return fail(c, "case: bad clause");
+    }
+
+    ChValue datums = ch_car(clause);
+    ChValue body = ch_cdr(clause);
+    if (is_symbol_named(datums, "else")) {
+        if (!ch_is_nil(rest)) {
+            return fail(c, "case: else not last");
+        }
+        if (ch_is_pair(body) && is_symbol_named(ch_car(body), "=>")) {
+            if (!ch_is_pair(ch_cdr(body)) || !ch_is_nil(ch_cdr(ch_cdr(body)))) {
+                return fail(c, "case: bad => clause");
+            }
+            ChValue recipient = ch_car(ch_cdr(body));
+            *out_form = ch_gc_cons(&c->vm->gc, recipient, ch_gc_cons(&c->vm->gc, key_sym, CH_NIL));
+            return CH_COMPILE_OK;
+        }
+        ChValue begin_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "begin");
+        *out_form = ch_gc_cons(&c->vm->gc, begin_sym, body);
+        return CH_COMPILE_OK;
+    }
+
+    for (ChValue p = datums; !ch_is_nil(p); p = ch_cdr(p)) {
+        if (!ch_is_pair(p)) {
+            return fail(c, "case: bad datum list");
+        }
+    }
+
+    ChValue alternate = CH_VOID;
+    ChValue test_expr = CH_NIL;
+    ChValue consequent = CH_NIL;
+    ChValue if_form = CH_NIL;
+    ch_gc_push(&c->vm->gc, &alternate);
+    ch_gc_push(&c->vm->gc, &test_expr);
+    ch_gc_push(&c->vm->gc, &consequent);
+    ch_gc_push(&c->vm->gc, &if_form);
+
+    if (build_case_chain(c, key_sym, rest, &alternate) != CH_COMPILE_OK) {
+        ch_gc_pop_n(&c->vm->gc, 4);
+        return CH_COMPILE_ERROR;
+    }
+
+    if (ch_is_pair(body) && is_symbol_named(ch_car(body), "=>")) {
+        if (!ch_is_pair(ch_cdr(body)) || !ch_is_nil(ch_cdr(ch_cdr(body)))) {
+            ch_gc_pop_n(&c->vm->gc, 4);
+            return fail(c, "case: bad => clause");
+        }
+        ChValue recipient = ch_car(ch_cdr(body));
+        consequent = ch_gc_cons(&c->vm->gc, recipient, ch_gc_cons(&c->vm->gc, key_sym, CH_NIL));
+    } else {
+        ChValue begin_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "begin");
+        consequent = ch_gc_cons(&c->vm->gc, begin_sym, body);
+    }
+
+    ChValue memv_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "memv");
+    ChValue quote_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "quote");
+    ChValue quoted_datums = ch_gc_cons(&c->vm->gc, quote_sym, ch_gc_cons(&c->vm->gc, datums, CH_NIL));
+    test_expr =
+        ch_gc_cons(&c->vm->gc, memv_sym, ch_gc_cons(&c->vm->gc, key_sym, ch_gc_cons(&c->vm->gc, quoted_datums, CH_NIL)));
+
+    ChValue if_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "if");
+    if_form = ch_gc_cons(&c->vm->gc, if_sym,
+                         ch_gc_cons(&c->vm->gc, test_expr,
+                                    ch_gc_cons(&c->vm->gc, consequent,
+                                               ch_gc_cons(&c->vm->gc, alternate, CH_NIL))));
+    *out_form = if_form;
+    ch_gc_pop_n(&c->vm->gc, 4);
+    return CH_COMPILE_OK;
+}
+
+static ChCompileStatus compile_case(ChCompiler *c, ChFuncCompiler *fc, ChValue args, uint8_t dst,
+                                    bool tail) {
+    if (!ch_is_pair(args)) {
+        return fail(c, "case: bad syntax");
+    }
+
+    ChValue key_expr = ch_car(args);
+    ChValue clauses = ch_cdr(args);
+
+    case_gensym_counter++;
+    char key_name[48];
+    snprintf(key_name, sizeof(key_name), "%%case-key%zu", case_gensym_counter);
+    ChValue key_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, key_name);
+
+    ChValue chain = CH_VOID;
+    ChValue form = CH_NIL;
+    ch_gc_push(&c->vm->gc, &chain);
+    ch_gc_push(&c->vm->gc, &form);
+
+    if (build_case_chain(c, key_sym, clauses, &chain) != CH_COMPILE_OK) {
+        ch_gc_pop_n(&c->vm->gc, 2);
+        return CH_COMPILE_ERROR;
+    }
+
+    ChValue let_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "let");
+    ChValue bind = ch_gc_cons(&c->vm->gc, key_sym, ch_gc_cons(&c->vm->gc, key_expr, CH_NIL));
+    ChValue binds = ch_gc_cons(&c->vm->gc, bind, CH_NIL);
+    form = ch_gc_cons(&c->vm->gc, let_sym, ch_gc_cons(&c->vm->gc, binds, ch_gc_cons(&c->vm->gc, chain, CH_NIL)));
+
+    ChCompileStatus st = compile_expr(c, fc, form, dst, tail);
+    ch_gc_pop_n(&c->vm->gc, 2);
+    return st;
+}
+
 static ChCompileStatus compile_when_unless(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
                                            uint8_t dst, bool tail, int is_when) {
     if (!ch_is_pair(args) || !ch_is_pair(ch_cdr(args))) {
@@ -1174,6 +1339,396 @@ static ChCompileStatus compile_when_unless(ChCompiler *c, ChFuncCompiler *fc, Ch
                        ch_gc_cons(&c->vm->gc, CH_VOID, ch_gc_cons(&c->vm->gc, body_form, CH_NIL))));
     }
     return compile_expr(c, fc, form, dst, tail);
+}
+
+/* (do ((v init step) ...) (test result ...) cmd ...)
+ *   ->
+ * (let loop ((v init) ...)
+ *   (if test
+ *       (begin result ...)
+ *       (begin cmd ... (loop step-or-v ...)))) */
+static ChCompileStatus compile_do(ChCompiler *c, ChFuncCompiler *fc, ChValue args, uint8_t dst,
+                                  bool tail) {
+    if (!ch_is_pair(args) || !ch_is_pair(ch_cdr(args))) {
+        return fail(c, "do: bad syntax");
+    }
+
+    ChValue bindings = ch_car(args);
+    ChValue rest = ch_cdr(args);
+    ChValue test_clause = ch_car(rest);
+    ChValue commands = ch_cdr(rest);
+    if (!ch_is_pair(test_clause)) {
+        return fail(c, "do: bad test clause");
+    }
+    ChValue test_expr = ch_car(test_clause);
+    ChValue result_exprs = ch_cdr(test_clause);
+
+    ChValue var_names[CH_MAX_DERIVED_BINDINGS];
+    ChValue init_exprs[CH_MAX_DERIVED_BINDINGS];
+    ChValue step_exprs[CH_MAX_DERIVED_BINDINGS];
+    size_t nvars = 0;
+
+    ChValue b = bindings;
+    while (ch_is_pair(b)) {
+        if (nvars >= CH_MAX_DERIVED_BINDINGS) {
+            return fail(c, "do: too many bindings");
+        }
+        ChValue spec = ch_car(b);
+        if (!ch_is_pair(spec) || !ch_is_symbol(ch_car(spec))) {
+            return fail(c, "do: bad binding");
+        }
+        ChValue spec_rest = ch_cdr(spec);
+        if (!ch_is_pair(spec_rest)) {
+            return fail(c, "do: bad binding");
+        }
+        ChValue init = ch_car(spec_rest);
+        ChValue after_init = ch_cdr(spec_rest);
+        ChValue step = CH_UNDEFINED;
+        if (ch_is_pair(after_init)) {
+            step = ch_car(after_init);
+            if (!ch_is_nil(ch_cdr(after_init))) {
+                return fail(c, "do: bad binding");
+            }
+        } else if (!ch_is_nil(after_init)) {
+            return fail(c, "do: bad binding");
+        }
+        var_names[nvars] = ch_car(spec);
+        init_exprs[nvars] = init;
+        step_exprs[nvars] = step;
+        nvars++;
+        b = ch_cdr(b);
+    }
+    if (!ch_is_nil(b)) {
+        return fail(c, "do: bad bindings");
+    }
+
+    ChValue let_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "let");
+    ChValue if_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "if");
+    ChValue begin_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "begin");
+    do_gensym_counter++;
+    char loop_name[48];
+    snprintf(loop_name, sizeof(loop_name), "%%do-loop%zu", do_gensym_counter);
+    ChValue loop_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, loop_name);
+
+    ChValue loop_bindings = CH_NIL;
+    ChValue recur_args = CH_NIL;
+    ChValue recur_call = CH_NIL;
+    ChValue rev_cmds = CH_NIL;
+    ChValue else_forms = CH_NIL;
+    ChValue else_begin = CH_NIL;
+    ChValue then_begin = CH_NIL;
+    ChValue if_form = CH_NIL;
+    ChValue let_body = CH_NIL;
+    ChValue let_args = CH_NIL;
+    ChValue form = CH_NIL;
+    ch_gc_push(&c->vm->gc, &loop_bindings);
+    ch_gc_push(&c->vm->gc, &recur_args);
+    ch_gc_push(&c->vm->gc, &recur_call);
+    ch_gc_push(&c->vm->gc, &rev_cmds);
+    ch_gc_push(&c->vm->gc, &else_forms);
+    ch_gc_push(&c->vm->gc, &else_begin);
+    ch_gc_push(&c->vm->gc, &then_begin);
+    ch_gc_push(&c->vm->gc, &if_form);
+    ch_gc_push(&c->vm->gc, &let_body);
+    ch_gc_push(&c->vm->gc, &let_args);
+    ch_gc_push(&c->vm->gc, &form);
+
+    for (size_t i = nvars; i > 0; i--) {
+        size_t idx = i - 1;
+        ChValue bind =
+            ch_gc_cons(&c->vm->gc, var_names[idx], ch_gc_cons(&c->vm->gc, init_exprs[idx], CH_NIL));
+        loop_bindings = ch_gc_cons(&c->vm->gc, bind, loop_bindings);
+        ChValue next_arg = (step_exprs[idx] == CH_UNDEFINED) ? var_names[idx] : step_exprs[idx];
+        recur_args = ch_gc_cons(&c->vm->gc, next_arg, recur_args);
+    }
+    recur_call = ch_gc_cons(&c->vm->gc, loop_sym, recur_args);
+
+    ChValue cmd = commands;
+    while (ch_is_pair(cmd)) {
+        rev_cmds = ch_gc_cons(&c->vm->gc, ch_car(cmd), rev_cmds);
+        cmd = ch_cdr(cmd);
+    }
+    if (!ch_is_nil(cmd)) {
+        ch_gc_pop_n(&c->vm->gc, 11);
+        return fail(c, "do: bad command list");
+    }
+    else_forms = ch_gc_cons(&c->vm->gc, recur_call, CH_NIL);
+    while (ch_is_pair(rev_cmds)) {
+        else_forms = ch_gc_cons(&c->vm->gc, ch_car(rev_cmds), else_forms);
+        rev_cmds = ch_cdr(rev_cmds);
+    }
+
+    then_begin = ch_gc_cons(&c->vm->gc, begin_sym, result_exprs);
+    else_begin = ch_gc_cons(&c->vm->gc, begin_sym, else_forms);
+    if_form = ch_gc_cons(
+        &c->vm->gc, if_sym,
+        ch_gc_cons(&c->vm->gc, test_expr,
+                   ch_gc_cons(&c->vm->gc, then_begin, ch_gc_cons(&c->vm->gc, else_begin, CH_NIL))));
+    let_body = ch_gc_cons(&c->vm->gc, if_form, CH_NIL);
+    let_args =
+        ch_gc_cons(&c->vm->gc, loop_sym, ch_gc_cons(&c->vm->gc, loop_bindings, let_body));
+    form = ch_gc_cons(&c->vm->gc, let_sym, let_args);
+
+    ChCompileStatus st = compile_expr(c, fc, form, dst, tail);
+    ch_gc_pop_n(&c->vm->gc, 11);
+    return st;
+}
+
+static ChCompileStatus compile_guard(ChCompiler *c, ChFuncCompiler *fc, ChValue args, uint8_t dst,
+                                     bool tail) {
+    if (!ch_is_pair(args) || !ch_is_pair(ch_cdr(args))) {
+        return fail(c, "guard: bad syntax");
+    }
+    ChValue clause_spec = ch_car(args);
+    ChValue body = ch_cdr(args);
+    if (!ch_is_pair(clause_spec)) {
+        return fail(c, "guard: bad syntax");
+    }
+    ChValue var = ch_car(clause_spec);
+    if (!ch_is_symbol(var)) {
+        return fail(c, "guard: bad syntax");
+    }
+    ChValue clauses = ch_cdr(clause_spec);
+
+    ChValue clause_vec[CH_MAX_GUARD_CLAUSES];
+    size_t clause_count = 0;
+    bool has_else = false;
+    ChValue it = clauses;
+    while (ch_is_pair(it)) {
+        if (clause_count >= CH_MAX_GUARD_CLAUSES) {
+            return fail(c, "guard: too many clauses");
+        }
+        ChValue clause = ch_car(it);
+        clause_vec[clause_count++] = clause;
+        if (ch_is_pair(clause) && is_symbol_named(ch_car(clause), "else")) {
+            has_else = true;
+        }
+        it = ch_cdr(it);
+    }
+    if (!ch_is_nil(it)) {
+        return fail(c, "guard: bad syntax");
+    }
+
+    ChValue cond_clauses = CH_NIL;
+    ChValue raise_call = CH_NIL;
+    ChValue else_clause = CH_NIL;
+    ChValue cond_form = CH_NIL;
+    ChValue gk_call = CH_NIL;
+    ChValue let_bind = CH_NIL;
+    ChValue let_binds = CH_NIL;
+    ChValue let_form = CH_NIL;
+    ChValue handler_formals = CH_NIL;
+    ChValue handler_body = CH_NIL;
+    ChValue handler = CH_NIL;
+    ChValue thunk = CH_NIL;
+    ChValue weh = CH_NIL;
+    ChValue outer = CH_NIL;
+    ChValue form = CH_NIL;
+    ch_gc_push(&c->vm->gc, &cond_clauses);
+    ch_gc_push(&c->vm->gc, &raise_call);
+    ch_gc_push(&c->vm->gc, &else_clause);
+    ch_gc_push(&c->vm->gc, &cond_form);
+    ch_gc_push(&c->vm->gc, &gk_call);
+    ch_gc_push(&c->vm->gc, &let_bind);
+    ch_gc_push(&c->vm->gc, &let_binds);
+    ch_gc_push(&c->vm->gc, &let_form);
+    ch_gc_push(&c->vm->gc, &handler_formals);
+    ch_gc_push(&c->vm->gc, &handler_body);
+    ch_gc_push(&c->vm->gc, &handler);
+    ch_gc_push(&c->vm->gc, &thunk);
+    ch_gc_push(&c->vm->gc, &weh);
+    ch_gc_push(&c->vm->gc, &outer);
+    ch_gc_push(&c->vm->gc, &form);
+
+    if (!has_else) {
+        ChValue raise_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "raise");
+        ChValue else_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "else");
+        raise_call = ch_gc_cons(&c->vm->gc, raise_sym, ch_gc_cons(&c->vm->gc, var, CH_NIL));
+        else_clause = ch_gc_cons(&c->vm->gc, else_sym, ch_gc_cons(&c->vm->gc, raise_call, CH_NIL));
+        cond_clauses = ch_gc_cons(&c->vm->gc, else_clause, cond_clauses);
+    }
+    for (size_t i = clause_count; i > 0; i--) {
+        cond_clauses = ch_gc_cons(&c->vm->gc, clause_vec[i - 1], cond_clauses);
+    }
+
+    guard_gensym_counter++;
+    char gk_name[48];
+    char value_name[48];
+    snprintf(gk_name, sizeof(gk_name), "%%guard-k%zu", guard_gensym_counter);
+    snprintf(value_name, sizeof(value_name), "%%guard-v%zu", guard_gensym_counter);
+    ChValue gk = ch_gc_intern_symbol_cstr(&c->vm->gc, gk_name);
+    ChValue guard_value = ch_gc_intern_symbol_cstr(&c->vm->gc, value_name);
+
+    ChValue cond_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "cond");
+    ChValue lambda_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "lambda");
+    ChValue weh_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "with-exception-handler");
+    ChValue callcc_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "call/cc");
+    ChValue let_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "let");
+
+    cond_form = ch_gc_cons(&c->vm->gc, cond_sym, cond_clauses);
+    gk_call = ch_gc_cons(&c->vm->gc, gk, ch_gc_cons(&c->vm->gc, guard_value, CH_NIL));
+    let_bind = ch_gc_cons(&c->vm->gc, guard_value, ch_gc_cons(&c->vm->gc, cond_form, CH_NIL));
+    let_binds = ch_gc_cons(&c->vm->gc, let_bind, CH_NIL);
+    let_form = ch_gc_cons(&c->vm->gc, let_sym,
+                          ch_gc_cons(&c->vm->gc, let_binds, ch_gc_cons(&c->vm->gc, gk_call, CH_NIL)));
+    handler_formals = ch_gc_cons(&c->vm->gc, var, CH_NIL);
+    handler_body = ch_gc_cons(&c->vm->gc, let_form, CH_NIL);
+    handler =
+        ch_gc_cons(&c->vm->gc, lambda_sym, ch_gc_cons(&c->vm->gc, handler_formals, handler_body));
+    thunk = ch_gc_cons(&c->vm->gc, lambda_sym, ch_gc_cons(&c->vm->gc, CH_NIL, body));
+    weh = ch_gc_cons(
+        &c->vm->gc, weh_sym,
+        ch_gc_cons(&c->vm->gc, handler, ch_gc_cons(&c->vm->gc, thunk, CH_NIL)));
+    outer = ch_gc_cons(&c->vm->gc, lambda_sym,
+                       ch_gc_cons(&c->vm->gc, ch_gc_cons(&c->vm->gc, gk, CH_NIL),
+                                  ch_gc_cons(&c->vm->gc, weh, CH_NIL)));
+    form = ch_gc_cons(&c->vm->gc, callcc_sym, ch_gc_cons(&c->vm->gc, outer, CH_NIL));
+
+    ChCompileStatus st = compile_expr(c, fc, form, dst, tail);
+    ch_gc_pop_n(&c->vm->gc, 15);
+    return st;
+}
+
+static ChCompileStatus compile_parameterize(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
+                                            uint8_t dst, bool tail) {
+    if (!ch_is_pair(args) || !ch_is_pair(ch_cdr(args))) {
+        return fail(c, "parameterize: bad syntax");
+    }
+    ChValue bindings = ch_car(args);
+    ChValue body = ch_cdr(args);
+
+    ChValue param_exprs[CH_MAX_DERIVED_BINDINGS];
+    ChValue value_exprs[CH_MAX_DERIVED_BINDINGS];
+    ChValue param_syms[CH_MAX_DERIVED_BINDINGS];
+    ChValue value_syms[CH_MAX_DERIVED_BINDINGS];
+    ChValue converted_syms[CH_MAX_DERIVED_BINDINGS];
+
+    size_t nbindings = 0;
+    ChValue b = bindings;
+    while (ch_is_pair(b)) {
+        if (nbindings >= CH_MAX_DERIVED_BINDINGS) {
+            return fail(c, "parameterize: too many bindings");
+        }
+        ChValue binding = ch_car(b);
+        if (!ch_is_pair(binding) || !ch_is_pair(ch_cdr(binding)) ||
+            !ch_is_nil(ch_cdr(ch_cdr(binding)))) {
+            return fail(c, "parameterize: bad binding");
+        }
+        param_exprs[nbindings] = ch_car(binding);
+        value_exprs[nbindings] = ch_car(ch_cdr(binding));
+        nbindings++;
+        b = ch_cdr(b);
+    }
+    if (!ch_is_nil(b)) {
+        return fail(c, "parameterize: bad bindings");
+    }
+
+    if (nbindings == 0) {
+        ChValue begin_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "begin");
+        ChValue form = ch_gc_cons(&c->vm->gc, begin_sym, body);
+        return compile_expr(c, fc, form, dst, tail);
+    }
+
+    parameterize_gensym_counter++;
+    size_t gensym = parameterize_gensym_counter;
+    for (size_t i = 0; i < nbindings; i++) {
+        char name[48];
+        snprintf(name, sizeof(name), "%%pp%zu_%zu", gensym, i);
+        param_syms[i] = ch_gc_intern_symbol_cstr(&c->vm->gc, name);
+        snprintf(name, sizeof(name), "%%pv%zu_%zu", gensym, i);
+        value_syms[i] = ch_gc_intern_symbol_cstr(&c->vm->gc, name);
+        snprintf(name, sizeof(name), "%%pn%zu_%zu", gensym, i);
+        converted_syms[i] = ch_gc_intern_symbol_cstr(&c->vm->gc, name);
+    }
+
+    ChValue outer_bindings = CH_NIL;
+    ChValue inner_bindings = CH_NIL;
+    ChValue before_body = CH_NIL;
+    ChValue after_body = CH_NIL;
+    ChValue before_thunk = CH_NIL;
+    ChValue body_thunk = CH_NIL;
+    ChValue after_thunk = CH_NIL;
+    ChValue dw_call = CH_NIL;
+    ChValue inner_let = CH_NIL;
+    ChValue outer_let = CH_NIL;
+    ch_gc_push(&c->vm->gc, &outer_bindings);
+    ch_gc_push(&c->vm->gc, &inner_bindings);
+    ch_gc_push(&c->vm->gc, &before_body);
+    ch_gc_push(&c->vm->gc, &after_body);
+    ch_gc_push(&c->vm->gc, &before_thunk);
+    ch_gc_push(&c->vm->gc, &body_thunk);
+    ch_gc_push(&c->vm->gc, &after_thunk);
+    ch_gc_push(&c->vm->gc, &dw_call);
+    ch_gc_push(&c->vm->gc, &inner_let);
+    ch_gc_push(&c->vm->gc, &outer_let);
+
+    for (size_t i = nbindings; i > 0; i--) {
+        size_t idx = i - 1;
+        ChValue pv_pair = ch_gc_cons(&c->vm->gc, value_syms[idx],
+                                     ch_gc_cons(&c->vm->gc, value_exprs[idx], CH_NIL));
+        outer_bindings = ch_gc_cons(&c->vm->gc, pv_pair, outer_bindings);
+    }
+    for (size_t i = nbindings; i > 0; i--) {
+        size_t idx = i - 1;
+        ChValue pp_pair = ch_gc_cons(&c->vm->gc, param_syms[idx],
+                                     ch_gc_cons(&c->vm->gc, param_exprs[idx], CH_NIL));
+        outer_bindings = ch_gc_cons(&c->vm->gc, pp_pair, outer_bindings);
+    }
+
+    ChValue pconvert_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "%parameter-convert");
+    for (size_t i = nbindings; i > 0; i--) {
+        size_t idx = i - 1;
+        ChValue convert_call =
+            ch_gc_cons(&c->vm->gc, pconvert_sym,
+                       ch_gc_cons(&c->vm->gc, param_syms[idx],
+                                  ch_gc_cons(&c->vm->gc, value_syms[idx], CH_NIL)));
+        ChValue new_pair = ch_gc_cons(&c->vm->gc, converted_syms[idx],
+                                      ch_gc_cons(&c->vm->gc, convert_call, CH_NIL));
+        inner_bindings = ch_gc_cons(&c->vm->gc, new_pair, inner_bindings);
+    }
+
+    ChValue ppush_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "%parameter-push!");
+    for (size_t i = nbindings; i > 0; i--) {
+        size_t idx = i - 1;
+        ChValue push_call =
+            ch_gc_cons(&c->vm->gc, ppush_sym,
+                       ch_gc_cons(&c->vm->gc, param_syms[idx],
+                                  ch_gc_cons(&c->vm->gc, converted_syms[idx], CH_NIL)));
+        before_body = ch_gc_cons(&c->vm->gc, push_call, before_body);
+    }
+
+    ChValue ppop_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "%parameter-pop!");
+    for (size_t i = 0; i < nbindings; i++) {
+        ChValue pop_call = ch_gc_cons(
+            &c->vm->gc, ppop_sym, ch_gc_cons(&c->vm->gc, param_syms[i], CH_NIL));
+        after_body = ch_gc_cons(&c->vm->gc, pop_call, after_body);
+    }
+
+    ChValue lambda_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "lambda");
+    ChValue dynamic_wind_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "dynamic-wind");
+    ChValue letstar_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "let*");
+    ChValue let_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "let");
+
+    before_thunk =
+        ch_gc_cons(&c->vm->gc, lambda_sym, ch_gc_cons(&c->vm->gc, CH_NIL, before_body));
+    body_thunk = ch_gc_cons(&c->vm->gc, lambda_sym, ch_gc_cons(&c->vm->gc, CH_NIL, body));
+    after_thunk = ch_gc_cons(&c->vm->gc, lambda_sym, ch_gc_cons(&c->vm->gc, CH_NIL, after_body));
+    dw_call = ch_gc_cons(
+        &c->vm->gc, dynamic_wind_sym,
+        ch_gc_cons(&c->vm->gc, before_thunk,
+                   ch_gc_cons(&c->vm->gc, body_thunk,
+                              ch_gc_cons(&c->vm->gc, after_thunk, CH_NIL))));
+    inner_let = ch_gc_cons(&c->vm->gc, letstar_sym,
+                           ch_gc_cons(&c->vm->gc, inner_bindings,
+                                      ch_gc_cons(&c->vm->gc, dw_call, CH_NIL)));
+    outer_let =
+        ch_gc_cons(&c->vm->gc, let_sym,
+                   ch_gc_cons(&c->vm->gc, outer_bindings,
+                              ch_gc_cons(&c->vm->gc, inner_let, CH_NIL)));
+
+    ChCompileStatus st = compile_expr(c, fc, outer_let, dst, tail);
+    ch_gc_pop_n(&c->vm->gc, 10);
+    return st;
 }
 
 static ChValue qq_expand(ChCompiler *c, ChValue x, int level);
@@ -1390,14 +1945,30 @@ static ChCompileStatus compile_expr_impl(ChCompiler *c, ChFuncCompiler *fc, ChVa
     if (is_symbol_named(head, "letrec")) {
         return compile_letrec(c, fc, args, dst, tail);
     }
+    if (is_symbol_named(head, "letrec*")) {
+        /* MVP: reuse letrec lowering; semantic gaps are tracked by suite failures. */
+        return compile_letrec(c, fc, args, dst, tail);
+    }
     if (is_symbol_named(head, "cond")) {
         return compile_cond(c, fc, args, dst, tail);
+    }
+    if (is_symbol_named(head, "case")) {
+        return compile_case(c, fc, args, dst, tail);
     }
     if (is_symbol_named(head, "when")) {
         return compile_when_unless(c, fc, args, dst, tail, 1);
     }
     if (is_symbol_named(head, "unless")) {
         return compile_when_unless(c, fc, args, dst, tail, 0);
+    }
+    if (is_symbol_named(head, "do")) {
+        return compile_do(c, fc, args, dst, tail);
+    }
+    if (is_symbol_named(head, "guard")) {
+        return compile_guard(c, fc, args, dst, tail);
+    }
+    if (is_symbol_named(head, "parameterize")) {
+        return compile_parameterize(c, fc, args, dst, tail);
     }
     return compile_call(c, fc, expr, dst, tail);
 }
@@ -1449,11 +2020,30 @@ ChCompileStatus ch_compile_toplevel(ChCompiler *c, ChValue expr, ChFunction **ou
     fn->variadic = 0;
 
     uint8_t dst = alloc_reg(&fc);
-    if (compile_expr(c, &fc, expr_r, dst, false) != CH_COMPILE_OK) {
+    ChIrNode *ir_root = NULL;
+    if (ch_ir_lower(c, expr_r, &ir_root) != CH_COMPILE_OK) {
         fc_free_buf(c, &fc);
         ch_gc_pop_n(&c->vm->gc, 2 + sticky_roots);
         return CH_COMPILE_ERROR;
     }
+    ch_ir_analyze(ir_root);
+    if (ch_ir_optimize(c, &ir_root) != CH_COMPILE_OK) {
+        ch_ir_free(ir_root);
+        fc_free_buf(c, &fc);
+        ch_gc_pop_n(&c->vm->gc, 2 + sticky_roots);
+        return CH_COMPILE_ERROR;
+    }
+    ChIrLegacyEmitCtx ir_emit_ctx = {
+        .compiler = c,
+        .fc = &fc,
+    };
+    if (ch_ir_emit(c, ir_root, emit_ir_with_legacy, &ir_emit_ctx, dst, false) != CH_COMPILE_OK) {
+        ch_ir_free(ir_root);
+        fc_free_buf(c, &fc);
+        ch_gc_pop_n(&c->vm->gc, 2 + sticky_roots);
+        return CH_COMPILE_ERROR;
+    }
+    ch_ir_free(ir_root);
     emit_byte(&fc, CH_OP_HALT);
     if (finish_function(c, &fc) != CH_COMPILE_OK) {
         fc_free_buf(c, &fc);

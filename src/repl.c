@@ -1,6 +1,10 @@
 #include "chaaya/repl.h"
 
 #include "chaaya/eval.h"
+#include "chaaya/expander.h"
+#include "chaaya/library.h"
+#include "chaaya/printer.h"
+#include "chaaya/reader.h"
 #include "chaaya/version.h"
 
 #include <stdio.h>
@@ -106,12 +110,80 @@ static void print_comma_help(void) {
     puts("  ,quit / ,exit     Exit the REPL");
     puts("  ,version          Show Chaaya version");
     puts("  ,load <file>      Load and evaluate a Scheme file");
+    puts("  ,expand <expr>    Expand expression and print transformed form");
+    puts("  ,break <name>     Break when calling the named procedure");
+    puts("  ,breakpoints      List active breakpoints");
+    puts("  ,delete <name>    Remove a breakpoint");
+    puts("  ,step <expr>       Evaluate with one call trace (preserves breakpoints)");
     puts("  ,gc               Show GC statistics");
     puts("  ,env [prefix]     List defined globals");
     puts("  ,time <expr>      Evaluate and print elapsed milliseconds");
     puts("  ,type <expr>      Evaluate and print result type");
     puts("");
     puts("Other Kaappi comma-commands are not implemented yet in the bootstrap.");
+}
+
+static size_t push_repl_vm_roots(ChVM *vm) {
+    for (size_t i = 0; i < vm->global_count; i++) {
+        ch_gc_push(&vm->gc, &vm->globals[i].value);
+    }
+    for (size_t i = 0; i < vm->macro_count; i++) {
+        ch_gc_push(&vm->gc, &vm->macros[i].transformer);
+    }
+    size_t lib_roots = ch_library_push_gc_roots(vm);
+    return vm->global_count + vm->macro_count + lib_roots;
+}
+
+static ChReadStatus read_repl_datum(ChVM *vm, ChReader *reader, ChValue *out) {
+    size_t sticky_roots = push_repl_vm_roots(vm);
+    ChReadStatus st = ch_read_datum(reader, out);
+    ch_gc_pop_n(&vm->gc, sticky_roots);
+    return st;
+}
+
+static int repl_expand_expr(ChVM *vm, const char *expr_src) {
+    ChReader reader;
+    ch_reader_init(&reader, &vm->gc, expr_src, strlen(expr_src));
+
+    int saw_form = 0;
+    for (;;) {
+        ChValue form = CH_NIL;
+        ch_gc_push(&vm->gc, &form);
+        ChReadStatus st = read_repl_datum(vm, &reader, &form);
+        if (st == CH_READ_EOF) {
+            ch_gc_pop(&vm->gc);
+            break;
+        }
+        if (st != CH_READ_OK) {
+            fprintf(stderr, "read error: %s\n", ch_reader_error(&reader));
+            ch_gc_pop(&vm->gc);
+            return -1;
+        }
+
+        ChValue expanded = CH_NIL;
+        ch_gc_push(&vm->gc, &expanded);
+        size_t sticky_roots = push_repl_vm_roots(vm);
+        char err[256];
+        if (ch_expand_toplevel(vm, form, &expanded, err, sizeof(err)) != CH_EXPAND_OK) {
+            ch_gc_pop_n(&vm->gc, sticky_roots);
+            fprintf(stderr, "expand error: %s\n", err);
+            ch_gc_pop_n(&vm->gc, 2);
+            return -1;
+        }
+        ch_gc_pop_n(&vm->gc, sticky_roots);
+        if (expanded != CH_VOID) {
+            ch_print_value(stdout, expanded, false);
+            fputc('\n', stdout);
+        }
+        saw_form = 1;
+        ch_gc_pop_n(&vm->gc, 2);
+    }
+
+    if (!saw_form) {
+        fprintf(stderr, ",expand: missing expression\n");
+        return -1;
+    }
+    return 0;
 }
 
 static int handle_comma(ChVM *vm, char *line, int *should_exit) {
@@ -165,6 +237,78 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
         free(src);
         return 0;
     }
+    if (strncmp(cmd, ",expand", 7) == 0 && (cmd[7] == '\0' || cmd[7] == ' ')) {
+        const char *expr = trim_left(cmd + 7);
+        if (!expr[0]) {
+            fprintf(stderr, ",expand: missing expression\n");
+            return 0;
+        }
+        (void)repl_expand_expr(vm, expr);
+        return 0;
+    }
+    if (strncmp(cmd, ",break ", 7) == 0) {
+        const char *name = trim_left(cmd + 7);
+        if (!name[0]) {
+            fprintf(stderr, ",break: missing name\n");
+            return 0;
+        }
+        if (vm->breakpoint_count >= CH_VM_MAX_BREAKPOINTS) {
+            fprintf(stderr, ",break: too many breakpoints\n");
+            return 0;
+        }
+        if (snprintf(vm->breakpoints[vm->breakpoint_count], sizeof(vm->breakpoints[0]), "%s",
+                     name) >= (int)sizeof(vm->breakpoints[0])) {
+            fprintf(stderr, ",break: name too long\n");
+            return 0;
+        }
+        vm->breakpoint_count++;
+        vm->debug_mode = true;
+        printf("; breakpoint set on %s\n", name);
+        return 0;
+    }
+    if (strcmp(cmd, ",breakpoints") == 0) {
+        if (vm->breakpoint_count == 0) {
+            puts("; no breakpoints");
+            return 0;
+        }
+        for (size_t i = 0; i < vm->breakpoint_count; i++) {
+            printf("; breakpoint %zu: %s\n", i + 1, vm->breakpoints[i]);
+        }
+        return 0;
+    }
+    if (strncmp(cmd, ",delete ", 8) == 0) {
+        const char *name = trim_left(cmd + 8);
+        if (!name[0]) {
+            fprintf(stderr, ",delete: missing name\n");
+            return 0;
+        }
+        for (size_t i = 0; i < vm->breakpoint_count; i++) {
+            if (strcmp(vm->breakpoints[i], name) == 0) {
+                memmove(&vm->breakpoints[i], &vm->breakpoints[i + 1],
+                        (vm->breakpoint_count - i - 1) * sizeof(vm->breakpoints[0]));
+                vm->breakpoint_count--;
+                printf("; deleted breakpoint %s\n", name);
+                if (vm->breakpoint_count == 0) {
+                    vm->debug_mode = false;
+                }
+                return 0;
+            }
+        }
+        fprintf(stderr, ",delete: no breakpoint named '%s'\n", name);
+        return 0;
+    }
+    if (strncmp(cmd, ",step ", 6) == 0) {
+        const char *expr = trim_left(cmd + 6);
+        if (!expr[0]) {
+            fprintf(stderr, ",step: missing expression\n");
+            return 0;
+        }
+        bool saved_debug = vm->debug_mode;
+        vm->step_trace = true;
+        (void)ch_eval_source(vm, expr, strlen(expr), 1);
+        vm->debug_mode = saved_debug;
+        return 0;
+    }
     if (strncmp(cmd, ",time ", 6) == 0) {
         const char *expr = trim_left(cmd + 6);
         struct timeval t0, t1;
@@ -199,9 +343,9 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
     }
 
     /* Known Kaappi commands not yet supported */
-    static const char *nyi[] = {",break",  ",breakpoints", ",delete", ",step",   ",condition",
-                                ",expand", ",profile",     ",dis",    ",describe", ",apropos",
-                                ",import", NULL};
+    static const char *nyi[] = {",condition",
+                                ",profile", ",dis",         ",describe", ",apropos", ",import",
+                                NULL};
     for (int i = 0; nyi[i]; i++) {
         size_t n = strlen(nyi[i]);
         if (strncmp(cmd, nyi[i], n) == 0 && (cmd[n] == '\0' || cmd[n] == ' ')) {
@@ -216,8 +360,9 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
 
 #ifdef CHAAYA_HAS_LINENOISE
 static void completion_callback(const char *buf, linenoiseCompletions *lc) {
-    static const char *cmds[] = {",help", ",quit", ",exit", ",version", ",load ",
-                                 ",gc",   ",env",  ",time ", ",type ",   NULL};
+    static const char *cmds[] = {",help",     ",quit", ",exit", ",version", ",load ", ",expand ",
+                                 ",break ",   ",breakpoints", ",delete ", ",step ", ",gc",
+                                 ",env",      ",time ", ",type ", NULL};
     if (buf[0] == ',') {
         for (int i = 0; cmds[i]; i++) {
             if (strncmp(cmds[i], buf, strlen(buf)) == 0) {
