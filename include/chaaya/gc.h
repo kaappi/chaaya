@@ -53,6 +53,8 @@ ChValue ch_gc_make_string_output_port(ChGC *gc);
 ChValue ch_gc_make_transformer(ChGC *gc);
 ChValue ch_gc_make_record_type(ChGC *gc, ChValue name, uint16_t num_fields);
 ChValue ch_gc_make_record(ChGC *gc, ChRecordType *rtype, ChValue *fields, uint16_t nfields);
+ChValue ch_gc_make_promise(ChGC *gc, int forced, ChValue value);
+ChValue ch_gc_make_file_port(ChGC *gc, FILE *file, int input, int output);
 
 #ifdef __cplusplus
 }

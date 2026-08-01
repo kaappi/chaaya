@@ -213,6 +213,11 @@ int ch_register_builtin_libraries(ChVM *vm) {
     static const char *const char_exports[] = {"char?", "char=?", "char<?", "char->integer",
                                                "integer->char"};
     static const char *const process_exports[] = {"exit", "command-line", "features"};
+    static const char *const lazy_exports[] = {"delay", "force", "promise?", "make-promise"};
+    static const char *const file_exports[] = {
+        "call-with-input-file", "call-with-output-file", "with-input-from-file",
+        "with-output-to-file",  "open-input-file",       "open-output-file",
+        "file-exists?",         "delete-file"};
     if (register_exports_from_globals(vm, "scheme.write", write_exports,
                                       sizeof(write_exports) / sizeof(write_exports[0])) != 0) {
         return -1;
@@ -231,6 +236,18 @@ int ch_register_builtin_libraries(ChVM *vm) {
     }
     if (register_exports_from_globals(vm, "scheme.process-context", process_exports,
                                       sizeof(process_exports) / sizeof(process_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "scheme.lazy", lazy_exports,
+                                      sizeof(lazy_exports) / sizeof(lazy_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "scheme.file", file_exports,
+                                      sizeof(file_exports) / sizeof(file_exports[0])) != 0) {
+        return -1;
+    }
+    /* case-lambda is a compiler special form; library exists for R7RS import. */
+    if (register_exports_from_globals(vm, "scheme.case-lambda", NULL, 0) != 0) {
         return -1;
     }
     return 0;

@@ -110,6 +110,10 @@ bool ch_is_record(ChValue v) {
     return CH_IS_TAG(v, CH_TAG_RECORD);
 }
 
+bool ch_is_promise(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_PROMISE);
+}
+
 bool ch_is_procedure(ChValue v) {
     return ch_is_closure(v) || ch_is_native(v) || ch_is_continuation(v);
 }
@@ -164,6 +168,10 @@ ChRecordType *ch_as_record_type(ChValue v) {
 
 ChRecord *ch_as_record(ChValue v) {
     return (ChRecord *)ch_to_object(v);
+}
+
+ChPromise *ch_as_promise(ChValue v) {
+    return (ChPromise *)ch_to_object(v);
 }
 
 const char *ch_symbol_basename(ChSymbol *sym) {

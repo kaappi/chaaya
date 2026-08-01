@@ -170,6 +170,10 @@ static void print_value_rec(FILE *out, ChValue v, bool display) {
         fputs("#<port>", out);
         return;
     }
+    if (ch_is_promise(v)) {
+        fputs("#<promise>", out);
+        return;
+    }
     if (ch_is_function(v)) {
         fputs("#<function>", out);
         return;

@@ -6,6 +6,7 @@ compile_commands.json
 
 # Bootstrap runner temps
 tests/scheme/bootstrap/.bootstrap_*.scm
+tests/scheme/bootstrap/.bootstrap_tmp*
 
 # Prerequisites
 *.d

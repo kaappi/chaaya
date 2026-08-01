@@ -47,7 +47,11 @@ static void free_object(ChObject *obj) {
     }
     case CH_TAG_PORT: {
         ChPort *p = (ChPort *)obj;
-        if (p->kind != CH_PORT_STDIO && p->buf) {
+        if (p->kind == CH_PORT_FILE && p->file && !p->closed) {
+            fclose(p->file);
+            p->file = NULL;
+        }
+        if (p->kind != CH_PORT_STDIO && p->kind != CH_PORT_FILE && p->buf) {
             free(p->buf);
         }
         break;
@@ -57,6 +61,8 @@ static void free_object(ChObject *obj) {
     case CH_TAG_RECORD_TYPE:
         break;
     case CH_TAG_RECORD:
+        break;
+    case CH_TAG_PROMISE:
         break;
     default:
         break;
@@ -200,6 +206,11 @@ static void mark_object(ChObject *obj) {
         for (uint16_t i = 0; i < r->num_fields; i++) {
             mark_value(r->fields[i]);
         }
+        break;
+    }
+    case CH_TAG_PROMISE: {
+        ChPromise *pr = (ChPromise *)obj;
+        mark_value(pr->value);
         break;
     }
     }
@@ -443,4 +454,28 @@ ChValue ch_gc_make_record(ChGC *gc, ChRecordType *rtype, ChValue *fields, uint16
         r->fields[i] = fields[i];
     }
     return ch_make_pointer(&r->header);
+}
+
+ChValue ch_gc_make_promise(ChGC *gc, int forced, ChValue value) {
+    ch_gc_push(gc, &value);
+    ChPromise *pr = (ChPromise *)ch_gc_alloc(gc, sizeof(ChPromise), CH_TAG_PROMISE);
+    ch_gc_pop(gc);
+    pr->forced = forced ? 1 : 0;
+    pr->forcing = 0;
+    pr->value = value;
+    return ch_make_pointer(&pr->header);
+}
+
+ChValue ch_gc_make_file_port(ChGC *gc, FILE *file, int input, int output) {
+    ChPort *p = (ChPort *)ch_gc_alloc(gc, sizeof(ChPort), CH_TAG_PORT);
+    p->kind = CH_PORT_FILE;
+    p->input = (uint8_t)(input ? 1 : 0);
+    p->output = (uint8_t)(output ? 1 : 0);
+    p->closed = 0;
+    p->file = file;
+    p->buf = NULL;
+    p->len = 0;
+    p->cap = 0;
+    p->pos = 0;
+    return ch_make_pointer(&p->header);
 }

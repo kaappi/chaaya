@@ -141,15 +141,15 @@ Build: CMake 3.20+ produces `chaaya` and links tests against static
 
 | Next capability | Likely touch points |
 |-----------------|---------------------|
-| Full R7RS-small surface | More prims; case-lambda; lazy; file ports; numeric tower |
-| Ports / numeric tower / records | New heap tags; primitives; reader |
+| Full R7RS-small surface | Numeric tower; more `(scheme …)` libs; SRFI surface |
+| Ports / numeric tower | Bignum/rational/complex; richer port I/O |
 | IR + opts | Insert between expander and bytecode; prep for LLVM |
 | FFI / fibers / LSP / WASM | After R7RS-small sequential interpreter is solid |
 
 Done: `call/cc`, `dynamic-wind`, exceptions; hygienic `syntax-rules`; R7RS library
-system; `include` / `cond-expand` / `(features)`; R7RS `define-record-type`
-([`src/prim_record.c`](../../src/prim_record.c), expander desugar); built-in
-`(scheme base|write|read|cxr|char|process-context)`.
+system; `include` / `cond-expand` / `(features)`; R7RS `define-record-type`;
+`case-lambda`; `delay`/`force` (`(scheme lazy)`); file ports (`(scheme file)`);
+built-in `(scheme base|write|read|cxr|char|process-context|lazy|file|case-lambda)`.
 
 See the root [README](../../README.md) for the phase table. Conformance /
 compatibility tests borrowed from Kaappi are documented in

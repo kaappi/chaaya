@@ -46,6 +46,7 @@ typedef enum ChObjectTag {
     CH_TAG_TRANSFORMER = 10,
     CH_TAG_RECORD_TYPE = 11,
     CH_TAG_RECORD = 12,
+    CH_TAG_PROMISE = 13,
 } ChObjectTag;
 
 typedef struct ChObject {
@@ -168,6 +169,7 @@ typedef enum ChPortKind {
     CH_PORT_STDIO = 0,
     CH_PORT_STRING_IN = 1,
     CH_PORT_STRING_OUT = 2,
+    CH_PORT_FILE = 3, /* owned FILE* — fclose on close */
 } ChPortKind;
 
 typedef struct ChPort {
@@ -209,6 +211,13 @@ typedef struct ChRecord {
     uint16_t num_fields;
     ChValue fields[]; /* flexible array */
 } ChRecord;
+
+typedef struct ChPromise {
+    ChObject header;
+    uint8_t forced;
+    uint8_t forcing;
+    ChValue value; /* thunk if lazy; result if forced */
+} ChPromise;
 
 static inline bool ch_is_flonum(ChValue v) {
     return v < CH_NANBOX_THRESHOLD;
@@ -262,6 +271,7 @@ bool ch_is_port(ChValue v);
 bool ch_is_transformer(ChValue v);
 bool ch_is_record_type(ChValue v);
 bool ch_is_record(ChValue v);
+bool ch_is_promise(ChValue v);
 bool ch_is_procedure(ChValue v);
 
 ChPair *ch_as_pair(ChValue v);
@@ -277,6 +287,7 @@ ChPort *ch_as_port(ChValue v);
 ChTransformer *ch_as_transformer(ChValue v);
 ChRecordType *ch_as_record_type(ChValue v);
 ChRecord *ch_as_record(ChValue v);
+ChPromise *ch_as_promise(ChValue v);
 
 /* Collapse multiple values to the first (or void if none). */
 ChValue ch_coerce_single(ChValue v);

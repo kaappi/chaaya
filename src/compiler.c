@@ -545,6 +545,102 @@ static ChCompileStatus compile_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue
     return CH_COMPILE_OK;
 }
 
+/* (case-lambda (formals body...) ...) →
+ * (lambda %cl-args
+ *   (let ((%cl-n (length %cl-args)))
+ *     (cond ((= %cl-n arity) (apply (lambda formals body...) %cl-args)) ...
+ *           (else (error "wrong number of arguments"))))) */
+static ChCompileStatus compile_case_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
+                                           uint8_t dst, bool tail) {
+    ChGC *gc = &c->vm->gc;
+    ChValue lambda_sym = ch_gc_intern_symbol_cstr(gc, "lambda");
+    ChValue let_sym = ch_gc_intern_symbol_cstr(gc, "let");
+    ChValue cond_sym = ch_gc_intern_symbol_cstr(gc, "cond");
+    ChValue eq_sym = ch_gc_intern_symbol_cstr(gc, "=");
+    ChValue ge_sym = ch_gc_intern_symbol_cstr(gc, ">=");
+    ChValue length_sym = ch_gc_intern_symbol_cstr(gc, "length");
+    ChValue apply_sym = ch_gc_intern_symbol_cstr(gc, "apply");
+    ChValue else_sym = ch_gc_intern_symbol_cstr(gc, "else");
+    ChValue error_sym = ch_gc_intern_symbol_cstr(gc, "error");
+    ChValue args_sym = ch_gc_intern_symbol_cstr(gc, "%cl-args");
+    ChValue n_sym = ch_gc_intern_symbol_cstr(gc, "%cl-n");
+
+    ChValue rev_clauses = CH_NIL;
+    ch_gc_push(gc, &rev_clauses);
+
+    for (ChValue cl = args; ch_is_pair(cl); cl = ch_cdr(cl)) {
+        ChValue clause = ch_car(cl);
+        if (!ch_is_pair(clause) || !ch_is_pair(ch_cdr(clause))) {
+            ch_gc_pop(gc);
+            return fail(c, "case-lambda: bad clause");
+        }
+        ChValue formals = ch_car(clause);
+        ChValue body = ch_cdr(clause);
+        int arity = 0;
+        int has_rest = 0;
+        for (ChValue f = formals; !ch_is_nil(f);) {
+            if (ch_is_pair(f)) {
+                if (!ch_is_symbol(ch_car(f))) {
+                    ch_gc_pop(gc);
+                    return fail(c, "case-lambda: bad formals");
+                }
+                arity++;
+                f = ch_cdr(f);
+            } else if (ch_is_symbol(f)) {
+                has_rest = 1;
+                break;
+            } else {
+                ch_gc_pop(gc);
+                return fail(c, "case-lambda: bad formals");
+            }
+        }
+        ChValue cmp = has_rest ? ge_sym : eq_sym;
+        ChValue arity_v = ch_make_fixnum(arity);
+        ChValue test = ch_gc_cons(gc, cmp, ch_gc_cons(gc, n_sym, ch_gc_cons(gc, arity_v, CH_NIL)));
+        ChValue inner_lam = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, formals, body));
+        ChValue apply_call =
+            ch_gc_cons(gc, apply_sym, ch_gc_cons(gc, inner_lam, ch_gc_cons(gc, args_sym, CH_NIL)));
+        ChValue cond_clause = ch_gc_cons(gc, test, ch_gc_cons(gc, apply_call, CH_NIL));
+        rev_clauses = ch_gc_cons(gc, cond_clause, rev_clauses);
+    }
+
+    ChValue err_msg = ch_gc_make_string_cstr(gc, "wrong number of arguments");
+    ChValue err_call = ch_gc_cons(gc, error_sym, ch_gc_cons(gc, err_msg, CH_NIL));
+    ChValue else_clause = ch_gc_cons(gc, else_sym, ch_gc_cons(gc, err_call, CH_NIL));
+
+    ChValue cond_clauses = ch_gc_cons(gc, else_clause, CH_NIL);
+    ch_gc_push(gc, &cond_clauses);
+    while (ch_is_pair(rev_clauses)) {
+        cond_clauses = ch_gc_cons(gc, ch_car(rev_clauses), cond_clauses);
+        rev_clauses = ch_cdr(rev_clauses);
+    }
+
+    ChValue cond_form = ch_gc_cons(gc, cond_sym, cond_clauses);
+    ChValue length_call = ch_gc_cons(gc, length_sym, ch_gc_cons(gc, args_sym, CH_NIL));
+    ChValue n_binding = ch_gc_cons(gc, n_sym, ch_gc_cons(gc, length_call, CH_NIL));
+    ChValue bindings = ch_gc_cons(gc, n_binding, CH_NIL);
+    ChValue let_form =
+        ch_gc_cons(gc, let_sym, ch_gc_cons(gc, bindings, ch_gc_cons(gc, cond_form, CH_NIL)));
+    ChValue outer =
+        ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, args_sym, ch_gc_cons(gc, let_form, CH_NIL)));
+    ch_gc_pop_n(gc, 2);
+    return compile_expr(c, fc, outer, dst, tail);
+}
+
+static ChCompileStatus compile_delay(ChCompiler *c, ChFuncCompiler *fc, ChValue args, uint8_t dst,
+                                     bool tail) {
+    if (!ch_is_pair(args)) {
+        return fail(c, "delay: bad syntax");
+    }
+    ChGC *gc = &c->vm->gc;
+    ChValue lambda_sym = ch_gc_intern_symbol_cstr(gc, "lambda");
+    ChValue make_sym = ch_gc_intern_symbol_cstr(gc, "%make-promise");
+    /* (delay e1 e2 ...) → (%make-promise (lambda () e1 e2 ...)) */
+    ChValue thunk = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, args));
+    ChValue form = ch_gc_cons(gc, make_sym, ch_gc_cons(gc, thunk, CH_NIL));
+    return compile_expr(c, fc, form, dst, tail);
+}
+
 static ChCompileStatus finish_function(ChCompiler *c, ChFuncCompiler *fc) {
     (void)c;
     ChFunction *fn = fc->fn;
@@ -1238,6 +1334,12 @@ static ChCompileStatus compile_expr_impl(ChCompiler *c, ChFuncCompiler *fc, ChVa
     if (is_symbol_named(head, "lambda")) {
         return compile_lambda(c, fc, args, dst);
     }
+    if (is_symbol_named(head, "case-lambda")) {
+        return compile_case_lambda(c, fc, args, dst, tail);
+    }
+    if (is_symbol_named(head, "delay")) {
+        return compile_delay(c, fc, args, dst, tail);
+    }
     if (is_symbol_named(head, "and")) {
         return compile_and(c, fc, args, dst, tail);
     }
@@ -1294,6 +1396,16 @@ ChCompileStatus ch_compile_toplevel(ChCompiler *c, ChValue expr, ChFunction **ou
         expr_r = expanded;
         ch_gc_pop(&c->vm->gc);
     }
+
+    /* Expansion / define-syntax may grow globals or macros — re-root the full set. */
+    ch_gc_pop_n(&c->vm->gc, sticky_roots);
+    for (size_t i = 0; i < c->vm->global_count; i++) {
+        ch_gc_push(&c->vm->gc, &c->vm->globals[i].value);
+    }
+    for (size_t i = 0; i < c->vm->macro_count; i++) {
+        ch_gc_push(&c->vm->gc, &c->vm->macros[i].transformer);
+    }
+    sticky_roots = c->vm->global_count + c->vm->macro_count;
 
     ChFunction *fn = ch_as_function(fn_v);
     ChFuncCompiler fc;

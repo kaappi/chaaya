@@ -42,5 +42,7 @@ See `tests/scheme/kaappi-deferred/README.md`. Rough gates:
 
 1. Hygienic macros (`syntax-rules`) — **done**
 2. R7RS libraries + import modifiers + include/cond-expand — **done**
-3. SRFI-64 or `(chibi test)`
-4. Re-run Kaappi’s `tests/scheme/run-all.sh` corpus against `chaaya`
+3. `case-lambda`, `delay`/`force`, file ports — **done** (bootstrap suites)
+4. SRFI-64 or `(chibi test)`
+5. Re-run Kaappi’s `tests/scheme/run-all.sh` corpus against `chaaya`
+6. Numeric tower (bignum / rational / complex)

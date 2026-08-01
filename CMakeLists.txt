@@ -29,6 +29,7 @@ add_library(chaaya_core STATIC
   src/prim_data.c
   src/prim_port.c
   src/prim_record.c
+  src/prim_lazy.c
   src/eval.c
   src/cli.c
   src/repl.c
@@ -134,6 +135,9 @@ endfunction()
 chaaya_bootstrap_test_libpath(libraries)
 chaaya_bootstrap_test(include-cond)
 chaaya_bootstrap_test(records)
+chaaya_bootstrap_test(case-lambda)
+chaaya_bootstrap_test(lazy)
+chaaya_bootstrap_test(file-ports)
 
 # Display probes adapted from Kaappi differential/probes
 function(chaaya_probe_test name)

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static void define_prim(ChVM *vm, const char *name, ChNativeFn fn, int arity, int min_arity) {
     ChValue sym = ch_gc_intern_symbol_cstr(&vm->gc, name);
@@ -21,15 +22,24 @@ static ChValue get_global(ChVM *vm, const char *name) {
     return vm->globals[idx].value;
 }
 
+static void set_global(ChVM *vm, const char *name, ChValue v) {
+    ChValue sym = ch_gc_intern_symbol_cstr(&vm->gc, name);
+    int idx = ch_vm_intern_global(vm, ch_as_symbol(sym));
+    ch_vm_define_global(vm, idx, v);
+}
+
 static FILE *port_file(ChPort *p) {
-    return p->kind == CH_PORT_STDIO ? p->file : NULL;
+    if (p->kind == CH_PORT_STDIO || p->kind == CH_PORT_FILE) {
+        return p->file;
+    }
+    return NULL;
 }
 
 static int port_write_bytes(ChPort *p, const char *data, size_t len) {
     if (p->closed || !p->output) {
         return -1;
     }
-    if (p->kind == CH_PORT_STDIO) {
+    if (p->kind == CH_PORT_STDIO || p->kind == CH_PORT_FILE) {
         return fwrite(data, 1, len, p->file) == len ? 0 : -1;
     }
     if (p->kind == CH_PORT_STRING_OUT) {
@@ -179,20 +189,196 @@ static ChValue prim_get_output_string(ChVM *vm, ChValue *args, int nargs) {
     return ch_gc_make_string(&vm->gc, p->buf ? p->buf : "", p->len);
 }
 
+static void close_port_impl(ChPort *p) {
+    if (p->closed) {
+        return;
+    }
+    if (p->kind == CH_PORT_FILE && p->file) {
+        fclose(p->file);
+        p->file = NULL;
+    }
+    p->closed = 1;
+}
+
 static ChValue prim_close_port(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
     if (!ch_is_port(args[0])) {
         snprintf(vm->error, sizeof(vm->error), "close-port: not a port");
         return CH_UNDEFINED;
     }
-    ChPort *p = ch_as_port(args[0]);
-    p->closed = 1;
+    close_port_impl(ch_as_port(args[0]));
     return CH_VOID;
 }
 
+static const char *require_path(ChVM *vm, ChValue v, const char *who) {
+    if (!ch_is_string(v)) {
+        snprintf(vm->error, sizeof(vm->error), "%s: expected string path", who);
+        return NULL;
+    }
+    return ch_as_string(v)->data;
+}
+
+static ChValue prim_open_input_file(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    const char *path = require_path(vm, args[0], "open-input-file");
+    if (!path) {
+        return CH_UNDEFINED;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        snprintf(vm->error, sizeof(vm->error), "open-input-file: cannot open %s", path);
+        return CH_UNDEFINED;
+    }
+    return ch_gc_make_file_port(&vm->gc, f, 1, 0);
+}
+
+static ChValue prim_open_output_file(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    const char *path = require_path(vm, args[0], "open-output-file");
+    if (!path) {
+        return CH_UNDEFINED;
+    }
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        snprintf(vm->error, sizeof(vm->error), "open-output-file: cannot open %s", path);
+        return CH_UNDEFINED;
+    }
+    return ch_gc_make_file_port(&vm->gc, f, 0, 1);
+}
+
+static ChValue prim_file_exists_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    const char *path = require_path(vm, args[0], "file-exists?");
+    if (!path) {
+        return CH_UNDEFINED;
+    }
+    struct stat st;
+    return (stat(path, &st) == 0 && S_ISREG(st.st_mode)) ? CH_TRUE : CH_FALSE;
+}
+
+static ChValue prim_delete_file(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    const char *path = require_path(vm, args[0], "delete-file");
+    if (!path) {
+        return CH_UNDEFINED;
+    }
+    if (remove(path) != 0) {
+        snprintf(vm->error, sizeof(vm->error), "delete-file: cannot delete %s", path);
+        return CH_UNDEFINED;
+    }
+    return CH_VOID;
+}
+
+static ChValue prim_call_with_input_file(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChValue port = prim_open_input_file(vm, args, 1);
+    if (port == CH_UNDEFINED) {
+        return CH_UNDEFINED;
+    }
+    if (!ch_is_procedure(args[1])) {
+        close_port_impl(ch_as_port(port));
+        snprintf(vm->error, sizeof(vm->error), "call-with-input-file: not a procedure");
+        return CH_UNDEFINED;
+    }
+    ChValue result = CH_UNDEFINED;
+    ch_gc_push(&vm->gc, &port);
+    ch_gc_push(&vm->gc, &result);
+    if (ch_vm_apply(vm, args[1], &port, 1, &result) != CH_VM_OK) {
+        close_port_impl(ch_as_port(port));
+        ch_gc_pop_n(&vm->gc, 2);
+        return CH_UNDEFINED;
+    }
+    close_port_impl(ch_as_port(port));
+    ch_gc_pop_n(&vm->gc, 2);
+    return result;
+}
+
+static ChValue prim_call_with_output_file(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChValue port = prim_open_output_file(vm, args, 1);
+    if (port == CH_UNDEFINED) {
+        return CH_UNDEFINED;
+    }
+    if (!ch_is_procedure(args[1])) {
+        close_port_impl(ch_as_port(port));
+        snprintf(vm->error, sizeof(vm->error), "call-with-output-file: not a procedure");
+        return CH_UNDEFINED;
+    }
+    ChValue result = CH_UNDEFINED;
+    ch_gc_push(&vm->gc, &port);
+    ch_gc_push(&vm->gc, &result);
+    if (ch_vm_apply(vm, args[1], &port, 1, &result) != CH_VM_OK) {
+        close_port_impl(ch_as_port(port));
+        ch_gc_pop_n(&vm->gc, 2);
+        return CH_UNDEFINED;
+    }
+    close_port_impl(ch_as_port(port));
+    ch_gc_pop_n(&vm->gc, 2);
+    return result;
+}
+
+static ChValue prim_with_input_from_file(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChValue port = prim_open_input_file(vm, args, 1);
+    if (port == CH_UNDEFINED) {
+        return CH_UNDEFINED;
+    }
+    if (!ch_is_procedure(args[1])) {
+        close_port_impl(ch_as_port(port));
+        snprintf(vm->error, sizeof(vm->error), "with-input-from-file: not a procedure");
+        return CH_UNDEFINED;
+    }
+    ChValue saved = get_global(vm, "%current-input-port");
+    set_global(vm, "%current-input-port", port);
+    ChValue result = CH_UNDEFINED;
+    ch_gc_push(&vm->gc, &port);
+    ch_gc_push(&vm->gc, &saved);
+    ch_gc_push(&vm->gc, &result);
+    if (ch_vm_apply(vm, args[1], NULL, 0, &result) != CH_VM_OK) {
+        set_global(vm, "%current-input-port", saved);
+        close_port_impl(ch_as_port(port));
+        ch_gc_pop_n(&vm->gc, 3);
+        return CH_UNDEFINED;
+    }
+    set_global(vm, "%current-input-port", saved);
+    close_port_impl(ch_as_port(port));
+    ch_gc_pop_n(&vm->gc, 3);
+    return result;
+}
+
+static ChValue prim_with_output_to_file(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChValue port = prim_open_output_file(vm, args, 1);
+    if (port == CH_UNDEFINED) {
+        return CH_UNDEFINED;
+    }
+    if (!ch_is_procedure(args[1])) {
+        close_port_impl(ch_as_port(port));
+        snprintf(vm->error, sizeof(vm->error), "with-output-to-file: not a procedure");
+        return CH_UNDEFINED;
+    }
+    ChValue saved = get_global(vm, "%current-output-port");
+    set_global(vm, "%current-output-port", port);
+    ChValue result = CH_UNDEFINED;
+    ch_gc_push(&vm->gc, &port);
+    ch_gc_push(&vm->gc, &saved);
+    ch_gc_push(&vm->gc, &result);
+    if (ch_vm_apply(vm, args[1], NULL, 0, &result) != CH_VM_OK) {
+        set_global(vm, "%current-output-port", saved);
+        close_port_impl(ch_as_port(port));
+        ch_gc_pop_n(&vm->gc, 3);
+        return CH_UNDEFINED;
+    }
+    set_global(vm, "%current-output-port", saved);
+    close_port_impl(ch_as_port(port));
+    ch_gc_pop_n(&vm->gc, 3);
+    return result;
+}
+
 static void print_to_port(ChPort *p, ChValue v, bool display) {
-    if (p->kind == CH_PORT_STDIO) {
-        ch_print_value(port_file(p), v, display);
+    FILE *f = port_file(p);
+    if (f) {
+        ch_print_value(f, v, display);
         return;
     }
     char *s = ch_value_to_string(v, display);
@@ -233,7 +419,7 @@ static int port_peek_byte(ChPort *p) {
     if (p->closed || !p->input) {
         return -1;
     }
-    if (p->kind == CH_PORT_STDIO) {
+    if (p->kind == CH_PORT_STDIO || p->kind == CH_PORT_FILE) {
         int c = fgetc(p->file);
         if (c == EOF) {
             return -1;
@@ -254,7 +440,7 @@ static int port_read_byte(ChPort *p) {
     if (p->closed || !p->input) {
         return -1;
     }
-    if (p->kind == CH_PORT_STDIO) {
+    if (p->kind == CH_PORT_STDIO || p->kind == CH_PORT_FILE) {
         int c = fgetc(p->file);
         return c == EOF ? -1 : c;
     }
@@ -313,7 +499,8 @@ static ChValue prim_read(ChVM *vm, ChValue *args, int nargs) {
         p->pos += r.pos;
         return out;
     }
-    /* FILE*: read entire remaining into a buffer (bootstrap; fine for tests). */
+    /* FILE*: buffer remaining input, parse one datum, seek back unread bytes. */
+    long start = ftell(p->file);
     char *buf = NULL;
     size_t cap = 0, len = 0;
     int c;
@@ -327,7 +514,6 @@ static ChValue prim_read(ChVM *vm, ChValue *args, int nargs) {
             buf = nb;
         }
         buf[len++] = (char)c;
-        /* Try parse after each complete top-level? Too heavy — read all then one datum. */
     }
     if (!buf || len == 0) {
         free(buf);
@@ -340,14 +526,21 @@ static ChValue prim_read(ChVM *vm, ChValue *args, int nargs) {
     ch_gc_push(&vm->gc, &out);
     ChReadStatus st = ch_read_datum(&r, &out);
     ch_gc_pop(&vm->gc);
-    free(buf);
     if (st == CH_READ_EOF) {
+        free(buf);
         return CH_EOF_OBJ;
     }
     if (st != CH_READ_OK) {
         snprintf(vm->error, sizeof(vm->error), "read: %s", ch_reader_error(&r));
+        free(buf);
         return CH_UNDEFINED;
     }
+    if (start >= 0) {
+        if (fseek(p->file, start + (long)r.pos, SEEK_SET) != 0) {
+            /* Non-seekable: leave at EOF (bootstrap limitation). */
+        }
+    }
+    free(buf);
     return out;
 }
 
@@ -370,6 +563,14 @@ void ch_register_port_primitives(ChVM *vm) {
     define_prim(vm, "close-port", prim_close_port, 1, 1);
     define_prim(vm, "close-input-port", prim_close_port, 1, 1);
     define_prim(vm, "close-output-port", prim_close_port, 1, 1);
+    define_prim(vm, "open-input-file", prim_open_input_file, 1, 1);
+    define_prim(vm, "open-output-file", prim_open_output_file, 1, 1);
+    define_prim(vm, "file-exists?", prim_file_exists_p, 1, 1);
+    define_prim(vm, "delete-file", prim_delete_file, 1, 1);
+    define_prim(vm, "call-with-input-file", prim_call_with_input_file, 2, 2);
+    define_prim(vm, "call-with-output-file", prim_call_with_output_file, 2, 2);
+    define_prim(vm, "with-input-from-file", prim_with_input_from_file, 2, 2);
+    define_prim(vm, "with-output-to-file", prim_with_output_to_file, 2, 2);
     define_prim(vm, "read-char", prim_read_char, -1, 0);
     define_prim(vm, "peek-char", prim_peek_char, -1, 0);
     define_prim(vm, "read", prim_read, -1, 0);

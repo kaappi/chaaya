@@ -74,6 +74,7 @@ void ch_vm_register_primitives(ChVM *vm) {
     ch_register_port_primitives(vm);
     ch_register_control_primitives(vm);
     ch_register_record_primitives(vm);
+    ch_register_lazy_primitives(vm);
     ch_register_features_primitives(vm);
     if (vm->libraries) {
         (void)ch_register_builtin_libraries(vm);
@@ -757,15 +758,15 @@ ChVMStatus ch_vm_eval_function(ChVM *vm, ChFunction *fn, ChValue *out) {
         ch_gc_push(&vm->gc, &vm->globals[i].value);
     }
     ChValue cl_v = ch_gc_make_closure(&vm->gc, ch_as_function(fn_v), NULL);
-    ch_gc_pop_n(&vm->gc, 1 + vm->global_count);
-
-    vm->reg_top = 0;
+    /* Install closure in regs before dropping roots so a GC cannot collect it. */
+    vm->reg_top = 1;
     vm->frame_count = 0;
     vm->wind_count = 0;
     vm->handler_count = 0;
     vm->continuation_invoked = false;
     vm->regs[0] = cl_v;
-    ChVMStatus st = push_frame(vm, ch_as_closure(cl_v), 0);
+    ch_gc_pop_n(&vm->gc, 1 + vm->global_count);
+    ChVMStatus st = push_frame(vm, ch_as_closure(vm->regs[0]), 0);
     if (st != CH_VM_OK) {
         return st;
     }

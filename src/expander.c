@@ -62,6 +62,8 @@ static int is_well_known(const char *base) {
         "unquote-splicing",
         "if",
         "lambda",
+        "case-lambda",
+        "delay",
         "define",
         "set!",
         "begin",
