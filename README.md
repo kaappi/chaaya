@@ -21,12 +21,18 @@ Bootstrap interpreter:
 Requires CMake 3.20+, a C17 compiler, and libc.
 
 ```bash
+make            # configure + build → build/chaaya
+make test       # build + ctest
+make run        # REPL
+```
+
+Or with CMake directly:
+
+```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
-
-Binary: `build/chaaya`
 
 ```bash
 ./build/chaaya              # REPL
@@ -59,7 +65,14 @@ Binary: `build/chaaya`
 
 Chaaya reuses Kaappi as a behavioral reference and will vendor portable Scheme
 libraries where licenses allow (MIT). Bytecode, IR, and ABI are intentionally
-independent.
+independent. Note that Kaappi’s R7RS `(scheme …)` libraries are built-in (not
+`lib/scheme/*.sld`); portable `.sld` is primarily for SRFIs and user code.
+
+## Developer docs
+
+Contributor documentation lives in [docs/dev/](docs/dev/):
+
+- [Architecture](docs/dev/architecture.md) — pipeline, values, GC, VM, layout
 
 ## License
 

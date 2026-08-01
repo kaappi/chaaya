@@ -50,5 +50,23 @@ chaaya_add_test(test_smoke tests/c/test_smoke.c)
 chaaya_add_test(test_value_gc tests/c/test_value_gc.c)
 chaaya_add_test(test_reader_printer tests/c/test_reader_printer.c)
 chaaya_add_test(test_vm tests/c/test_vm.c)
+chaaya_add_test(test_primitives tests/c/test_primitives.c)
+
+# Scheme file tests: compare chaaya stdout to *.expected
+function(chaaya_scheme_test name)
+  add_test(
+    NAME scheme_${name}
+    COMMAND ${CMAKE_COMMAND}
+      -DCHAAYA=$<TARGET_FILE:chaaya>
+      -DINPUT=${CMAKE_SOURCE_DIR}/tests/scheme/${name}.scm
+      -DEXPECTED=${CMAKE_SOURCE_DIR}/tests/scheme/${name}.expected
+      -P ${CMAKE_SOURCE_DIR}/tests/scheme/run_expect.cmake
+  )
+endfunction()
+
+chaaya_scheme_test(fact)
+chaaya_scheme_test(lists)
+chaaya_scheme_test(closures)
+chaaya_scheme_test(tail)
 
 install(TARGETS chaaya RUNTIME DESTINATION bin)
