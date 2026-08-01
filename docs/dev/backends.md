@@ -19,7 +19,7 @@ Work tracked here intentionally stays **documentation and stubs** until a dedica
 ### LLVM native
 
 - **Today:** `--native` fails with a clear NYI message ([`src/llvm_backend.c`](../../src/llvm_backend.c)).
-- **Scope when implemented:** lower Chaaya IR (post-opts) to LLVM IR for `aarch64` / `x86_64`, link against a small C-ABI runtime exporting GC + procedure call helpers.
+- **Scope when implemented:** lower Chaaya IR (post-opts `ChIrNode`; see [ir.md](ir.md)) to LLVM IR for `aarch64` / `x86_64`, link against a small C-ABI runtime exporting GC + procedure call helpers.
 - **Out of scope for first cut:** full separate compilation of user `.sld` trees, cross-compilation matrix beyond macOS/Linux host dev.
 
 ### WASM (wasm32-wasi)

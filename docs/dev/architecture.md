@@ -16,20 +16,23 @@ Bytecode, IR, and ABI are independent.
 Source
   → Reader          (UTF-8 datum parser)
   → Expander        (`define-syntax` / `syntax-rules`; hygiene via `__hyg_N_` renames)
-  → Compiler        (AST → bytecode; derived forms desugared in C)
+  → IR              (lower → analyze → optimize → reify; see [ir.md](ir.md))
+  → Compiler        (reified AST → bytecode; derived forms desugared in C)
   → VM              (register bytecode)
   → GC              (stop-the-world mark-sweep)
 ```
 
-Kaappi’s full pipeline is Reader → Expander → IR → Analysis → Optim → Bytecode →
-VM. Chaaya has a hygienic expander MVP and still collapses IR; special forms and
-derived forms (`cond`, `let*`, `letrec`, `when`, `unless`, `quasiquote`) are
-handled in the compiler.
+Kaappi’s pipeline is Reader → Expander → IR → Analysis → Optim → Bytecode → VM.
+Chaaya mirrors that shape with its own tree IR (`ChIrNode`). Emit currently
+reifies Scheme datums and calls the legacy `compile_expr` path, so derived forms
+(`cond`, `let*`, `letrec`, `when`, `unless`, `quasiquote`, …) still desugar in
+the compiler via `CH_IR_RAW` passthrough. Details: [ir.md](ir.md).
 
 | Stage | Files | Role |
 |-------|-------|------|
 | **Reader** | [`src/reader.c`](../../src/reader.c), [`include/chaaya/reader.h`](../../include/chaaya/reader.h) | Recursive-descent datum reader: lists, vectors, quote/quasiquote abbrevs, strings, numbers, `#t`/`#f`, characters |
 | **Expander** | [`src/expander.c`](../../src/expander.c), [`include/chaaya/expander.h`](../../include/chaaya/expander.h) | `syntax-rules` match/instantiate, macro table, `chaaya expand` |
+| **IR** | [`src/ir_*.c`](../../src/ir_lower.c), [`include/chaaya/ir.h`](../../include/chaaya/ir.h) | Tree IR: lower, analyze, optimize, reify; see [ir.md](ir.md) |
 | **Printer** | [`src/printer.c`](../../src/printer.c), [`include/chaaya/printer.h`](../../include/chaaya/printer.h) | `write` / `display` rendering |
 | **Compiler** | [`src/compiler.c`](../../src/compiler.c), [`include/chaaya/compiler.h`](../../include/chaaya/compiler.h) | Top-level AST → `ChFunction` bytecode; lexical locals + upvalues |
 | **VM** | [`src/vm.c`](../../src/vm.c), [`include/chaaya/vm.h`](../../include/chaaya/vm.h) | Dispatch loop, calls/tail-calls, globals, upvalue close-over |
@@ -143,7 +146,7 @@ Build: CMake 3.21+ produces `chaaya` (C23) and links tests against static
 |-----------------|---------------------|
 | Full R7RS-small surface | More `(scheme …)` libs; SRFI surface |
 | Ports / numeric tower | Richer port I/O; exact complexes |
-| IR + opts | Insert between expander and bytecode; prep for LLVM |
+| Richer IR + direct bytecode / LLVM | Grow `ChIrNode` coverage; emit opcodes (or LLVM) without reify; see [ir.md](ir.md) |
 | FFI / fibers / LSP / WASM | After R7RS-small sequential interpreter is solid |
 
 Done: `call/cc`, `dynamic-wind`, exceptions; hygienic `syntax-rules`; R7RS library
