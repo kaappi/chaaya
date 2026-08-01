@@ -6,14 +6,14 @@ These trees are copied from [Kaappi](https://github.com/kaappi/kaappi)
 | Tree | Source | CTest / blockers (2026-08) |
 |------|--------|----------------------------|
 | `smoke/` | `kaappi/tests/scheme/smoke/` | not wired — enable after compliance Tier-1 stabilizes |
-| `compliance/` | `kaappi/tests/scheme/compliance/` | **Tier 1 wired (green):** `sqrt-exact`, `lists`, `vectors`. **Tier 2 wired (green):** `macro-export-scope`, `chars`, `bytevectors`. **Blocked:** `eval` (eval arity), `lazy` (reentrant force). |
+| `compliance/` | `kaappi/tests/scheme/compliance/` | **Tier 1 wired (green):** `sqrt-exact`, `lists`, `vectors`. **Tier 2 wired (green):** `macro-export-scope`, `chars`, `bytevectors`, `eval`, `lazy`. |
 | `differential-probes/` | `kaappi/tests/scheme/differential/probes/` | not wired — needs full numeric tower + error semantics |
 
 Active ports that already run under `make test`:
 
 - `tests/scheme/bootstrap/` — Kaappi-shaped `check-*` suites (includes `srfi-smoke.scm`)
 - `tests/scheme/probes/` — display-based probes
-- `tests/scheme/r7rs/r7rs-tests.scm` — `r7rs_suite` (§4.1–4.3 green in slices; full file segfaults on nested quasiquote ~line 354)
+- `tests/scheme/r7rs/r7rs-tests.scm` — `r7rs_suite` (full file green in CTest)
 
 Runner: [`tests/scheme/run_kaappi_deferred.cmake`](../run_kaappi_deferred.cmake).
 

@@ -101,6 +101,18 @@ static void pop_const_roots(ChCompiler *c, ChFuncCompiler *fc) {
     }
 }
 
+static void pop_root_at(ChGC *gc, size_t base) {
+    size_t after = gc->root_count;
+    if (after <= base) {
+        abort();
+    }
+    if (after > base + 1) {
+        memmove(&gc->roots[base], &gc->roots[base + 1],
+                (after - base - 1) * sizeof(gc->roots[0]));
+    }
+    gc->root_count = after - 1;
+}
+
 static void fc_free_buf(ChCompiler *c, ChFuncCompiler *fc) {
     pop_const_roots(c, fc);
     free(fc->code);
@@ -229,12 +241,6 @@ static int add_constant(ChCompiler *c, ChFuncCompiler *fc, ChValue v) {
 static int resolve_local(ChFuncCompiler *fc, ChSymbol *name) {
     for (int i = fc->local_count - 1; i >= 0; i--) {
         if (fc->locals[i].name == name) {
-            return i;
-        }
-    }
-    const char *base = ch_symbol_basename(name);
-    for (int i = fc->local_count - 1; i >= 0; i--) {
-        if (strcmp(ch_symbol_basename(fc->locals[i].name), base) == 0) {
             return i;
         }
     }
@@ -772,6 +778,9 @@ static ChCompileStatus compile_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue
         fc_discard(c, &child);
         return CH_COMPILE_ERROR;
     }
+    /* Constants now live on child.fn; drop temp roots before parent add_constant
+     * pushes, otherwise fc_end_compile's pop_const_roots would steal that root. */
+    pop_const_roots(c, &child);
 
     ChValue fn_cv = ch_make_pointer(&child.fn->header);
     ch_gc_push(&c->vm->gc, &fn_cv);
@@ -1251,9 +1260,9 @@ static ChCompileStatus compile_let_values(ChCompiler *c, ChFuncCompiler *fc, ChV
     } else {
         form = ch_gc_cons(gc, let_sym, ch_gc_cons(gc, let_binds, ch_gc_cons(gc, inner, CH_NIL)));
     }
-    ChCompileStatus st = compile_expr(c, fc, form, dst, tail);
+    ChValue form_keep = form;
     ch_gc_pop_n(gc, 3);
-    return st;
+    return compile_expr(c, fc, form_keep, dst, tail);
 }
 
 /* Build nested call-with-values for sequential let*-values. */
@@ -1591,6 +1600,8 @@ static ChCompileStatus compile_let(ChCompiler *c, ChFuncCompiler *fc, ChValue ar
 
     ChValue bindings = ch_car(args);
     ChValue body = ch_cdr(args);
+    ch_gc_push(&c->vm->gc, &bindings);
+    ch_gc_push(&c->vm->gc, &body);
 
     /* R7RS: leading internal define in let → nested letrec*. */
     if (ch_is_pair(body) && is_define_form(ch_car(body))) {
@@ -1600,7 +1611,7 @@ static ChCompileStatus compile_let(ChCompiler *c, ChFuncCompiler *fc, ChValue ar
             ChValue def = ch_car(body);
             ChValue drest = ch_cdr(def);
             if (!ch_is_pair(drest)) {
-                ch_gc_pop(&c->vm->gc);
+                ch_gc_pop_n(&c->vm->gc, 3);
                 return fail(c, "define: bad syntax");
             }
             ChValue name_form = ch_car(drest);
@@ -1620,7 +1631,7 @@ static ChCompileStatus compile_let(ChCompiler *c, ChFuncCompiler *fc, ChValue ar
                 init = ch_gc_cons(&c->vm->gc, lambda_sym,
                                   ch_gc_cons(&c->vm->gc, ch_cdr(name_form), init_forms));
             } else {
-                ch_gc_pop(&c->vm->gc);
+                ch_gc_pop_n(&c->vm->gc, 3);
                 return fail(c, "define: bad syntax");
             }
             ChValue bind = ch_gc_cons(&c->vm->gc, ch_make_pointer(&name->header),
@@ -1640,7 +1651,7 @@ static ChCompileStatus compile_let(ChCompiler *c, ChFuncCompiler *fc, ChValue ar
         ChValue form = ch_gc_cons(&c->vm->gc, let_sym,
                                   ch_gc_cons(&c->vm->gc, bindings,
                                              ch_gc_cons(&c->vm->gc, inner, CH_NIL)));
-        ch_gc_pop_n(&c->vm->gc, 2);
+        ch_gc_pop_n(&c->vm->gc, 4);
         return compile_expr(c, fc, form, dst, tail);
     }
 
@@ -1653,7 +1664,7 @@ static ChCompileStatus compile_let(ChCompiler *c, ChFuncCompiler *fc, ChValue ar
     while (ch_is_pair(b)) {
         ChValue bind = ch_car(b);
         if (!ch_is_pair(bind) || !ch_is_pair(ch_cdr(bind))) {
-            ch_gc_pop_n(&c->vm->gc, 2);
+            ch_gc_pop_n(&c->vm->gc, 4);
             return fail(c, "let: bad binding");
         }
         ChValue name = ch_car(bind);
@@ -1663,7 +1674,7 @@ static ChCompileStatus compile_let(ChCompiler *c, ChFuncCompiler *fc, ChValue ar
         b = ch_cdr(b);
     }
     if (!ch_is_nil(b)) {
-        ch_gc_pop_n(&c->vm->gc, 2);
+        ch_gc_pop_n(&c->vm->gc, 4);
         return fail(c, "let: bad bindings list");
     }
 
@@ -1680,12 +1691,19 @@ static ChCompileStatus compile_let(ChCompiler *c, ChFuncCompiler *fc, ChValue ar
         vals = ch_cdr(vals);
     }
 
+    ChValue call = CH_NIL;
+    ChValue lambda = CH_NIL;
+    ChValue lambda_args = CH_NIL;
+    ch_gc_push(&c->vm->gc, &call);
+    ch_gc_push(&c->vm->gc, &lambda);
+    ch_gc_push(&c->vm->gc, &lambda_args);
     ChValue lambda_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "lambda");
-    ChValue lambda_args = ch_gc_cons(&c->vm->gc, rp, body);
-    ChValue lambda = ch_gc_cons(&c->vm->gc, lambda_sym, lambda_args);
-    ChValue call = ch_gc_cons(&c->vm->gc, lambda, rv);
-    ch_gc_pop_n(&c->vm->gc, 4);
-    return compile_expr(c, fc, call, dst, tail);
+    lambda_args = ch_gc_cons(&c->vm->gc, rp, body);
+    lambda = ch_gc_cons(&c->vm->gc, lambda_sym, lambda_args);
+    call = ch_gc_cons(&c->vm->gc, lambda, rv);
+    ChValue form_keep = call;
+    ch_gc_pop_n(&c->vm->gc, 9);
+    return compile_expr(c, fc, form_keep, dst, tail);
 }
 
 /* (let* ((v e) ...) body...) → nested lets */
@@ -1696,23 +1714,40 @@ static ChCompileStatus compile_let_star(ChCompiler *c, ChFuncCompiler *fc, ChVal
     }
     ChValue bindings = ch_car(args);
     ChValue body = ch_cdr(args);
+    ch_gc_push(&c->vm->gc, &bindings);
+    ch_gc_push(&c->vm->gc, &body);
     if (ch_is_nil(bindings)) {
+        ChValue form = CH_NIL;
+        ch_gc_push(&c->vm->gc, &form);
         ChValue begin_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "begin");
-        ChValue form = ch_gc_cons(&c->vm->gc, begin_sym, body);
-        return compile_expr(c, fc, form, dst, tail);
+        form = ch_gc_cons(&c->vm->gc, begin_sym, body);
+        ChValue form_keep = form;
+        ch_gc_pop_n(&c->vm->gc, 3);
+        return compile_expr(c, fc, form_keep, dst, tail);
     }
     if (!ch_is_pair(bindings)) {
+        ch_gc_pop_n(&c->vm->gc, 2);
         return fail(c, "let*: bad bindings");
     }
     ChValue first = ch_car(bindings);
     ChValue rest = ch_cdr(bindings);
+    ChValue form = CH_NIL;
+    ChValue inner = CH_NIL;
+    ChValue binds1 = CH_NIL;
+    ch_gc_push(&c->vm->gc, &first);
+    ch_gc_push(&c->vm->gc, &rest);
+    ch_gc_push(&c->vm->gc, &form);
+    ch_gc_push(&c->vm->gc, &inner);
+    ch_gc_push(&c->vm->gc, &binds1);
     ChValue let_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "let");
     ChValue let_star = ch_gc_intern_symbol_cstr(&c->vm->gc, "let*");
-    ChValue inner = ch_gc_cons(&c->vm->gc, let_star, ch_gc_cons(&c->vm->gc, rest, body));
-    ChValue binds1 = ch_gc_cons(&c->vm->gc, first, CH_NIL);
-    ChValue form =
+    inner = ch_gc_cons(&c->vm->gc, let_star, ch_gc_cons(&c->vm->gc, rest, body));
+    binds1 = ch_gc_cons(&c->vm->gc, first, CH_NIL);
+    form =
         ch_gc_cons(&c->vm->gc, let_sym, ch_gc_cons(&c->vm->gc, binds1, ch_gc_cons(&c->vm->gc, inner, CH_NIL)));
-    return compile_expr(c, fc, form, dst, tail);
+    ChValue form_keep = form;
+    ch_gc_pop_n(&c->vm->gc, 7);
+    return compile_expr(c, fc, form_keep, dst, tail);
 }
 
 /* (letrec ((v e) ...) body...) → (let ((v <undef>)...) (set! v e)... body...) */
@@ -1801,8 +1836,9 @@ static ChCompileStatus compile_letrec(ChCompiler *c, ChFuncCompiler *fc, ChValue
     }
     ChValue let_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "let");
     ChValue form = ch_gc_cons(&c->vm->gc, let_sym, ch_gc_cons(&c->vm->gc, ub, new_body));
+    ChValue form_keep = form;
     ch_gc_pop_n(&c->vm->gc, 9);
-    return compile_expr(c, fc, form, dst, tail);
+    return compile_expr(c, fc, form_keep, dst, tail);
 }
 
 static ChCompileStatus compile_cond(ChCompiler *c, ChFuncCompiler *fc, ChValue args, uint8_t dst,
@@ -1995,9 +2031,9 @@ static ChCompileStatus compile_case(ChCompiler *c, ChFuncCompiler *fc, ChValue a
     ChValue binds = ch_gc_cons(&c->vm->gc, bind, CH_NIL);
     form = ch_gc_cons(&c->vm->gc, let_sym, ch_gc_cons(&c->vm->gc, binds, ch_gc_cons(&c->vm->gc, chain, CH_NIL)));
 
-    ChCompileStatus st = compile_expr(c, fc, form, dst, tail);
+    ChValue form_keep = form;
     ch_gc_pop_n(&c->vm->gc, 2);
-    return st;
+    return compile_expr(c, fc, form_keep, dst, tail);
 }
 
 static ChCompileStatus compile_when_unless(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
@@ -2153,9 +2189,9 @@ static ChCompileStatus compile_do(ChCompiler *c, ChFuncCompiler *fc, ChValue arg
         ch_gc_cons(&c->vm->gc, loop_sym, ch_gc_cons(&c->vm->gc, loop_bindings, let_body));
     form = ch_gc_cons(&c->vm->gc, let_sym, let_args);
 
-    ChCompileStatus st = compile_expr(c, fc, form, dst, tail);
+    ChValue form_keep = form;
     ch_gc_pop_n(&c->vm->gc, 11);
-    return st;
+    return compile_expr(c, fc, form_keep, dst, tail);
 }
 
 static ChCompileStatus compile_guard(ChCompiler *c, ChFuncCompiler *fc, ChValue args, uint8_t dst,
@@ -2268,9 +2304,9 @@ static ChCompileStatus compile_guard(ChCompiler *c, ChFuncCompiler *fc, ChValue 
                                   ch_gc_cons(&c->vm->gc, weh, CH_NIL)));
     form = ch_gc_cons(&c->vm->gc, callcc_sym, ch_gc_cons(&c->vm->gc, outer, CH_NIL));
 
-    ChCompileStatus st = compile_expr(c, fc, form, dst, tail);
+    ChValue form_keep = form;
     ch_gc_pop_n(&c->vm->gc, 15);
-    return st;
+    return compile_expr(c, fc, form_keep, dst, tail);
 }
 
 static ChCompileStatus compile_parameterize(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
@@ -2410,9 +2446,9 @@ static ChCompileStatus compile_parameterize(ChCompiler *c, ChFuncCompiler *fc, C
                    ch_gc_cons(&c->vm->gc, outer_bindings,
                               ch_gc_cons(&c->vm->gc, inner_let, CH_NIL)));
 
-    ChCompileStatus st = compile_expr(c, fc, outer_let, dst, tail);
+    ChValue form_keep = outer_let;
     ch_gc_pop_n(&c->vm->gc, 10);
-    return st;
+    return compile_expr(c, fc, form_keep, dst, tail);
 }
 
 static ChValue qq_expand(ChCompiler *c, ChValue x, int level);
@@ -2561,9 +2597,10 @@ static ChCompileStatus compile_quasiquote_real(ChCompiler *c, ChFuncCompiler *fc
     if (expanded == CH_FALSE) {
         return fail(c, "quasiquote: bad syntax");
     }
+    size_t root_base = c->vm->gc.root_count;
     ch_gc_push(&c->vm->gc, &expanded);
     ChCompileStatus st = compile_expr(c, fc, expanded, dst, tail);
-    ch_gc_pop(&c->vm->gc);
+    pop_root_at(&c->vm->gc, root_base);
     return st;
 }
 
@@ -2572,14 +2609,18 @@ static ChCompileStatus compile_expr_impl(ChCompiler *c, ChFuncCompiler *fc, ChVa
 
 static ChCompileStatus compile_expr(ChCompiler *c, ChFuncCompiler *fc, ChValue expr, uint8_t dst,
                                     bool tail) {
-    /* Keep heap exprs rooted across desugaring allocations inside compile. */
+    /* Keep heap exprs rooted across desugaring allocations inside compile.
+     * add_constant may push long-lived roots above this slot; a plain pop would
+     * steal those. Remove only our rooted entry and compact the rest. */
     if (!ch_is_pointer(expr)) {
         return compile_expr_impl(c, fc, expr, dst, tail);
     }
+    ChGC *gc = &c->vm->gc;
+    size_t base = gc->root_count;
     ChValue rooted = expr;
-    ch_gc_push(&c->vm->gc, &rooted);
+    ch_gc_push(gc, &rooted);
     ChCompileStatus st = compile_expr_impl(c, fc, rooted, dst, tail);
-    ch_gc_pop(&c->vm->gc);
+    pop_root_at(gc, base);
     return st;
 }
 
@@ -2646,9 +2687,10 @@ static ChCompileStatus compile_expr_impl(ChCompiler *c, ChFuncCompiler *fc, ChVa
                 ch_gc_pop(&c->vm->gc);
                 return fail(c, err);
             }
+            size_t root_base = c->vm->gc.root_count - 1;
             ChCompileStatus st = compile_expr(c, fc, expanded, dst, tail);
             c->vm->active_lib_env = saved_lib;
-            ch_gc_pop(&c->vm->gc);
+            pop_root_at(&c->vm->gc, root_base);
             return st;
         }
     }

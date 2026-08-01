@@ -11,8 +11,8 @@ an R7RS library MVP; fuller Kaappi/R7RS suites stay deferred.
 | `tests/scheme/*.scm` + `*.expected` | Early smoke (fact, lists, …) | yes |
 | `tests/scheme/bootstrap/` | Kaappi-shaped `check-*` suites (`libraries.scm` uses `import`) | yes |
 | `tests/scheme/probes/` | Adapted Kaappi differential probes (stdout golden) | yes |
-| `tests/scheme/r7rs/` | Canonical R7RS-small suite (vendored) | **partial** (`r7rs_suite` in CTest; §4.1–5 and much of §6 green; full run stops in §6.2 numeric tower — `denominator` / flonum gaps) |
-| `tests/scheme/kaappi-deferred/` | Full Kaappi smoke/compliance/probe copies | **partial** (Tier-1 + three Tier-2 compliance files wired in CTest; SRFI-64 macros green) |
+| `tests/scheme/r7rs/` | Canonical R7RS-small suite (vendored) | **in CTest** (`r7rs_suite`; full file green) |
+| `tests/scheme/kaappi-deferred/` | Full Kaappi smoke/compliance/probe copies | **partial** (Tier-1 + Tier-2 compliance files wired in CTest, including `eval`/`lazy`; smoke/differential still deferred) |
 
 ## Bootstrap harness
 
@@ -49,4 +49,4 @@ See `tests/scheme/kaappi-deferred/README.md`. Rough gates:
 7. `(scheme inexact)` / `(scheme exact)` + math prims — **done** (MVP)
 8. SRFI-64 or `(chibi test)` — **done** for wired deferred suites (`bind_lib_ref` skips transformers; per-env hoist globals). `(chibi test)` drives `r7rs_suite`.
 9. Re-run Kaappi’s `tests/scheme/run-all.sh` corpus against `chaaya` — **in progress**
-   (Tier-1: `sqrt-exact`, `lists`, `vectors` in CTest; Tier-2: `macro-export-scope`, `chars`, `bytevectors`; `eval`/`lazy` still blocked)
+   (Tier-1: `sqrt-exact`, `lists`, `vectors` in CTest; Tier-2: `macro-export-scope`, `chars`, `bytevectors`, `eval`, `lazy`)

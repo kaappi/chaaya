@@ -327,7 +327,7 @@ static ChValue prim_cddr(ChVM *vm, ChValue *args, int nargs) {
     return ch_cdr(ch_cdr(args[0]));
 }
 
-static ChValue mem_common(ChVM *vm, ChValue obj, ChValue lst, int mode) {
+static ChValue mem_common(ChVM *vm, ChValue obj, ChValue lst, int mode, ChValue cmp) {
     while (ch_is_pair(lst)) {
         ChValue x = ch_car(lst);
         int match = 0;
@@ -335,58 +335,85 @@ static ChValue mem_common(ChVM *vm, ChValue obj, ChValue lst, int mode) {
             match = ch_eq(obj, x);
         } else if (mode == 1) {
             match = ch_eqv(obj, x);
-        } else {
+        } else if (cmp == CH_UNDEFINED) {
             match = ch_equal(obj, x);
+        } else {
+            ChValue call_args[2] = {obj, x};
+            ChValue res = CH_FALSE;
+            if (ch_vm_apply(vm, cmp, call_args, 2, &res) != CH_VM_OK) {
+                return CH_UNDEFINED;
+            }
+            match = ch_is_true_value(res);
         }
         if (match) {
             return lst;
         }
         lst = ch_cdr(lst);
     }
-    (void)vm;
     return CH_FALSE;
 }
 
 static ChValue prim_memq(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    return mem_common(vm, args[0], args[1], 0);
+    return mem_common(vm, args[0], args[1], 0, CH_UNDEFINED);
 }
 static ChValue prim_memv(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    return mem_common(vm, args[0], args[1], 1);
+    return mem_common(vm, args[0], args[1], 1, CH_UNDEFINED);
 }
 static ChValue prim_member(ChVM *vm, ChValue *args, int nargs) {
-    (void)nargs;
-    return mem_common(vm, args[0], args[1], 2);
+    ChValue cmp = (nargs >= 3) ? args[2] : CH_UNDEFINED;
+    if (nargs >= 3 && !ch_is_procedure(cmp)) {
+        snprintf(vm->error, sizeof(vm->error), "member: comparator not a procedure");
+        return CH_UNDEFINED;
+    }
+    return mem_common(vm, args[0], args[1], 2, cmp);
 }
 
-static ChValue ass_common(ChVM *vm, ChValue obj, ChValue alist, int mode) {
+static ChValue ass_common(ChVM *vm, ChValue obj, ChValue alist, int mode, ChValue cmp) {
     while (ch_is_pair(alist)) {
         ChValue cell = ch_car(alist);
         if (ch_is_pair(cell)) {
             ChValue key = ch_car(cell);
-            int match = mode == 0 ? ch_eq(obj, key) : mode == 1 ? ch_eqv(obj, key) : ch_equal(obj, key);
+            int match = 0;
+            if (mode == 0) {
+                match = ch_eq(obj, key);
+            } else if (mode == 1) {
+                match = ch_eqv(obj, key);
+            } else if (cmp == CH_UNDEFINED) {
+                match = ch_equal(obj, key);
+            } else {
+                ChValue call_args[2] = {obj, key};
+                ChValue res = CH_FALSE;
+                if (ch_vm_apply(vm, cmp, call_args, 2, &res) != CH_VM_OK) {
+                    return CH_UNDEFINED;
+                }
+                match = ch_is_true_value(res);
+            }
             if (match) {
                 return cell;
             }
         }
         alist = ch_cdr(alist);
     }
-    (void)vm;
     return CH_FALSE;
 }
 
 static ChValue prim_assq(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    return ass_common(vm, args[0], args[1], 0);
+    return ass_common(vm, args[0], args[1], 0, CH_UNDEFINED);
 }
 static ChValue prim_assv(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    return ass_common(vm, args[0], args[1], 1);
+    return ass_common(vm, args[0], args[1], 1, CH_UNDEFINED);
 }
 static ChValue prim_assoc(ChVM *vm, ChValue *args, int nargs) {
-    (void)nargs;
-    return ass_common(vm, args[0], args[1], 2);
+    ChValue cmp = (nargs >= 3) ? args[2] : CH_UNDEFINED;
+    if (nargs >= 3 && !ch_is_procedure(cmp)) {
+        snprintf(vm->error, sizeof(vm->error), "assoc: comparator not a procedure");
+        return CH_UNDEFINED;
+    }
+    return ass_common(vm, args[0], args[1], 2, cmp);
 }
 
 static ChValue prim_map(ChVM *vm, ChValue *args, int nargs) {
@@ -417,6 +444,7 @@ static ChValue prim_map(ChVM *vm, ChValue *args, int nargs) {
     ChValue tmp[64];
     int n = 0;
     for (;;) {
+        int done = 0;
         for (int k = 0; k < nlists; k++) {
             if (!ch_is_pair(lists[k])) {
                 if (!ch_is_nil(lists[k])) {
@@ -424,20 +452,20 @@ static ChValue prim_map(ChVM *vm, ChValue *args, int nargs) {
                     snprintf(vm->error, sizeof(vm->error), "map: not a proper list");
                     return CH_UNDEFINED;
                 }
-                if (k == 0) {
-                    for (int i = n - 1; i >= 0; i--) {
-                        ChValue item = tmp[i];
-                        ch_gc_push(&vm->gc, &item);
-                        acc = ch_gc_cons(&vm->gc, item, acc);
-                        ch_gc_pop(&vm->gc);
-                    }
-                    ch_gc_pop(&vm->gc);
-                    return acc;
-                }
-                ch_gc_pop(&vm->gc);
-                snprintf(vm->error, sizeof(vm->error), "map: lists differ in length");
-                return CH_UNDEFINED;
+                /* R7RS: stop at the shortest list. */
+                done = 1;
+                break;
             }
+        }
+        if (done) {
+            for (int i = n - 1; i >= 0; i--) {
+                ChValue item = tmp[i];
+                ch_gc_push(&vm->gc, &item);
+                acc = ch_gc_cons(&vm->gc, item, acc);
+                ch_gc_pop(&vm->gc);
+            }
+            ch_gc_pop(&vm->gc);
+            return acc;
         }
         if (n >= 64) {
             ch_gc_pop(&vm->gc);
@@ -511,11 +539,8 @@ static ChValue prim_for_each(ChVM *vm, ChValue *args, int nargs) {
                     snprintf(vm->error, sizeof(vm->error), "for-each: not a proper list");
                     return CH_UNDEFINED;
                 }
-                if (k == 0) {
-                    return CH_VOID;
-                }
-                snprintf(vm->error, sizeof(vm->error), "for-each: lists differ in length");
-                return CH_UNDEFINED;
+                /* R7RS: stop at the shortest list. */
+                return CH_VOID;
             }
         }
         ChValue call_args[CH_APPLY_MAX_ARGS];
@@ -552,10 +577,10 @@ void ch_register_list_primitives(ChVM *vm) {
     define_prim(vm, "cddr", prim_cddr, 1, 1);
     define_prim(vm, "memq", prim_memq, 2, 2);
     define_prim(vm, "memv", prim_memv, 2, 2);
-    define_prim(vm, "member", prim_member, 2, 2);
+    define_prim(vm, "member", prim_member, -1, 2);
     define_prim(vm, "assq", prim_assq, 2, 2);
     define_prim(vm, "assv", prim_assv, 2, 2);
-    define_prim(vm, "assoc", prim_assoc, 2, 2);
+    define_prim(vm, "assoc", prim_assoc, -1, 2);
     define_prim(vm, "map", prim_map, -1, 2);
     define_prim(vm, "for-each", prim_for_each, -1, 2);
     define_prim(vm, "symbol=?", prim_symbol_eq, -1, 2);

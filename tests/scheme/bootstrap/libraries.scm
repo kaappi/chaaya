@@ -49,8 +49,8 @@
 (import (only (scheme complex) make-rectangular real-part imag-part))
 (check-assert "scheme.complex make-rectangular"
               (= (make-rectangular 1 2) 1+2i))
-(check-eqv "scheme.complex real-part" 1.0 (real-part 1+2i))
-(check-eqv "scheme.complex imag-part" 2.0 (imag-part 1+2i))
+(check-eqv "scheme.complex real-part" 1 (real-part 1+2i))
+(check-eqv "scheme.complex imag-part" 2 (imag-part 1+2i))
 
 (import (only (scheme inexact) sqrt sin finite?))
 (check-assert "scheme.inexact sqrt" (= (sqrt 9) 3.0))

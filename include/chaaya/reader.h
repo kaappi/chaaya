@@ -17,6 +17,8 @@ typedef enum ChReadStatus {
 struct ChReader;
 typedef bool (*ChReaderRefillFn)(struct ChReader *reader, void *ctx);
 
+#define CH_READER_MAX_LABELS 256
+
 typedef struct ChReader {
     ChGC *gc;
     const char *src;
@@ -26,6 +28,9 @@ typedef struct ChReader {
     ChReaderRefillFn refill;
     void *refill_ctx;
     char error[256];
+    /* Datum labels (#n= / #n#) for the current top-level read. */
+    ChValue labels[CH_READER_MAX_LABELS];
+    uint8_t label_set[CH_READER_MAX_LABELS];
 } ChReader;
 
 void ch_reader_init(ChReader *r, ChGC *gc, const char *src, size_t len);

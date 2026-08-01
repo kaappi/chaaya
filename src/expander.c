@@ -9,7 +9,7 @@
 #include <string.h>
 
 #define CH_BIND_MAX 64
-#define CH_HYG_MAX 128
+#define CH_HYG_MAX 4096
 #define CH_EXPAND_DEPTH_MAX 256
 #define CH_ELLIPSIS_MAX 64
 

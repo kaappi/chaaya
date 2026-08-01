@@ -236,6 +236,8 @@ chaaya_kaappi_deferred_test(vectors tests/scheme/kaappi-deferred/compliance/vect
 chaaya_kaappi_deferred_test(macro_export_scope tests/scheme/kaappi-deferred/compliance/macro-export-scope.scm)
 chaaya_kaappi_deferred_test(chars tests/scheme/kaappi-deferred/compliance/chars.scm)
 chaaya_kaappi_deferred_test(bytevectors tests/scheme/kaappi-deferred/compliance/bytevectors.scm)
+chaaya_kaappi_deferred_test(eval tests/scheme/kaappi-deferred/compliance/eval.scm)
+chaaya_kaappi_deferred_test(lazy tests/scheme/kaappi-deferred/compliance/lazy.scm)
 
 # Display probes adapted from Kaappi differential/probes
 function(chaaya_probe_test name)

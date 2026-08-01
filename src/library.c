@@ -233,22 +233,23 @@ int ch_register_builtin_libraries(ChVM *vm) {
     if (ch_register_scheme_base_library(vm) != 0) {
         return -1;
     }
-    static const char *const write_exports[] = {"display", "write", "newline", "write-u8",
-                                                "write-bytevector"};
+    static const char *const write_exports[] = {"display", "write", "write-shared", "write-simple",
+                                                "newline", "write-u8", "write-bytevector"};
     static const char *const read_exports[] = {"read",           "read-char",      "peek-char",
                                                "read-u8",        "peek-u8",         "read-bytevector",
                                                "read-bytevector!", "u8-ready?",     "eof-object",
                                                "eof-object?"};
     static const char *const cxr_exports[] = {"caar", "cadr", "cdar", "cddr"};
     static const char *const char_exports[] = {
-        "char?",           "char=?",          "char<?",          "char-ci=?",
+        "char?",           "char=?",          "char<?",          "char<=?",
+        "char>?",          "char>=?",         "char-ci=?",
         "char-ci<?",       "char-ci<=?",      "char-ci>?",       "char-ci>=?",
         "char-alphabetic?", "char-numeric?",  "char-whitespace?",
         "char-upper-case?", "char-lower-case?",
-        "char-upcase",     "char-downcase",  "digit-value",
+        "char-upcase",     "char-downcase",  "char-foldcase", "digit-value",
         "char->integer",   "integer->char",
         "string-ci=?",     "string-ci<?",     "string-ci<=?",    "string-ci>?",
-        "string-ci>=?",    "string-upcase",   "string-downcase",
+        "string-ci>=?",    "string-upcase",   "string-downcase", "string-foldcase",
     };
     static const char *const process_exports[] = {
         "exit", "emergency-exit", "command-line", "features",

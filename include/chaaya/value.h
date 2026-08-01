@@ -112,7 +112,7 @@ typedef struct ChSymbol {
 typedef struct ChString {
     ChObject header;
     size_t len; /* byte length */
-    char data[]; /* flexible array, null-terminated */
+    char *data; /* heap buffer, null-terminated; freed with the object */
 } ChString;
 
 typedef struct ChVector {
@@ -296,6 +296,8 @@ typedef struct ChComplex {
     ChObject header;
     double real;
     double imag;
+    bool exact_real;
+    bool exact_imag;
 } ChComplex;
 
 typedef struct ChErrorObject {

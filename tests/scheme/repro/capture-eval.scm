@@ -1,0 +1,5 @@
+(import (scheme base))
+(display (let ((x 1))
+            (let ((__hyg_0_x 100))
+              x)))
+(newline)

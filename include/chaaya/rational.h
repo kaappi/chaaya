@@ -14,6 +14,9 @@ ChValue ch_make_rational(ChGC *gc, ChValue num, ChValue den);
 /* Split exact number into numerator/denominator (den=1 for integers). */
 void ch_exact_parts(ChValue v, ChValue *num_out, ChValue *den_out);
 
+/* IEEE-754 flonum → exact integer or rational; CH_UNDEFINED if non-finite. */
+ChValue ch_exact_from_flonum(ChGC *gc, double f);
+
 ChValue ch_exact_add(ChGC *gc, ChValue a, ChValue b);
 ChValue ch_exact_sub(ChGC *gc, ChValue a, ChValue b);
 ChValue ch_exact_mul(ChGC *gc, ChValue a, ChValue b);

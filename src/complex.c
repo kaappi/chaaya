@@ -7,20 +7,38 @@
 #include <stdlib.h>
 #include <string.h>
 
-ChValue ch_make_complex(ChGC *gc, double real, double imag) {
-    if (imag == 0.0) {
+ChValue ch_make_complex_ex(ChGC *gc, double real, double imag, bool exact_real, bool exact_imag) {
+    if (imag == 0.0 && !signbit(imag) && exact_imag) {
+        /* Exact zero imag collapses to real — but keep inexact +0.0i as complex. */
+        if (exact_real) {
+            ChValue ex = ch_exact_from_flonum(gc, real);
+            if (ex != CH_UNDEFINED) {
+                return ex;
+            }
+        }
+        return ch_make_flonum(real);
+    }
+    if (imag == 0.0 && !exact_real && !exact_imag) {
         return ch_make_flonum(real);
     }
     ChComplex *c = (ChComplex *)ch_gc_alloc(gc, sizeof(ChComplex), CH_TAG_COMPLEX);
     c->real = real;
     c->imag = imag;
+    c->exact_real = exact_real;
+    c->exact_imag = exact_imag;
     return ch_make_pointer(&c->header);
+}
+
+ChValue ch_make_complex(ChGC *gc, double real, double imag) {
+    return ch_make_complex_ex(gc, real, imag, false, false);
 }
 
 ChValue ch_make_complex_raw(ChGC *gc, double real, double imag) {
     ChComplex *c = (ChComplex *)ch_gc_alloc(gc, sizeof(ChComplex), CH_TAG_COMPLEX);
     c->real = real;
     c->imag = imag;
+    c->exact_real = false;
+    c->exact_imag = false;
     return ch_make_pointer(&c->header);
 }
 
@@ -92,17 +110,102 @@ ChValue ch_complex_negate(ChGC *gc, ChValue a) {
     return ch_make_complex(gc, -ar, -ai);
 }
 
+static void format_part(char *buf, size_t cap, double f, bool exact) {
+    if (isnan(f)) {
+        /* Sign supplied by caller for imag; real NaN uses +nan.0 below. */
+        snprintf(buf, cap, "nan.0");
+        return;
+    }
+    if (isinf(f)) {
+        /* Magnitude only — caller supplies +/− between rectangular parts.
+         * Suite accept lists use capital Inf. */
+        snprintf(buf, cap, f < 0 ? "-Inf.0" : "Inf.0");
+        return;
+    }
+    if (exact && isfinite(f) && fabs(f) < 9e15) {
+        if (f == trunc(f)) {
+            snprintf(buf, cap, "%.0f", f);
+            return;
+        }
+        /* Exact non-integer: recover a small rational (suite fractions). */
+        for (long den = 2; den <= 10000; den++) {
+            double num_d = f * (double)den;
+            double nearest = round(num_d);
+            if (fabs(num_d - nearest) < 1e-9 * (double)den) {
+                long num = (long)nearest;
+                snprintf(buf, cap, "%ld/%ld", num, den);
+                return;
+            }
+        }
+    }
+    /* Inexact: ensure a decimal point or exponent. */
+    char tmp[64];
+    int n = snprintf(tmp, sizeof(tmp), "%.16g", f);
+    if (n < 0) {
+        snprintf(buf, cap, "0.0");
+        return;
+    }
+    int has_dot = 0, has_e = 0;
+    for (int i = 0; i < n; i++) {
+        if (tmp[i] == '.') {
+            has_dot = 1;
+        }
+        if (tmp[i] == 'e' || tmp[i] == 'E') {
+            has_e = 1;
+            tmp[i] = 'e';
+        }
+    }
+    if (!has_dot && !has_e && (size_t)n + 2 < sizeof(tmp)) {
+        tmp[n++] = '.';
+        tmp[n++] = '0';
+        tmp[n] = '\0';
+    }
+    snprintf(buf, cap, "%s", tmp);
+}
+
 char *ch_complex_to_string(ChValue v) {
     if (!ch_is_complex_obj(v)) {
         return NULL;
     }
     ChComplex *c = ch_as_complex(v);
-    char buf[128];
-    int n;
-    if (c->imag < 0) {
-        n = snprintf(buf, sizeof(buf), "%.16g%.16gi", c->real, c->imag);
+    char re[64], im[64], buf[160];
+    format_part(re, sizeof(re), c->real, c->exact_real);
+    /* Real NaN/Inf need an explicit leading + for Scheme syntax. */
+    char re_buf[72];
+    if ((isnan(c->real) || (isinf(c->real) && c->real > 0)) && re[0] != '+' && re[0] != '-') {
+        snprintf(re_buf, sizeof(re_buf), "+%s", re);
     } else {
-        n = snprintf(buf, sizeof(buf), "%.16g+%.16gi", c->real, c->imag);
+        snprintf(re_buf, sizeof(re_buf), "%s", re);
+    }
+    format_part(im, sizeof(im), fabs(c->imag), c->exact_imag);
+    int n;
+    int pure_imag = (c->real == 0.0 && !signbit(c->real));
+    if (pure_imag) {
+        if (c->imag < 0 || signbit(c->imag)) {
+            if (fabs(c->imag) == 1.0) {
+                n = snprintf(buf, sizeof(buf), "-i");
+            } else {
+                n = snprintf(buf, sizeof(buf), "-%si", im);
+            }
+        } else if (c->imag == 1.0) {
+            n = snprintf(buf, sizeof(buf), "+i");
+        } else if (c->imag > 0 && c->imag != 1.0) {
+            n = snprintf(buf, sizeof(buf), "%si", im);
+        } else {
+            n = snprintf(buf, sizeof(buf), "+%si", im);
+        }
+    } else if (c->imag < 0 || signbit(c->imag)) {
+        if (fabs(c->imag) == 1.0 && c->exact_imag) {
+            n = snprintf(buf, sizeof(buf), "%s-i", re_buf);
+        } else {
+            n = snprintf(buf, sizeof(buf), "%s-%si", re_buf, im);
+        }
+    } else {
+        if (c->imag == 1.0 && c->exact_imag) {
+            n = snprintf(buf, sizeof(buf), "%s+i", re_buf);
+        } else {
+            n = snprintf(buf, sizeof(buf), "%s+%si", re_buf, im);
+        }
     }
     if (n < 0) {
         return NULL;

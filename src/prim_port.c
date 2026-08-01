@@ -247,6 +247,26 @@ static ChValue prim_output_port_p(ChVM *vm, ChValue *args, int nargs) {
     return (ch_is_port(args[0]) && ch_as_port(args[0])->output) ? CH_TRUE : CH_FALSE;
 }
 
+static ChValue prim_input_port_open_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)nargs;
+    if (!ch_is_port(args[0])) {
+        return CH_FALSE;
+    }
+    ChPort *p = ch_as_port(args[0]);
+    return (p->input && !p->closed) ? CH_TRUE : CH_FALSE;
+}
+
+static ChValue prim_output_port_open_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)nargs;
+    if (!ch_is_port(args[0])) {
+        return CH_FALSE;
+    }
+    ChPort *p = ch_as_port(args[0]);
+    return (p->output && !p->closed) ? CH_TRUE : CH_FALSE;
+}
+
 static ChValue prim_textual_port_p(ChVM *vm, ChValue *args, int nargs) {
     (void)vm;
     (void)nargs;
@@ -460,7 +480,8 @@ static ChValue prim_file_exists_p(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
     struct stat st;
-    return (stat(path, &st) == 0 && S_ISREG(st.st_mode)) ? CH_TRUE : CH_FALSE;
+    /* R7RS: any filesystem object that exists, including directories. */
+    return (stat(path, &st) == 0) ? CH_TRUE : CH_FALSE;
 }
 
 static ChValue prim_delete_file(ChVM *vm, ChValue *args, int nargs) {
@@ -628,13 +649,13 @@ static ChValue prim_with_output_to_file(ChVM *vm, ChValue *args, int nargs) {
     return result;
 }
 
-static void print_to_port(ChPort *p, ChValue v, bool display) {
+static void print_to_port(ChPort *p, ChValue v, ChPrintMode mode) {
     FILE *f = port_file(p);
     if (f) {
-        ch_print_value(f, v, display);
+        ch_print_value_mode(f, v, mode);
         return;
     }
-    char *s = ch_value_to_string(v, display);
+    char *s = ch_value_to_string_mode(v, mode);
     if (s) {
         port_write_bytes(p, s, strlen(s));
         free(s);
@@ -646,7 +667,7 @@ static ChValue prim_display(ChVM *vm, ChValue *args, int nargs) {
     if (!p) {
         return CH_UNDEFINED;
     }
-    print_to_port(p, args[0], true);
+    print_to_port(p, args[0], CH_PRINT_DISPLAY);
     return CH_VOID;
 }
 
@@ -655,7 +676,25 @@ static ChValue prim_write(ChVM *vm, ChValue *args, int nargs) {
     if (!p) {
         return CH_UNDEFINED;
     }
-    print_to_port(p, args[0], false);
+    print_to_port(p, args[0], CH_PRINT_WRITE);
+    return CH_VOID;
+}
+
+static ChValue prim_write_shared(ChVM *vm, ChValue *args, int nargs) {
+    ChPort *p = require_output_port(vm, args, nargs, 1);
+    if (!p) {
+        return CH_UNDEFINED;
+    }
+    print_to_port(p, args[0], CH_PRINT_SHARED);
+    return CH_VOID;
+}
+
+static ChValue prim_write_simple(ChVM *vm, ChValue *args, int nargs) {
+    ChPort *p = require_output_port(vm, args, nargs, 1);
+    if (!p) {
+        return CH_UNDEFINED;
+    }
+    print_to_port(p, args[0], CH_PRINT_SIMPLE);
     return CH_VOID;
 }
 
@@ -684,16 +723,75 @@ static int port_read_byte(ChPort *p) {
     return (unsigned char)p->buf[p->pos++];
 }
 
+static int utf8_seq_len(unsigned char b0) {
+    if (b0 < 0x80) {
+        return 1;
+    }
+    if ((b0 & 0xE0) == 0xC0) {
+        return 2;
+    }
+    if ((b0 & 0xF0) == 0xE0) {
+        return 3;
+    }
+    if ((b0 & 0xF8) == 0xF0) {
+        return 4;
+    }
+    return -1;
+}
+
+static int port_decode_utf8_at(ChPort *p, size_t pos, uint32_t *cp_out, size_t *next_out) {
+    if (ensure_port_input_byte(p) <= 0 && pos >= p->len) {
+        return -1;
+    }
+    if (pos >= p->len) {
+        return -1;
+    }
+    unsigned char b0 = (unsigned char)p->buf[pos];
+    int n = utf8_seq_len(b0);
+    if (n < 0) {
+        return -1;
+    }
+    while (pos + (size_t)n > p->len) {
+        int ready = ensure_port_input_byte(p);
+        if (ready < 0) {
+            return -1;
+        }
+        if (ready == 0) {
+            break;
+        }
+    }
+    if (pos + (size_t)n > p->len) {
+        return -1;
+    }
+    uint32_t cp = 0;
+    if (n == 1) {
+        cp = b0;
+    } else if (n == 2) {
+        cp = ((uint32_t)(b0 & 0x1F) << 6) | ((unsigned char)p->buf[pos + 1] & 0x3F);
+    } else if (n == 3) {
+        cp = ((uint32_t)(b0 & 0x0F) << 12) | (((unsigned char)p->buf[pos + 1] & 0x3F) << 6) |
+             ((unsigned char)p->buf[pos + 2] & 0x3F);
+    } else {
+        cp = ((uint32_t)(b0 & 0x07) << 18) | (((unsigned char)p->buf[pos + 1] & 0x3F) << 12) |
+             (((unsigned char)p->buf[pos + 2] & 0x3F) << 6) | ((unsigned char)p->buf[pos + 3] & 0x3F);
+    }
+    *cp_out = cp;
+    *next_out = pos + (size_t)n;
+    return 0;
+}
+
 static ChValue prim_read_char(ChVM *vm, ChValue *args, int nargs) {
     ChPort *p = require_input_port(vm, args, nargs, 0);
     if (!p) {
         return CH_UNDEFINED;
     }
-    int c = port_read_byte(p);
-    if (c < 0) {
+    uint32_t cp = 0;
+    size_t next = 0;
+    if (port_decode_utf8_at(p, p->pos, &cp, &next) != 0) {
         return CH_EOF_OBJ;
     }
-    return ch_make_char((uint32_t)c);
+    p->pos = next;
+    return ch_make_char(cp);
 }
 
 static ChValue prim_peek_char(ChVM *vm, ChValue *args, int nargs) {
@@ -701,11 +799,233 @@ static ChValue prim_peek_char(ChVM *vm, ChValue *args, int nargs) {
     if (!p) {
         return CH_UNDEFINED;
     }
-    int c = port_peek_byte(p);
-    if (c < 0) {
+    uint32_t cp = 0;
+    size_t next = 0;
+    if (port_decode_utf8_at(p, p->pos, &cp, &next) != 0) {
         return CH_EOF_OBJ;
     }
-    return ch_make_char((uint32_t)c);
+    return ch_make_char(cp);
+}
+
+static ChValue prim_char_ready_p(ChVM *vm, ChValue *args, int nargs) {
+    ChPort *p = require_input_port(vm, args, nargs, 0);
+    if (!p) {
+        return CH_UNDEFINED;
+    }
+    int ready = ensure_port_input_byte(p);
+    if (ready < 0) {
+        return CH_UNDEFINED;
+    }
+    return ready > 0 ? CH_TRUE : CH_FALSE;
+}
+
+static ChValue prim_write_char(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 1 || !ch_is_char(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "write-char: expected char");
+        return CH_UNDEFINED;
+    }
+    ChPort *p = require_output_port(vm, args, nargs, 1);
+    if (!p) {
+        return CH_UNDEFINED;
+    }
+    uint32_t cp = ch_to_char(args[0]);
+    char encoded[4];
+    size_t n = 0;
+    if (cp <= 0x7Fu) {
+        encoded[0] = (char)cp;
+        n = 1;
+    } else if (cp <= 0x7FFu) {
+        encoded[0] = (char)(0xC0u | (cp >> 6));
+        encoded[1] = (char)(0x80u | (cp & 0x3Fu));
+        n = 2;
+    } else if (cp <= 0xFFFFu) {
+        encoded[0] = (char)(0xE0u | (cp >> 12));
+        encoded[1] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        encoded[2] = (char)(0x80u | (cp & 0x3Fu));
+        n = 3;
+    } else if (cp <= 0x10FFFFu) {
+        encoded[0] = (char)(0xF0u | (cp >> 18));
+        encoded[1] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+        encoded[2] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        encoded[3] = (char)(0x80u | (cp & 0x3Fu));
+        n = 4;
+    } else {
+        snprintf(vm->error, sizeof(vm->error), "write-char: invalid character");
+        return CH_UNDEFINED;
+    }
+    if (port_write_bytes(p, encoded, n) != 0) {
+        snprintf(vm->error, sizeof(vm->error), "write-char: write failed");
+        return CH_UNDEFINED;
+    }
+    return CH_VOID;
+}
+
+static ChValue prim_write_string(ChVM *vm, ChValue *args, int nargs) {
+    /* (write-string string [port [start [end]]]) — start/end are byte offsets. */
+    if (nargs < 1 || !ch_is_string(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "write-string: expected string");
+        return CH_UNDEFINED;
+    }
+    ChPort *p = require_output_port(vm, args, nargs, 1);
+    if (!p) {
+        return CH_UNDEFINED;
+    }
+    ChString *s = ch_as_string(args[0]);
+    size_t start = 0;
+    size_t end = s->len;
+    int range_arg = (nargs > 1 && ch_is_port(args[1])) ? 2 : 1;
+    if (nargs > range_arg) {
+        if (!ch_is_fixnum(args[range_arg])) {
+            snprintf(vm->error, sizeof(vm->error), "write-string: bad start");
+            return CH_UNDEFINED;
+        }
+        int64_t st = ch_to_fixnum(args[range_arg]);
+        if (st < 0 || (size_t)st > s->len) {
+            snprintf(vm->error, sizeof(vm->error), "write-string: start out of range");
+            return CH_UNDEFINED;
+        }
+        start = (size_t)st;
+    }
+    if (nargs > range_arg + 1) {
+        if (!ch_is_fixnum(args[range_arg + 1])) {
+            snprintf(vm->error, sizeof(vm->error), "write-string: bad end");
+            return CH_UNDEFINED;
+        }
+        int64_t en = ch_to_fixnum(args[range_arg + 1]);
+        if (en < (int64_t)start || (size_t)en > s->len) {
+            snprintf(vm->error, sizeof(vm->error), "write-string: end out of range");
+            return CH_UNDEFINED;
+        }
+        end = (size_t)en;
+    }
+    if (end > start && port_write_bytes(p, s->data + start, end - start) != 0) {
+        snprintf(vm->error, sizeof(vm->error), "write-string: write failed");
+        return CH_UNDEFINED;
+    }
+    return CH_VOID;
+}
+
+static ChValue prim_read_line(ChVM *vm, ChValue *args, int nargs) {
+    ChPort *p = require_input_port(vm, args, nargs, 0);
+    if (!p) {
+        return CH_UNDEFINED;
+    }
+    char *buf = NULL;
+    size_t len = 0;
+    size_t cap = 0;
+    for (;;) {
+        int c = port_read_byte(p);
+        if (c < 0) {
+            if (len == 0) {
+                free(buf);
+                return CH_EOF_OBJ;
+            }
+            break;
+        }
+        if (c == '\n') {
+            break;
+        }
+        if (c == '\r') {
+            if (port_peek_byte(p) == '\n') {
+                (void)port_read_byte(p);
+            }
+            break;
+        }
+        if (len + 1 >= cap) {
+            size_t ncap = cap ? cap * 2 : 64;
+            char *nb = (char *)realloc(buf, ncap);
+            if (!nb) {
+                free(buf);
+                abort();
+            }
+            buf = nb;
+            cap = ncap;
+        }
+        buf[len++] = (char)c;
+    }
+    if (buf) {
+        buf[len] = '\0';
+    }
+    ChValue out = ch_gc_make_string(&vm->gc, buf ? buf : "", len);
+    free(buf);
+    return out;
+}
+
+static ChValue prim_read_string(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 1 || !ch_is_fixnum(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "read-string: expected k");
+        return CH_UNDEFINED;
+    }
+    int64_t k = ch_to_fixnum(args[0]);
+    if (k < 0) {
+        snprintf(vm->error, sizeof(vm->error), "read-string: negative length");
+        return CH_UNDEFINED;
+    }
+    ChPort *p = require_input_port(vm, args, nargs, 1);
+    if (!p) {
+        return CH_UNDEFINED;
+    }
+    if (k == 0) {
+        return ch_gc_make_string(&vm->gc, "", 0);
+    }
+    char *buf = NULL;
+    size_t len = 0;
+    size_t cap = 0;
+    for (int64_t i = 0; i < k; i++) {
+        uint32_t cp = 0;
+        size_t next = 0;
+        if (port_decode_utf8_at(p, p->pos, &cp, &next) != 0) {
+            if (i == 0) {
+                free(buf);
+                return CH_EOF_OBJ;
+            }
+            break;
+        }
+        p->pos = next;
+        char encoded[4];
+        size_t n = next; /* placeholder */
+        /* re-encode from cp */
+        if (cp <= 0x7Fu) {
+            encoded[0] = (char)cp;
+            n = 1;
+        } else if (cp <= 0x7FFu) {
+            encoded[0] = (char)(0xC0u | (cp >> 6));
+            encoded[1] = (char)(0x80u | (cp & 0x3Fu));
+            n = 2;
+        } else if (cp <= 0xFFFFu) {
+            encoded[0] = (char)(0xE0u | (cp >> 12));
+            encoded[1] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+            encoded[2] = (char)(0x80u | (cp & 0x3Fu));
+            n = 3;
+        } else {
+            encoded[0] = (char)(0xF0u | (cp >> 18));
+            encoded[1] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+            encoded[2] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+            encoded[3] = (char)(0x80u | (cp & 0x3Fu));
+            n = 4;
+        }
+        if (len + n >= cap) {
+            size_t ncap = cap ? cap * 2 : 64;
+            while (len + n >= ncap) {
+                ncap *= 2;
+            }
+            char *nb = (char *)realloc(buf, ncap);
+            if (!nb) {
+                free(buf);
+                abort();
+            }
+            buf = nb;
+            cap = ncap;
+        }
+        memcpy(buf + len, encoded, n);
+        len += n;
+    }
+    if (buf) {
+        buf[len] = '\0';
+    }
+    ChValue out = ch_gc_make_string(&vm->gc, buf ? buf : "", len);
+    free(buf);
+    return out;
 }
 
 static int parse_port_slice(ChVM *vm, ChValue *args, int nargs, int start_arg, size_t len, const char *who,
@@ -967,6 +1287,8 @@ void ch_register_port_primitives(ChVM *vm) {
     define_prim(vm, "port?", prim_port_p, 1, 1);
     define_prim(vm, "input-port?", prim_input_port_p, 1, 1);
     define_prim(vm, "output-port?", prim_output_port_p, 1, 1);
+    define_prim(vm, "input-port-open?", prim_input_port_open_p, 1, 1);
+    define_prim(vm, "output-port-open?", prim_output_port_open_p, 1, 1);
     define_prim(vm, "textual-port?", prim_textual_port_p, 1, 1);
     define_prim(vm, "binary-port?", prim_binary_port_p, 1, 1);
     define_prim(vm, "eof-object?", prim_eof_object_p, 1, 1);
@@ -995,6 +1317,11 @@ void ch_register_port_primitives(ChVM *vm) {
     define_prim(vm, "with-output-to-file", prim_with_output_to_file, 2, 2);
     define_prim(vm, "read-char", prim_read_char, -1, 0);
     define_prim(vm, "peek-char", prim_peek_char, -1, 0);
+    define_prim(vm, "char-ready?", prim_char_ready_p, -1, 0);
+    define_prim(vm, "write-char", prim_write_char, -1, 1);
+    define_prim(vm, "write-string", prim_write_string, -1, 1);
+    define_prim(vm, "read-line", prim_read_line, -1, 0);
+    define_prim(vm, "read-string", prim_read_string, -1, 1);
     define_prim(vm, "read-u8", prim_read_u8, -1, 0);
     define_prim(vm, "peek-u8", prim_peek_u8, -1, 0);
     define_prim(vm, "write-u8", prim_write_u8, -1, 1);
@@ -1007,6 +1334,8 @@ void ch_register_port_primitives(ChVM *vm) {
     /* Replace core display/write/newline with port-aware versions. */
     define_prim(vm, "display", prim_display, -1, 1);
     define_prim(vm, "write", prim_write, -1, 1);
+    define_prim(vm, "write-shared", prim_write_shared, -1, 1);
+    define_prim(vm, "write-simple", prim_write_simple, -1, 1);
     define_prim(vm, "newline", prim_newline, -1, 0);
 
     /* Current ports are parameter objects (R7RS dynamic binding). */

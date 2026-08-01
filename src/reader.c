@@ -19,6 +19,10 @@ void ch_reader_init(ChReader *r, ChGC *gc, const char *src, size_t len) {
     r->refill = NULL;
     r->refill_ctx = NULL;
     r->error[0] = '\0';
+    memset(r->label_set, 0, sizeof(r->label_set));
+    for (size_t i = 0; i < CH_READER_MAX_LABELS; i++) {
+        r->labels[i] = CH_UNDEFINED;
+    }
 }
 
 void ch_reader_set_refill(ChReader *r, ChReaderRefillFn refill, void *ctx) {
@@ -75,6 +79,8 @@ static int advance(ChReader *r) {
 }
 
 static ChReadStatus read_datum(ChReader *r, ChValue *out);
+static ChReadStatus fail(ChReader *r, const char *msg);
+static bool is_delim(int c);
 
 static bool is_utf8_lead_byte(int c) {
     unsigned char u = (unsigned char)c;
@@ -105,9 +111,18 @@ static ChReadStatus skip_ws_and_comments(ChReader *r) {
         if (c == '#' && peek_n(r, 1) == ';') {
             advance(r);
             advance(r);
+            /* Nested #; / whitespace first; commenting the dotted-list marker is an
+             * error (R7RS 7.1.1). */
+            ChReadStatus st = skip_ws_and_comments(r);
+            if (st != CH_READ_OK) {
+                return st;
+            }
+            if (peek(r) == '.' && is_delim(peek_n(r, 1))) {
+                return fail(r, "#;: cannot comment dotted-list marker");
+            }
             ChValue ignored = CH_NIL;
             ch_gc_push(r->gc, &ignored);
-            ChReadStatus st = read_datum(r, &ignored);
+            st = read_datum(r, &ignored);
             ch_gc_pop(r->gc);
             if (st == CH_READ_EOF) {
                 snprintf(r->error, sizeof(r->error), "#;: expected datum");
@@ -118,18 +133,38 @@ static ChReadStatus skip_ws_and_comments(ChReader *r) {
             }
             continue;
         }
-        /* #!fold-case / #!no-fold-case directives */
+        /* Nested block comments #| ... |# */
+        if (c == '#' && peek_n(r, 1) == '|') {
+            advance(r);
+            advance(r);
+            int depth = 1;
+            while (depth > 0) {
+                int ch = advance(r);
+                if (ch < 0) {
+                    return fail(r, "unterminated block comment");
+                }
+                if (ch == '#' && peek(r) == '|') {
+                    advance(r);
+                    depth++;
+                } else if (ch == '|' && peek(r) == '#') {
+                    advance(r);
+                    depth--;
+                }
+            }
+            continue;
+        }
+        /* #!fold-case / #!no-fold-case directives (lengths exclude trailing ws) */
         if (c == '#' && peek_n(r, 1) == '!') {
             size_t start = r->pos;
             while (peek(r) >= 0 && peek(r) != '\n' && !isspace((unsigned char)peek(r))) {
                 advance(r);
             }
             size_t n = r->pos - start;
-            if (n == 12 && strncmp(r->src + start, "#!fold-case", 12) == 0) {
+            if (n == 11 && strncmp(r->src + start, "#!fold-case", 11) == 0) {
                 r->fold_case = 1;
                 continue;
             }
-            if (n == 15 && strncmp(r->src + start, "#!no-fold-case", 15) == 0) {
+            if (n == 14 && strncmp(r->src + start, "#!no-fold-case", 14) == 0) {
                 r->fold_case = 0;
                 continue;
             }
@@ -173,6 +208,161 @@ static ChReadStatus fail(ChReader *r, const char *msg) {
     return CH_READ_ERROR;
 }
 
+static bool string_buf_append_bytes(char **buf, size_t *len, size_t *cap, const char *bytes,
+                                    size_t n) {
+    if (*len + n >= *cap) {
+        size_t ncap = *cap ? *cap : 64;
+        while (*len + n >= ncap) {
+            ncap *= 2;
+        }
+        char *nb = (char *)realloc(*buf, ncap);
+        if (!nb) {
+            return false;
+        }
+        *buf = nb;
+        *cap = ncap;
+    }
+    memcpy(*buf + *len, bytes, n);
+    *len += n;
+    return true;
+}
+
+static bool string_buf_append_cp(char **buf, size_t *len, size_t *cap, uint32_t cp) {
+    char encoded[4];
+    size_t n = 0;
+    if (cp <= 0x7Fu) {
+        encoded[0] = (char)cp;
+        n = 1;
+    } else if (cp <= 0x7FFu) {
+        encoded[0] = (char)(0xC0u | (cp >> 6));
+        encoded[1] = (char)(0x80u | (cp & 0x3Fu));
+        n = 2;
+    } else if (cp >= 0xD800 && cp <= 0xDFFF) {
+        return false;
+    } else if (cp <= 0xFFFFu) {
+        encoded[0] = (char)(0xE0u | (cp >> 12));
+        encoded[1] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        encoded[2] = (char)(0x80u | (cp & 0x3Fu));
+        n = 3;
+    } else if (cp <= 0x10FFFFu) {
+        encoded[0] = (char)(0xF0u | (cp >> 18));
+        encoded[1] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+        encoded[2] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        encoded[3] = (char)(0x80u | (cp & 0x3Fu));
+        n = 4;
+    } else {
+        return false;
+    }
+    return string_buf_append_bytes(buf, len, cap, encoded, n);
+}
+
+/* Decode a \ escape shared by strings and |delimited| identifiers.
+ * On success appends into buf (unless use_cp ends up 0 for intraline ws). */
+static ChReadStatus read_escape_into(ChReader *r, char **buf, size_t *len, size_t *cap,
+                                     const char *what) {
+    int e = advance(r);
+    if (e < 0) {
+        return fail(r, "unterminated escape");
+    }
+    uint32_t cp = 0;
+    int use_cp = 1;
+    switch (e) {
+    case 'a':
+        cp = 0x07;
+        break;
+    case 'b':
+        cp = 0x08;
+        break;
+    case 't':
+        cp = '\t';
+        break;
+    case 'n':
+        cp = '\n';
+        break;
+    case 'r':
+        cp = '\r';
+        break;
+    case '|':
+        cp = '|';
+        break;
+    case '\\':
+        cp = '\\';
+        break;
+    case '"':
+        cp = '"';
+        break;
+    case 'x':
+    case 'X': {
+        uint32_t hex = 0;
+        int digits = 0;
+        for (;;) {
+            int dch = peek(r);
+            if (dch < 0) {
+                return fail(r, "unterminated hex escape");
+            }
+            if (dch == ';') {
+                advance(r);
+                break;
+            }
+            int d = -1;
+            if (dch >= '0' && dch <= '9') {
+                d = dch - '0';
+            } else if (dch >= 'a' && dch <= 'f') {
+                d = dch - 'a' + 10;
+            } else if (dch >= 'A' && dch <= 'F') {
+                d = dch - 'A' + 10;
+            }
+            if (d < 0) {
+                return fail(r, "bad hex escape");
+            }
+            advance(r);
+            if (digits >= 8 || hex > 0x10FFFF) {
+                return fail(r, "hex escape out of range");
+            }
+            hex = (hex << 4) | (uint32_t)d;
+            digits++;
+        }
+        if (digits == 0 || hex > 0x10FFFF) {
+            return fail(r, "bad hex escape");
+        }
+        cp = hex;
+        break;
+    }
+    default:
+        /* Intraline whitespace: \<ws>*<line ending><ws>* (strings only, but harmless in idents) */
+        if (e == ' ' || e == '\t' || e == '\n' || e == '\r') {
+            int ch = e;
+            while (ch == ' ' || ch == '\t') {
+                ch = advance(r);
+                if (ch < 0) {
+                    return fail(r, "unterminated escape");
+                }
+            }
+            if (ch == '\r') {
+                if (peek(r) == '\n') {
+                    advance(r);
+                }
+            } else if (ch != '\n') {
+                (void)what;
+                return fail(r, "bad escape");
+            }
+            while (peek(r) == ' ' || peek(r) == '\t') {
+                advance(r);
+            }
+            use_cp = 0;
+            break;
+        }
+        (void)what;
+        return fail(r, "bad escape");
+    }
+    if (use_cp) {
+        if (!string_buf_append_cp(buf, len, cap, cp)) {
+            return fail(r, "bad escape");
+        }
+    }
+    return CH_READ_OK;
+}
+
 static ChReadStatus read_string(ChReader *r, ChValue *out) {
     advance(r); /* skip " */
     size_t cap = 64;
@@ -184,42 +374,19 @@ static ChReadStatus read_string(ChReader *r, ChValue *out) {
     while (peek(r) >= 0 && peek(r) != '"') {
         int c = advance(r);
         if (c == '\\') {
-            int e = advance(r);
-            if (e < 0) {
+            ChReadStatus st = read_escape_into(r, &buf, &len, &cap, "string");
+            if (st != CH_READ_OK) {
                 free(buf);
-                return fail(r, "unterminated string escape");
+                return st;
             }
-            switch (e) {
-            case 'n':
-                c = '\n';
-                break;
-            case 't':
-                c = '\t';
-                break;
-            case 'r':
-                c = '\r';
-                break;
-            case '\\':
-                c = '\\';
-                break;
-            case '"':
-                c = '"';
-                break;
-            default:
-                c = e;
-                break;
-            }
+            continue;
         }
-        if (len + 1 >= cap) {
-            cap *= 2;
-            char *nb = (char *)realloc(buf, cap);
-            if (!nb) {
-                free(buf);
-                return fail(r, "out of memory");
-            }
-            buf = nb;
+        /* Copy raw UTF-8 lead/continuation as bytes. */
+        char raw = (char)c;
+        if (!string_buf_append_bytes(&buf, &len, &cap, &raw, 1)) {
+            free(buf);
+            return fail(r, "out of memory");
         }
-        buf[len++] = (char)c;
     }
     if (peek(r) != '"') {
         free(buf);
@@ -227,6 +394,49 @@ static ChReadStatus read_string(ChReader *r, ChValue *out) {
     }
     advance(r);
     *out = ch_gc_make_string(r->gc, buf, len);
+    free(buf);
+    return CH_READ_OK;
+}
+
+/* R7RS |...| identifiers with the same \ escapes as strings. */
+static ChReadStatus read_delimited_identifier(ChReader *r, ChValue *out) {
+    advance(r); /* skip opening | */
+    size_t cap = 64;
+    size_t len = 0;
+    char *buf = (char *)malloc(cap);
+    if (!buf) {
+        return fail(r, "out of memory");
+    }
+    while (peek(r) >= 0 && peek(r) != '|') {
+        int c = advance(r);
+        if (c == '\\') {
+            ChReadStatus st = read_escape_into(r, &buf, &len, &cap, "identifier");
+            if (st != CH_READ_OK) {
+                free(buf);
+                return st;
+            }
+            continue;
+        }
+        char raw = (char)c;
+        if (!string_buf_append_bytes(&buf, &len, &cap, &raw, 1)) {
+            free(buf);
+            return fail(r, "out of memory");
+        }
+    }
+    if (peek(r) != '|') {
+        free(buf);
+        return fail(r, "unterminated identifier");
+    }
+    advance(r);
+    if (r->fold_case) {
+        for (size_t i = 0; i < len; i++) {
+            unsigned char ch = (unsigned char)buf[i];
+            if (ch < 0x80) {
+                buf[i] = (char)tolower(ch);
+            }
+        }
+    }
+    *out = ch_gc_intern_symbol(r->gc, buf, len);
     free(buf);
     return CH_READ_OK;
 }
@@ -265,6 +475,17 @@ static bool imag_literal_is_inexact(const char *text, size_t split, size_t body)
     return false;
 }
 
+static bool part_text_is_inexact(const char *text, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        char c = text[i];
+        if (c == '.' || c == 'e' || c == 'E' || c == 's' || c == 'S' || c == 'f' || c == 'F' ||
+            c == 'd' || c == 'D' || c == 'l' || c == 'L') {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool try_parse_complex(ChGC *gc, const char *text, size_t len, ChValue *out) {
     if (len < 2) {
         return false;
@@ -275,7 +496,7 @@ static bool try_parse_complex(ChGC *gc, const char *text, size_t len, ChValue *o
     }
     /* +i / -i */
     if (len == 2 && (text[0] == '+' || text[0] == '-')) {
-        *out = ch_make_complex(gc, 0.0, text[0] == '+' ? 1.0 : -1.0);
+        *out = ch_make_complex_ex(gc, 0.0, text[0] == '+' ? 1.0 : -1.0, true, true);
         return true;
     }
     size_t body = len - 1; /* strip trailing i */
@@ -288,51 +509,244 @@ static bool try_parse_complex(ChGC *gc, const char *text, size_t len, ChValue *o
     }
     double real = 0.0;
     double imag = 0.0;
+    bool exact_re = true;
+    bool exact_im = true;
     if (split == 0) {
         /* Pure imaginary: Ni, +Ni, -Ni */
         if (!try_parse_real_f64(gc, text, body, &imag)) {
             return false;
         }
+        exact_im = !part_text_is_inexact(text, body);
+        exact_re = true;
     } else {
         size_t ilen = body - split;
         if (!try_parse_real_f64(gc, text, split, &real)) {
             return false;
         }
+        exact_re = !part_text_is_inexact(text, split);
         if (ilen == 1) {
             imag = text[split] == '+' ? 1.0 : -1.0;
+            exact_im = true;
         } else if (!try_parse_real_f64(gc, text + split, ilen, &imag)) {
             return false;
+        } else {
+            exact_im = !part_text_is_inexact(text + split, ilen);
         }
     }
     if (imag == 0.0 && imag_literal_is_inexact(text, split, body)) {
         *out = ch_make_complex_raw(gc, real, imag);
     } else {
-        *out = ch_make_complex(gc, real, imag);
+        *out = ch_make_complex_ex(gc, real, imag, exact_re, exact_im);
     }
     return true;
 }
 
+static int eq_ci_n(const char *a, const char *b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (tolower((unsigned char)a[i]) != tolower((unsigned char)b[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static bool try_parse_special_flonum(const char *text, size_t len, ChValue *out) {
-    if (len == 6 && memcmp(text, "+inf.0", 6) == 0) {
+    if (len == 6 && text[0] == '+' && eq_ci_n(text + 1, "inf.0", 5)) {
         *out = ch_make_flonum(INFINITY);
         return true;
     }
-    if (len == 6 && memcmp(text, "-inf.0", 6) == 0) {
+    if (len == 6 && text[0] == '-' && eq_ci_n(text + 1, "inf.0", 5)) {
         *out = ch_make_flonum(-INFINITY);
         return true;
     }
-    if (len == 6 && memcmp(text, "+nan.0", 6) == 0) {
+    if (len == 6 && text[0] == '+' && eq_ci_n(text + 1, "nan.0", 5)) {
         *out = ch_make_flonum(NAN);
         return true;
     }
-    if (len == 6 && memcmp(text, "-nan.0", 6) == 0) {
+    if (len == 6 && text[0] == '-' && eq_ci_n(text + 1, "nan.0", 5)) {
         *out = ch_make_flonum(NAN);
         return true;
     }
     return false;
 }
 
+static int hex_digit(int c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+static int digit_in_base(int c, int base) {
+    int d = hex_digit(c);
+    if (d < 0 || d >= base) {
+        return -1;
+    }
+    return d;
+}
+
+/* Parse unsigned integer digits in base into a ChValue integer. */
+static bool parse_uint_base(ChGC *gc, const char *text, size_t len, int base, ChValue *out) {
+    if (len == 0) {
+        return false;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (digit_in_base((unsigned char)text[i], base) < 0) {
+            return false;
+        }
+    }
+    if (base == 10) {
+        ChValue v = ch_bignum_parse_decimal(gc, text, len);
+        if (v == CH_UNDEFINED) {
+            return false;
+        }
+        *out = v;
+        return true;
+    }
+    /* Accumulate via repeated *base + digit (ok for suite-sized literals). */
+    ChValue acc = ch_make_fixnum(0);
+    ChValue b = ch_make_fixnum(base);
+    ch_gc_push(gc, &acc);
+    for (size_t i = 0; i < len; i++) {
+        int d = digit_in_base((unsigned char)text[i], base);
+        acc = ch_bignum_mul(gc, acc, b);
+        acc = ch_bignum_add(gc, acc, ch_make_fixnum(d));
+    }
+    ch_gc_pop(gc);
+    *out = acc;
+    return true;
+}
+
+static bool parse_signed_int_base(ChGC *gc, const char *text, size_t len, int base, ChValue *out) {
+    if (len == 0) {
+        return false;
+    }
+    int neg = 0;
+    size_t i = 0;
+    if (text[0] == '+' || text[0] == '-') {
+        neg = (text[0] == '-');
+        i = 1;
+    }
+    if (i >= len) {
+        return false;
+    }
+    ChValue mag;
+    if (!parse_uint_base(gc, text + i, len - i, base, &mag)) {
+        return false;
+    }
+    if (neg) {
+        mag = ch_bignum_negate(gc, mag);
+    }
+    *out = mag;
+    return true;
+}
+
+/* Decimal real with optional exponent markers e/s/f/d/l (any case). */
+static bool parse_decimal_real(ChGC *gc, const char *text, size_t len, ChValue *out) {
+    (void)gc;
+    if (len == 0) {
+        return false;
+    }
+    if (try_parse_special_flonum(text, len, out)) {
+        return true;
+    }
+    char *tmp = (char *)malloc(len + 1);
+    if (!tmp) {
+        return false;
+    }
+    memcpy(tmp, text, len);
+    tmp[len] = '\0';
+    /* Normalize Scheme exponent markers to 'e' for strtod. */
+    for (size_t i = 0; i < len; i++) {
+        char c = tmp[i];
+        if (c == 's' || c == 'S' || c == 'f' || c == 'F' || c == 'd' || c == 'D' || c == 'l' ||
+            c == 'L' || c == 'e' || c == 'E') {
+            /* Only treat as exponent if followed by optional sign + digit. */
+            size_t j = i + 1;
+            if (j < len && (tmp[j] == '+' || tmp[j] == '-')) {
+                j++;
+            }
+            if (j < len && isdigit((unsigned char)tmp[j])) {
+                tmp[i] = 'e';
+            }
+        }
+    }
+    char *end = NULL;
+    double dv = strtod(tmp, &end);
+    int ok = (end && *end == '\0');
+    free(tmp);
+    if (!ok) {
+        return false;
+    }
+    *out = ch_make_flonum(dv);
+    return true;
+}
+
+static bool try_parse_number_in_base(ChGC *gc, const char *text, size_t len, int base, ChValue *out);
+
 static bool try_parse_number(ChGC *gc, const char *text, size_t len, ChValue *out) {
+    if (len == 0) {
+        return false;
+    }
+    /* Strip stacked R7RS numeric prefixes. */
+    int force_exact = 0;
+    int force_inexact = 0;
+    int base = 10;
+    size_t pos = 0;
+    while (pos + 2 <= len && text[pos] == '#') {
+        char p = text[pos + 1];
+        if (p == 'e' || p == 'E') {
+            force_exact = 1;
+            force_inexact = 0;
+            pos += 2;
+        } else if (p == 'i' || p == 'I') {
+            force_inexact = 1;
+            force_exact = 0;
+            pos += 2;
+        } else if (p == 'b' || p == 'B') {
+            base = 2;
+            pos += 2;
+        } else if (p == 'o' || p == 'O') {
+            base = 8;
+            pos += 2;
+        } else if (p == 'd' || p == 'D') {
+            base = 10;
+            pos += 2;
+        } else if (p == 'x' || p == 'X') {
+            base = 16;
+            pos += 2;
+        } else {
+            break;
+        }
+    }
+    if (pos >= len) {
+        return false;
+    }
+    if (!try_parse_number_in_base(gc, text + pos, len - pos, base, out)) {
+        return false;
+    }
+    if (force_inexact && ch_is_exact(*out)) {
+        *out = ch_make_flonum(ch_exact_to_f64(*out));
+    } else if (force_exact && ch_is_flonum(*out)) {
+        double dv = ch_to_flonum(*out);
+        if (!isfinite(dv)) {
+            return true; /* leave nan/inf as-is under #e (implementation-defined) */
+        }
+        ChValue ex = ch_exact_from_flonum(gc, dv);
+        if (ex != CH_UNDEFINED) {
+            *out = ex;
+        }
+    }
+    return true;
+}
+
+static bool try_parse_number_in_base(ChGC *gc, const char *text, size_t len, int base, ChValue *out) {
     if (len == 0) {
         return false;
     }
@@ -340,15 +754,14 @@ static bool try_parse_number(ChGC *gc, const char *text, size_t len, ChValue *ou
         return true;
     }
     /* special: + - alone are symbols */
-    if ((len == 1 && (text[0] == '+' || text[0] == '-')) ||
-        (len == 1 && text[0] == '.')) {
+    if ((len == 1 && (text[0] == '+' || text[0] == '-')) || (len == 1 && text[0] == '.')) {
         return false;
     }
     /* Complex before rational so 2/4i is pure-imaginary, not a fraction. */
-    if (try_parse_complex(gc, text, len, out)) {
+    if (base == 10 && try_parse_complex(gc, text, len, out)) {
         return true;
     }
-    /* Rational N/D with optional signs */
+    /* Rational N/D */
     const char *slash = NULL;
     for (size_t j = 0; j < len; j++) {
         if (text[j] == '/') {
@@ -362,13 +775,13 @@ static bool try_parse_number(ChGC *gc, const char *text, size_t len, ChValue *ou
         if (nlen == 0 || dlen == 0) {
             return false;
         }
-        ChValue num = ch_bignum_parse_decimal(gc, text, nlen);
-        if (num == CH_UNDEFINED) {
+        ChValue num;
+        ChValue den;
+        if (!parse_signed_int_base(gc, text, nlen, base, &num)) {
             return false;
         }
         ch_gc_push(gc, &num);
-        ChValue den = ch_bignum_parse_decimal(gc, slash + 1, dlen);
-        if (den == CH_UNDEFINED) {
+        if (!parse_signed_int_base(gc, slash + 1, dlen, base, &den)) {
             ch_gc_pop(gc);
             return false;
         }
@@ -381,41 +794,31 @@ static bool try_parse_number(ChGC *gc, const char *text, size_t len, ChValue *ou
         *out = rat;
         return true;
     }
-    /* Exact integer: optional sign + digits only → bignum path (demotes to fixnum). */
-    size_t i = 0;
-    if (text[0] == '+' || text[0] == '-') {
-        i = 1;
-    }
-    int all_digits = (i < len);
-    for (size_t j = i; j < len; j++) {
-        if (text[j] < '0' || text[j] > '9') {
-            all_digits = 0;
-            break;
+    if (base == 10) {
+        /* Exact integer: optional sign + digits only */
+        size_t i = 0;
+        if (text[0] == '+' || text[0] == '-') {
+            i = 1;
         }
-    }
-    if (all_digits) {
-        ChValue v = ch_bignum_parse_decimal(gc, text, len);
-        if (v != CH_UNDEFINED) {
-            *out = v;
-            return true;
+        int all_digits = (i < len);
+        for (size_t j = i; j < len; j++) {
+            if (text[j] < '0' || text[j] > '9') {
+                all_digits = 0;
+                break;
+            }
         }
-        return false;
+        if (all_digits) {
+            ChValue v = ch_bignum_parse_decimal(gc, text, len);
+            if (v != CH_UNDEFINED) {
+                *out = v;
+                return true;
+            }
+            return false;
+        }
+        return parse_decimal_real(gc, text, len, out);
     }
-    char *tmp = (char *)malloc(len + 1);
-    if (!tmp) {
-        return false;
-    }
-    memcpy(tmp, text, len);
-    tmp[len] = '\0';
-    char *end = NULL;
-    double dv = strtod(tmp, &end);
-    if (end && *end == '\0') {
-        *out = ch_make_flonum(dv);
-        free(tmp);
-        return true;
-    }
-    free(tmp);
-    return false;
+    /* Non-decimal integer (optional sign). */
+    return parse_signed_int_base(gc, text, len, base, out);
 }
 
 bool ch_parse_number(ChGC *gc, const char *text, size_t len, ChValue *out) {
@@ -457,6 +860,44 @@ static ChReadStatus read_atom(ChReader *r, ChValue *out) {
             *out = ch_make_char((unsigned char)text[2]);
             return CH_READ_OK;
         }
+        /* #\x⟨hex⟩ or #\x⟨hex⟩; (semicolon optional for Kaappi/Chibi parity) */
+        if (text[2] == 'x' || text[2] == 'X') {
+            size_t i = 3;
+            uint32_t cp = 0;
+            int digits = 0;
+            while (i < len && text[i] != ';') {
+                int d = -1;
+                char c = text[i];
+                if (c >= '0' && c <= '9') {
+                    d = c - '0';
+                } else if (c >= 'a' && c <= 'f') {
+                    d = c - 'a' + 10;
+                } else if (c >= 'A' && c <= 'F') {
+                    d = c - 'A' + 10;
+                }
+                if (d < 0) {
+                    break;
+                }
+                if (digits >= 8 || cp > 0x10FFFF) {
+                    return fail(r, "hex character out of range");
+                }
+                cp = (cp << 4) | (uint32_t)d;
+                digits++;
+                i++;
+            }
+            if (digits == 0) {
+                return fail(r, "empty hex character");
+            }
+            if (i < len && text[i] == ';') {
+                i++;
+            }
+            if (i != len || cp > 0x10FFFF) {
+                return fail(r, "bad hex character");
+            }
+            *out = ch_make_char(cp);
+            return CH_READ_OK;
+        }
+        /* Named characters: len is 2 ("#\") plus name length. */
         if (len == 9 && strncmp(text + 2, "newline", 7) == 0) {
             *out = ch_make_char('\n');
             return CH_READ_OK;
@@ -465,69 +906,61 @@ static ChReadStatus read_atom(ChReader *r, ChValue *out) {
             *out = ch_make_char(' ');
             return CH_READ_OK;
         }
-        if (len == 6 && strncmp(text + 2, "tab", 3) == 0) {
+        if (len == 5 && strncmp(text + 2, "tab", 3) == 0) {
             *out = ch_make_char('\t');
             return CH_READ_OK;
         }
-        /* single named char fallback: take first code unit after #\ */
-        *out = ch_make_char((unsigned char)text[2]);
-        return CH_READ_OK;
-    }
-    if (len >= 3 && text[0] == '#') {
-        char ec = text[1];
-        if (ec == 'e' || ec == 'E' || ec == 'i' || ec == 'I') {
-            ChValue num;
-            if (try_parse_number(r->gc, text + 2, len - 2, &num)) {
-                if (ec == 'e' || ec == 'E') {
-                    if (ch_is_flonum(num)) {
-                        double dv = ch_to_flonum(num);
-                        double ipart;
-                        if (modf(dv, &ipart) == 0.0 && isfinite(dv)) {
-                            *out = ch_make_integer(r->gc, (int64_t)ipart);
-                            return CH_READ_OK;
-                        }
-                    }
-                    *out = num;
-                } else {
-                    if (ch_is_exact(num)) {
-                        *out = ch_make_flonum(ch_exact_to_f64(num));
-                    } else {
-                        *out = num;
-                    }
-                }
+        if (len == 6 && strncmp(text + 2, "null", 4) == 0) {
+            *out = ch_make_char(0);
+            return CH_READ_OK;
+        }
+        if (len == 7 && strncmp(text + 2, "alarm", 5) == 0) {
+            *out = ch_make_char(0x07);
+            return CH_READ_OK;
+        }
+        if (len == 11 && strncmp(text + 2, "backspace", 9) == 0) {
+            *out = ch_make_char(0x08);
+            return CH_READ_OK;
+        }
+        if (len == 8 && strncmp(text + 2, "return", 6) == 0) {
+            *out = ch_make_char(0x0D);
+            return CH_READ_OK;
+        }
+        if (len == 8 && strncmp(text + 2, "escape", 6) == 0) {
+            *out = ch_make_char(0x1B);
+            return CH_READ_OK;
+        }
+        if (len == 8 && strncmp(text + 2, "delete", 6) == 0) {
+            *out = ch_make_char(0x7F);
+            return CH_READ_OK;
+        }
+        /* Multi-byte UTF-8 or named char: take first Unicode scalar after #\ */
+        {
+            const unsigned char *p = (const unsigned char *)(text + 2);
+            size_t rem = len - 2;
+            uint32_t cp = 0;
+            size_t used = 0;
+            if (rem >= 1 && p[0] < 0x80) {
+                cp = p[0];
+                used = 1;
+            } else if (rem >= 2 && (p[0] & 0xE0) == 0xC0) {
+                cp = ((uint32_t)(p[0] & 0x1F) << 6) | (p[1] & 0x3F);
+                used = 2;
+            } else if (rem >= 3 && (p[0] & 0xF0) == 0xE0) {
+                cp = ((uint32_t)(p[0] & 0x0F) << 12) | ((uint32_t)(p[1] & 0x3F) << 6) |
+                     (p[2] & 0x3F);
+                used = 3;
+            } else if (rem >= 4 && (p[0] & 0xF8) == 0xF0) {
+                cp = ((uint32_t)(p[0] & 0x07) << 18) | ((uint32_t)(p[1] & 0x3F) << 12) |
+                     ((uint32_t)(p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+                used = 4;
+            }
+            if (used == rem && cp <= 0x10FFFF) {
+                *out = ch_make_char(cp);
                 return CH_READ_OK;
             }
         }
-        int base = 0;
-        size_t num_start = 2;
-        switch (text[1]) {
-        case 'x':
-        case 'X':
-            base = 16;
-            break;
-        case 'o':
-        case 'O':
-            base = 8;
-            break;
-        case 'b':
-        case 'B':
-            base = 2;
-            break;
-        case 'd':
-        case 'D':
-            base = 10;
-            break;
-        default:
-            break;
-        }
-        if (base != 0) {
-            char *end = NULL;
-            unsigned long long uv = strtoull(text + num_start, &end, base);
-            if (end && (size_t)(end - text) == len) {
-                *out = ch_make_integer(r->gc, (int64_t)uv);
-                return CH_READ_OK;
-            }
-        }
+        return fail(r, "unknown character name");
     }
     ChValue num;
     if (try_parse_number(r->gc, text, len, &num)) {
@@ -776,6 +1209,98 @@ static ChReadStatus read_abbrev(ChReader *r, const char *name, ChValue *out) {
     return CH_READ_OK;
 }
 
+#define CH_DATUM_PATCH_DEPTH 1024
+
+/* Patch leftover placeholder pairs when a label is bound to a non-pair. */
+static void patch_placeholder(ChValue root, ChValue placeholder, ChValue replacement, int depth) {
+    if (depth > CH_DATUM_PATCH_DEPTH || (!ch_is_pair(root) && !ch_is_vector(root))) {
+        return;
+    }
+    if (ch_is_pair(root)) {
+        if (ch_car(root) == placeholder) {
+            ch_set_car(root, replacement);
+        } else {
+            patch_placeholder(ch_car(root), placeholder, replacement, depth + 1);
+        }
+        if (ch_cdr(root) == placeholder) {
+            ch_set_cdr(root, replacement);
+        } else {
+            patch_placeholder(ch_cdr(root), placeholder, replacement, depth + 1);
+        }
+        return;
+    }
+    if (ch_is_vector(root)) {
+        ChVector *vec = ch_as_vector(root);
+        for (size_t i = 0; i < vec->len; i++) {
+            if (vec->items[i] == placeholder) {
+                vec->items[i] = replacement;
+            } else {
+                patch_placeholder(vec->items[i], placeholder, replacement, depth + 1);
+            }
+        }
+    }
+}
+
+static ChReadStatus read_datum_label(ChReader *r, ChValue *out) {
+    /* Caller consumed '#'; next chars are digits then '=' or '#'. */
+    unsigned label = 0;
+    int digits = 0;
+    while (peek(r) >= '0' && peek(r) <= '9') {
+        int d = advance(r) - '0';
+        if (label > (CH_READER_MAX_LABELS - 1) / 10) {
+            return fail(r, "datum label out of range");
+        }
+        label = label * 10u + (unsigned)d;
+        digits++;
+    }
+    if (digits == 0 || label >= CH_READER_MAX_LABELS) {
+        return fail(r, "bad datum label");
+    }
+    int mark = peek(r);
+    if (mark == '#') {
+        advance(r);
+        if (!r->label_set[label]) {
+            return fail(r, "undefined datum label");
+        }
+        *out = r->labels[label];
+        return CH_READ_OK;
+    }
+    if (mark != '=') {
+        return fail(r, "expected = or # after datum label");
+    }
+    advance(r);
+
+    ChValue placeholder = ch_gc_cons(r->gc, CH_VOID, CH_NIL);
+    ch_gc_push(r->gc, &placeholder);
+    r->labels[label] = placeholder;
+    r->label_set[label] = 1;
+
+    ChValue datum = CH_UNDEFINED;
+    ch_gc_push(r->gc, &datum);
+    ChReadStatus st = read_datum(r, &datum);
+    if (st != CH_READ_OK) {
+        ch_gc_pop_n(r->gc, 2);
+        r->label_set[label] = 0;
+        r->labels[label] = CH_UNDEFINED;
+        return st;
+    }
+
+    if (ch_is_pair(datum)) {
+        ch_set_car(placeholder, ch_car(datum));
+        ch_set_cdr(placeholder, ch_cdr(datum));
+        r->labels[label] = placeholder;
+        *out = placeholder;
+        ch_gc_pop_n(r->gc, 2);
+        return CH_READ_OK;
+    }
+
+    r->labels[label] = datum;
+    patch_placeholder(datum, placeholder, datum, 0);
+    *out = datum;
+    ch_gc_pop_n(r->gc, 2);
+    return CH_READ_OK;
+}
+
 static ChReadStatus read_datum(ChReader *r, ChValue *out) {
     ChReadStatus ws = skip_ws_and_comments(r);
     if (ws != CH_READ_OK) {
@@ -807,6 +1332,9 @@ static ChReadStatus read_datum(ChReader *r, ChValue *out) {
     if (c == '"') {
         return read_string(r, out);
     }
+    if (c == '|') {
+        return read_delimited_identifier(r, out);
+    }
     if (c == '#') {
         size_t save = r->pos;
         advance(r);
@@ -816,6 +1344,9 @@ static ChReadStatus read_datum(ChReader *r, ChValue *out) {
         }
         if ((n == 'u' || n == 'U') && peek_n(r, 1) == '8' && peek_n(r, 2) == '(') {
             return read_bytevector(r, out);
+        }
+        if (n >= '0' && n <= '9') {
+            return read_datum_label(r, out);
         }
         r->pos = save;
         return read_atom(r, out);
@@ -836,6 +1367,10 @@ ChReadStatus ch_read_datum(ChReader *r, ChValue *out) {
     }
     if (peek(r) < 0) {
         return CH_READ_EOF;
+    }
+    memset(r->label_set, 0, sizeof(r->label_set));
+    for (size_t i = 0; i < CH_READER_MAX_LABELS; i++) {
+        r->labels[i] = CH_UNDEFINED;
     }
     return read_datum(r, out);
 }

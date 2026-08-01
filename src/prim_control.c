@@ -62,6 +62,16 @@ static ChValue prim_pop_wind(ChVM *vm, ChValue *args, int nargs) {
     return CH_VOID;
 }
 
+static ChValue prim_wind_top_after(ChVM *vm, ChValue *args, int nargs) {
+    (void)args;
+    (void)nargs;
+    if (vm->wind_count == 0) {
+        snprintf(vm->error, sizeof(vm->error), "%%wind-top-after: wind stack empty");
+        return CH_UNDEFINED;
+    }
+    return vm->wind_stack[vm->wind_count - 1].after;
+}
+
 static ChValue prim_with_exception_handler(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
     ChValue handler = args[0];
@@ -102,15 +112,18 @@ static ChValue prim_raise_continuable(ChVM *vm, ChValue *args, int nargs) {
     return ch_vm_raise(vm, args[0], 1);
 }
 
-/* Kaappi-style Scheme dynamic-wind over %push-wind / %pop-wind. */
+/* Kaappi-style Scheme dynamic-wind over %push-wind / %pop-wind.
+ * after is recovered from the wind stack so a register clobber during thunk
+ * (continuation restore / call frame reuse) cannot lose the after thunk. */
 static const char *dynamic_wind_src =
     "(define dynamic-wind\n"
     "  (lambda (before thunk after)\n"
     "    (before)\n"
     "    (%push-wind before after)\n"
-    "    (let ((result (thunk)))\n"
+    "    (let ((result (thunk))\n"
+    "          (after-thunk (%wind-top-after)))\n"
     "      (%pop-wind)\n"
-    "      (after)\n"
+    "      (after-thunk)\n"
     "      result)))\n";
 
 void ch_register_control_primitives(ChVM *vm) {
@@ -118,6 +131,7 @@ void ch_register_control_primitives(ChVM *vm) {
     define_prim(vm, "call-with-current-continuation", prim_call_cc, 1, 1);
     define_prim(vm, "%push-wind", prim_push_wind, 2, 2);
     define_prim(vm, "%pop-wind", prim_pop_wind, 0, 0);
+    define_prim(vm, "%wind-top-after", prim_wind_top_after, 0, 0);
     define_prim(vm, "with-exception-handler", prim_with_exception_handler, 2, 2);
     define_prim(vm, "raise", prim_raise, 1, 1);
     define_prim(vm, "raise-continuable", prim_raise_continuable, 1, 1);

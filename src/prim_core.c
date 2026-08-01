@@ -146,6 +146,10 @@ static ChValue prim_rational_p(ChVM *vm, ChValue *args, int nargs) {
     return ch_is_exact(args[0]) ? CH_TRUE : CH_FALSE;
 }
 
+static ChValue flonum_from_exact_int(ChValue v) {
+    return ch_make_flonum(ch_exact_to_f64(v));
+}
+
 static ChValue prim_numerator(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
     if (ch_is_exact_integer(args[0])) {
@@ -153,6 +157,20 @@ static ChValue prim_numerator(ChVM *vm, ChValue *args, int nargs) {
     }
     if (ch_is_rational_obj(args[0])) {
         return ch_as_rational(args[0])->numerator;
+    }
+    if (ch_is_flonum(args[0])) {
+        double f = ch_to_flonum(args[0]);
+        if (!isfinite(f) || f == trunc(f)) {
+            return args[0];
+        }
+        ChValue exact = ch_exact_from_flonum(&vm->gc, f);
+        if (exact == CH_UNDEFINED) {
+            snprintf(vm->error, sizeof(vm->error), "numerator: expected finite number");
+            return CH_UNDEFINED;
+        }
+        ChValue num, den;
+        ch_exact_parts(exact, &num, &den);
+        return flonum_from_exact_int(num);
     }
     snprintf(vm->error, sizeof(vm->error), "numerator: expected exact number");
     return CH_UNDEFINED;
@@ -165,6 +183,20 @@ static ChValue prim_denominator(ChVM *vm, ChValue *args, int nargs) {
     }
     if (ch_is_rational_obj(args[0])) {
         return ch_as_rational(args[0])->denominator;
+    }
+    if (ch_is_flonum(args[0])) {
+        double f = ch_to_flonum(args[0]);
+        if (!isfinite(f) || f == trunc(f)) {
+            return ch_make_flonum(1.0);
+        }
+        ChValue exact = ch_exact_from_flonum(&vm->gc, f);
+        if (exact == CH_UNDEFINED) {
+            snprintf(vm->error, sizeof(vm->error), "denominator: expected finite number");
+            return CH_UNDEFINED;
+        }
+        ChValue num, den;
+        ch_exact_parts(exact, &num, &den);
+        return flonum_from_exact_int(den);
     }
     snprintf(vm->error, sizeof(vm->error), "denominator: expected exact number");
     return CH_UNDEFINED;
@@ -793,7 +825,7 @@ static ChValue prim_make_rectangular(ChVM *vm, ChValue *args, int nargs) {
         snprintf(vm->error, sizeof(vm->error), "make-rectangular: expected real numbers");
         return CH_UNDEFINED;
     }
-    return ch_make_complex(&vm->gc, re, im);
+    return ch_make_complex_ex(&vm->gc, re, im, ch_is_exact(args[0]), ch_is_exact(args[1]));
 }
 
 static ChValue prim_make_polar(ChVM *vm, ChValue *args, int nargs) {
@@ -815,6 +847,16 @@ static int parts_or_error(ChVM *vm, ChValue v, double *re, double *im, const cha
     return 1;
 }
 
+static ChValue maybe_integral_flonum(ChGC *gc, double f) {
+    if (isfinite(f) && f == trunc(f)) {
+        ChValue e = ch_exact_from_flonum(gc, f);
+        if (e != CH_UNDEFINED) {
+            return e;
+        }
+    }
+    return ch_make_flonum(f);
+}
+
 static ChValue prim_real_part(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
     double re, im;
@@ -823,6 +865,9 @@ static ChValue prim_real_part(ChVM *vm, ChValue *args, int nargs) {
     }
     if (ch_is_exact(args[0])) {
         return args[0];
+    }
+    if (ch_is_complex_obj(args[0])) {
+        return maybe_integral_flonum(&vm->gc, re);
     }
     return ch_make_flonum(re);
 }
@@ -835,6 +880,9 @@ static ChValue prim_imag_part(ChVM *vm, ChValue *args, int nargs) {
     }
     if (ch_is_exact(args[0])) {
         return ch_make_fixnum(0);
+    }
+    if (ch_is_complex_obj(args[0])) {
+        return maybe_integral_flonum(&vm->gc, im);
     }
     return ch_make_flonum(im);
 }

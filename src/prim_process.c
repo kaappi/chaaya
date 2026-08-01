@@ -109,9 +109,9 @@ static ChValue prim_get_environment_variables(ChVM *vm, ChValue *args, int nargs
         ch_gc_push(&vm->gc, &key);
         ChValue val = ch_gc_make_string_cstr(&vm->gc, eq + 1);
         ch_gc_push(&vm->gc, &val);
-        ChValue pair = ch_gc_cons(&vm->gc, val, CH_NIL);
+        /* R7RS: alist of (name . value) dotted pairs. */
+        ChValue pair = ch_gc_cons(&vm->gc, key, val);
         ch_gc_push(&vm->gc, &pair);
-        pair = ch_gc_cons(&vm->gc, key, pair);
         result = ch_gc_cons(&vm->gc, pair, result);
         ch_gc_pop_n(&vm->gc, 3);
     }
@@ -127,9 +127,8 @@ static ChValue prim_get_environment_variables(ChVM *vm, ChValue *args, int nargs
             ch_gc_push(&vm->gc, &key);
             ChValue val = ch_gc_make_string_cstr(&vm->gc, eq + 1);
             ch_gc_push(&vm->gc, &val);
-            ChValue pair = ch_gc_cons(&vm->gc, val, CH_NIL);
+            ChValue pair = ch_gc_cons(&vm->gc, key, val);
             ch_gc_push(&vm->gc, &pair);
-            pair = ch_gc_cons(&vm->gc, key, pair);
             result = ch_gc_cons(&vm->gc, pair, result);
             ch_gc_pop_n(&vm->gc, 3);
         }

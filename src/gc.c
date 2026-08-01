@@ -25,6 +25,11 @@ static void free_object(ChObject *obj) {
         free(vec->items);
         break;
     }
+    case CH_TAG_STRING: {
+        ChString *s = (ChString *)obj;
+        free(s->data);
+        break;
+    }
     case CH_TAG_FUNCTION: {
         ChFunction *fn = (ChFunction *)obj;
         free(fn->code);
@@ -608,10 +613,17 @@ ChValue ch_gc_cons(ChGC *gc, ChValue car, ChValue cdr) {
 }
 
 ChValue ch_gc_make_string(ChGC *gc, const char *bytes, size_t len) {
-    ChString *s = (ChString *)ch_gc_alloc(gc, sizeof(ChString) + len + 1, CH_TAG_STRING);
+    ChString *s = (ChString *)ch_gc_alloc(gc, sizeof(ChString), CH_TAG_STRING);
+    char *buf = (char *)malloc(len + 1);
+    if (!buf) {
+        abort();
+    }
+    if (len > 0) {
+        memcpy(buf, bytes, len);
+    }
+    buf[len] = '\0';
     s->len = len;
-    memcpy(s->data, bytes, len);
-    s->data[len] = '\0';
+    s->data = buf;
     return ch_make_pointer(&s->header);
 }
 

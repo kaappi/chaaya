@@ -47,9 +47,8 @@ Work tracked here intentionally stays **documentation and stubs** until a dedica
 
 - Runner: [`tests/scheme/run_kaappi_deferred.cmake`](../scheme/run_kaappi_deferred.cmake) (mirrors R7RS runner).
 - **Tier 1 enabled (CTest, green):** `sqrt-exact`, `lists`, `vectors`
-- **Tier 2 enabled (CTest, green):** `macro-export-scope`, `chars`, `bytevectors`
-- **Tier 2 blocked (local):** `eval` (eval arity), `lazy` (reentrant `force`)
-- **Next engine work:** nested quasiquote (`,,`) segfault in full `r7rs-tests.scm` (~line 354); SRFI-64 `test-equal` / `guard` interaction in deferred compliance.
+- **Tier 2 enabled (CTest, green):** `macro-export-scope`, `chars`, `bytevectors`, `eval`, `lazy`
+- **Next engine work:** remaining kaappi-deferred smoke/differential trees; further R7RS edge cases as suites expand.
 
 ## LLVM native stub
 

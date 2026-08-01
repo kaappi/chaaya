@@ -148,18 +148,64 @@ static ChValue prim_truncate(ChVM *vm, ChValue *args, int nargs) {
     return ch_make_flonum(trunc(x));
 }
 
+static int is_even_int(ChValue v) {
+    if (ch_is_fixnum(v)) {
+        return (ch_to_fixnum(v) & 1) == 0;
+    }
+    if (ch_is_bignum(v)) {
+        ChBignum *bn = ch_as_bignum(v);
+        return bn->len == 0 || (bn->limbs[0] & 1ULL) == 0;
+    }
+    return 0;
+}
+
+static ChValue rational_round(ChGC *gc, ChValue v) {
+    ChValue num, den;
+    ch_exact_parts(v, &num, &den);
+    ch_gc_push(gc, &num);
+    ch_gc_push(gc, &den);
+    ChValue q = ch_bignum_quotient(gc, num, den);
+    ch_gc_push(gc, &q);
+    ChValue rem = ch_bignum_remainder(gc, num, den);
+    if (is_zero_int(rem)) {
+        ch_gc_pop_n(gc, 3);
+        return q;
+    }
+    ch_gc_push(gc, &rem);
+    ChValue abs_rem = ch_bignum_abs(gc, rem);
+    ch_gc_push(gc, &abs_rem);
+    ChValue double_rem = ch_bignum_mul(gc, abs_rem, ch_make_fixnum(2));
+    int cmp = ch_bignum_compare(double_rem, den);
+    ChValue out = q;
+    if (cmp < 0) {
+        out = q;
+    } else if (cmp > 0) {
+        if (ch_bignum_compare(rem, ch_make_fixnum(0)) < 0) {
+            out = ch_bignum_sub(gc, q, ch_make_fixnum(1));
+        } else {
+            out = ch_bignum_add(gc, q, ch_make_fixnum(1));
+        }
+    } else {
+        /* Exact half — ties to even */
+        if (!is_even_int(q)) {
+            if (ch_bignum_compare(rem, ch_make_fixnum(0)) < 0) {
+                out = ch_bignum_sub(gc, q, ch_make_fixnum(1));
+            } else {
+                out = ch_bignum_add(gc, q, ch_make_fixnum(1));
+            }
+        }
+    }
+    ch_gc_pop_n(gc, 5);
+    return out;
+}
+
 static ChValue prim_round(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
     if (ch_is_exact_integer(args[0])) {
         return args[0];
     }
     if (ch_is_rational_obj(args[0])) {
-        /* floor(x + 1/2) with exact arith */
-        ChValue half = ch_make_rational(&vm->gc, ch_make_fixnum(1), ch_make_fixnum(2));
-        ch_gc_push(&vm->gc, &half);
-        ChValue sum = ch_exact_add(&vm->gc, args[0], half);
-        ch_gc_pop(&vm->gc);
-        return rational_floor(&vm->gc, sum);
+        return rational_round(&vm->gc, args[0]);
     }
     double x;
     if (!require_real(vm, args[0], "round", &x)) {
@@ -168,104 +214,63 @@ static ChValue prim_round(ChVM *vm, ChValue *args, int nargs) {
     return ch_make_flonum(bankers_round(x));
 }
 
-/* ---- exactness ---- */
-
-static ChValue exact_from_flonum(ChGC *gc, double f) {
-    if (!isfinite(f)) {
+static ChValue prim_rationalize(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    double x, y;
+    if (!require_real(vm, args[0], "rationalize", &x) ||
+        !require_real(vm, args[1], "rationalize", &y)) {
         return CH_UNDEFINED;
     }
-    if (f == 0.0) {
-        return ch_make_fixnum(0);
+    if (!isfinite(x)) {
+        return args[0];
     }
-    if (f == trunc(f)) {
-        if (f >= (double)CH_FIXNUM_MIN && f <= (double)CH_FIXNUM_MAX) {
-            return ch_make_fixnum((int64_t)f);
+    double lo = x - fabs(y);
+    double hi = x + fabs(y);
+    int64_t best_num = (int64_t)llround(x);
+    int64_t best_den = 1;
+    double bv = (double)best_num;
+    if (!(bv >= lo && bv <= hi)) {
+        int found = 0;
+        for (int64_t den = 2; den <= 1000000; den++) {
+            double fden = (double)den;
+            int64_t lo_num = (int64_t)ceil(lo * fden);
+            int64_t hi_num = (int64_t)floor(hi * fden);
+            if (lo_num <= hi_num) {
+                best_num = lo_num;
+                best_den = den;
+                found = 1;
+                break;
+            }
         }
-        if (f >= (double)INT64_MIN && f <= (double)INT64_MAX) {
-            return ch_make_integer(gc, (int64_t)f);
-        }
-        /* Fall through to IEEE rational for huge integral floats. */
-    }
-
-    union {
-        double d;
-        uint64_t u;
-    } bits;
-    bits.d = fabs(f);
-    int negative = f < 0;
-    uint64_t u = bits.u;
-    int raw_exp = (int)((u >> 52) & 0x7FF);
-    uint64_t mantissa = (raw_exp == 0) ? (u & 0x000FFFFFFFFFFFFFULL)
-                                       : ((u & 0x000FFFFFFFFFFFFFULL) | 0x0010000000000000ULL);
-    int exp = (raw_exp == 0) ? (1 - 1023 - 52) : (raw_exp - 1023 - 52);
-
-    if (exp >= 0) {
-        /* mantissa * 2^exp */
-        ChValue num = ch_make_integer(gc, 0);
-        /* Build from mantissa via repeated *2^32 chunks if needed — use double path
-         * only when mantissa fits, else shift. */
-        if (mantissa <= (uint64_t)INT64_MAX) {
-            num = ch_make_integer(gc, (int64_t)mantissa);
-        } else {
-            /* two limbs: lo + hi<<32 conceptually; use mul by 2^32 */
-            uint64_t lo = mantissa & 0xFFFFFFFFULL;
-            uint64_t hi = mantissa >> 32;
-            ChValue hi_v = ch_make_integer(gc, (int64_t)hi);
-            ch_gc_push(gc, &hi_v);
-            ChValue shift = ch_make_integer(gc, 1LL << 32);
-            ch_gc_push(gc, &shift);
-            ChValue hi_shifted = ch_bignum_mul(gc, hi_v, shift);
-            ch_gc_pop_n(gc, 2);
-            ch_gc_push(gc, &hi_shifted);
-            ChValue lo_v = ch_make_integer(gc, (int64_t)lo);
-            num = ch_bignum_add(gc, hi_shifted, lo_v);
-            ch_gc_pop(gc);
-        }
-        ch_gc_push(gc, &num);
-        for (int i = 0; i < exp; i++) {
-            num = ch_bignum_add(gc, num, num);
-        }
-        if (negative) {
-            num = ch_bignum_negate(gc, num);
-        }
-        ch_gc_pop(gc);
-        return num;
-    }
-
-    /* mantissa / 2^(-exp) */
-    unsigned neg_exp = (unsigned)(-exp);
-    while ((mantissa & 1ULL) == 0 && neg_exp > 0) {
-        mantissa >>= 1;
-        neg_exp--;
-    }
-    ChValue num;
-    if (mantissa <= (uint64_t)INT64_MAX) {
-        num = ch_make_integer(gc, negative ? -(int64_t)mantissa : (int64_t)mantissa);
-    } else {
-        uint64_t lo = mantissa & 0xFFFFFFFFULL;
-        uint64_t hi = mantissa >> 32;
-        ChValue hi_v = ch_make_integer(gc, (int64_t)hi);
-        ch_gc_push(gc, &hi_v);
-        ChValue shift = ch_make_integer(gc, 1LL << 32);
-        ChValue hi_shifted = ch_bignum_mul(gc, hi_v, shift);
-        ch_gc_pop(gc);
-        ch_gc_push(gc, &hi_shifted);
-        num = ch_bignum_add(gc, hi_shifted, ch_make_integer(gc, (int64_t)lo));
-        ch_gc_pop(gc);
-        if (negative) {
-            num = ch_bignum_negate(gc, num);
+        if (!found) {
+            best_num = (int64_t)llround(x * 1000000.0);
+            best_den = 1000000;
         }
     }
-    ch_gc_push(gc, &num);
-    ChValue den = ch_make_fixnum(1);
-    ch_gc_push(gc, &den);
-    for (unsigned i = 0; i < neg_exp; i++) {
-        den = ch_bignum_add(gc, den, den);
+    {
+        int64_t an = best_num < 0 ? -best_num : best_num;
+        int64_t ad = best_den;
+        while (ad != 0) {
+            int64_t t = an % ad;
+            an = ad;
+            ad = t;
+        }
+        if (an > 1) {
+            best_num /= an;
+            best_den /= an;
+        }
     }
-    ChValue rat = ch_make_rational(gc, num, den);
-    ch_gc_pop_n(gc, 2);
-    return rat;
+    if (ch_is_exact(args[0])) {
+        if (best_den == 1) {
+            return ch_make_integer(&vm->gc, best_num);
+        }
+        return ch_make_rational(&vm->gc, ch_make_integer(&vm->gc, best_num),
+                                ch_make_integer(&vm->gc, best_den));
+    }
+    return ch_make_flonum((double)best_num / (double)best_den);
 }
+
+/* ---- exactness ---- */
 
 static ChValue prim_exact(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
@@ -273,7 +278,7 @@ static ChValue prim_exact(ChVM *vm, ChValue *args, int nargs) {
         return args[0];
     }
     if (ch_is_flonum(args[0])) {
-        ChValue r = exact_from_flonum(&vm->gc, ch_to_flonum(args[0]));
+        ChValue r = ch_exact_from_flonum(&vm->gc, ch_to_flonum(args[0]));
         if (r == CH_UNDEFINED) {
             snprintf(vm->error, sizeof(vm->error), "exact: expected finite number");
         }
@@ -912,6 +917,10 @@ static ChValue prim_sqrt(ChVM *vm, ChValue *args, int nargs) {
     if (ch_is_complex_obj(arg)) {
         double re, im;
         ch_complex_parts(arg, &re, &im);
+        /* Negative real with ±0 imag: principal sqrt is +i * sqrt(|re|). */
+        if (im == 0.0 && re < 0.0) {
+            return ch_make_complex(&vm->gc, 0.0, sqrt(-re));
+        }
         double r = hypot(re, im);
         double theta = atan2(im, re) / 2.0;
         double sr = sqrt(r);
@@ -1204,6 +1213,7 @@ void ch_register_math_primitives(ChVM *vm) {
     define_prim(vm, "ceiling", prim_ceiling, 1, 1);
     define_prim(vm, "truncate", prim_truncate, 1, 1);
     define_prim(vm, "round", prim_round, 1, 1);
+    define_prim(vm, "rationalize", prim_rationalize, 2, 2);
     define_prim(vm, "exact", prim_exact, 1, 1);
     define_prim(vm, "inexact", prim_inexact, 1, 1);
     define_prim(vm, "positive?", prim_positive_p, 1, 1);

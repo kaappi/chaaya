@@ -2,6 +2,7 @@
 
 #include "chaaya/bignum.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -217,6 +218,98 @@ double ch_exact_to_f64(ChValue v) {
         return ch_to_flonum(v);
     }
     return 0.0;
+}
+
+ChValue ch_exact_from_flonum(ChGC *gc, double f) {
+    if (!isfinite(f)) {
+        return CH_UNDEFINED;
+    }
+    if (f == 0.0) {
+        return ch_make_fixnum(0);
+    }
+    if (f == trunc(f)) {
+        if (f >= (double)CH_FIXNUM_MIN && f <= (double)CH_FIXNUM_MAX) {
+            return ch_make_fixnum((int64_t)f);
+        }
+        if (f >= (double)INT64_MIN && f <= (double)INT64_MAX) {
+            return ch_make_integer(gc, (int64_t)f);
+        }
+        /* Fall through to IEEE rational for huge integral floats. */
+    }
+
+    union {
+        double d;
+        uint64_t u;
+    } bits;
+    bits.d = fabs(f);
+    int negative = f < 0;
+    uint64_t u = bits.u;
+    int raw_exp = (int)((u >> 52) & 0x7FF);
+    uint64_t mantissa = (raw_exp == 0) ? (u & 0x000FFFFFFFFFFFFFULL)
+                                       : ((u & 0x000FFFFFFFFFFFFFULL) | 0x0010000000000000ULL);
+    int exp = (raw_exp == 0) ? (1 - 1023 - 52) : (raw_exp - 1023 - 52);
+
+    if (exp >= 0) {
+        ChValue num = ch_make_integer(gc, 0);
+        if (mantissa <= (uint64_t)INT64_MAX) {
+            num = ch_make_integer(gc, (int64_t)mantissa);
+        } else {
+            uint64_t lo = mantissa & 0xFFFFFFFFULL;
+            uint64_t hi = mantissa >> 32;
+            ChValue hi_v = ch_make_integer(gc, (int64_t)hi);
+            ch_gc_push(gc, &hi_v);
+            ChValue shift = ch_make_integer(gc, 1LL << 32);
+            ch_gc_push(gc, &shift);
+            ChValue hi_shifted = ch_bignum_mul(gc, hi_v, shift);
+            ch_gc_pop_n(gc, 2);
+            ch_gc_push(gc, &hi_shifted);
+            ChValue lo_v = ch_make_integer(gc, (int64_t)lo);
+            num = ch_bignum_add(gc, hi_shifted, lo_v);
+            ch_gc_pop(gc);
+        }
+        ch_gc_push(gc, &num);
+        for (int i = 0; i < exp; i++) {
+            num = ch_bignum_add(gc, num, num);
+        }
+        if (negative) {
+            num = ch_bignum_negate(gc, num);
+        }
+        ch_gc_pop(gc);
+        return num;
+    }
+
+    unsigned neg_exp = (unsigned)(-exp);
+    while ((mantissa & 1ULL) == 0 && neg_exp > 0) {
+        mantissa >>= 1;
+        neg_exp--;
+    }
+    ChValue num;
+    if (mantissa <= (uint64_t)INT64_MAX) {
+        num = ch_make_integer(gc, negative ? -(int64_t)mantissa : (int64_t)mantissa);
+    } else {
+        uint64_t lo = mantissa & 0xFFFFFFFFULL;
+        uint64_t hi = mantissa >> 32;
+        ChValue hi_v = ch_make_integer(gc, (int64_t)hi);
+        ch_gc_push(gc, &hi_v);
+        ChValue shift = ch_make_integer(gc, 1LL << 32);
+        ChValue hi_shifted = ch_bignum_mul(gc, hi_v, shift);
+        ch_gc_pop(gc);
+        ch_gc_push(gc, &hi_shifted);
+        num = ch_bignum_add(gc, hi_shifted, ch_make_integer(gc, (int64_t)lo));
+        ch_gc_pop(gc);
+        if (negative) {
+            num = ch_bignum_negate(gc, num);
+        }
+    }
+    ch_gc_push(gc, &num);
+    ChValue den = ch_make_fixnum(1);
+    ch_gc_push(gc, &den);
+    for (unsigned i = 0; i < neg_exp; i++) {
+        den = ch_bignum_add(gc, den, den);
+    }
+    ChValue rat = ch_make_rational(gc, num, den);
+    ch_gc_pop_n(gc, 2);
+    return rat;
 }
 
 char *ch_exact_to_string(ChValue v) {

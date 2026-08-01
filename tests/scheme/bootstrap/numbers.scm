@@ -56,6 +56,10 @@
 (check-eqv "denominator" 2 (denominator 1/2))
 (check-eqv "numerator int" 7 (numerator 7))
 (check-eqv "denominator int" 1 (denominator 7))
+(check-assert "numerator flonum" (= (numerator 5.5) 11.0))
+(check-assert "denominator flonum" (= (denominator 5.5) 2.0))
+(check-assert "denominator inexact rational"
+              (= (denominator (inexact (/ 6 4))) 2.0))
 (check-assert "rat <" (< 1/3 1/2))
 (check-assert "exact? rat" (exact? 3/4))
 (check-assert "not exact-integer? rat" (not (exact-integer? 3/4)))
@@ -75,8 +79,8 @@
 (check-assert "c *" (= (* 1+2i 3+4i) -5+10i))
 (check-assert "c demote" (real? (+ 1+2i 1-2i)))
 (check-assert "= mix" (= (+ 1 2i) 1+2i))
-(check-eqv "real-part" 1.0 (real-part 1+2i))
-(check-eqv "imag-part" 2.0 (imag-part 1+2i))
+(check-eqv "real-part" 1 (real-part 1+2i))
+(check-eqv "imag-part" 2 (imag-part 1+2i))
 (check-assert "magnitude"
               (= (magnitude 3+4i) 5.0))
 (check-assert "make-polar roundtrip"

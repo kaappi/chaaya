@@ -46,9 +46,9 @@ static int import_library_into_env(ChVM *vm, ChEnvironment *env, const char *a, 
 }
 
 static ChValue prim_eval(ChVM *vm, ChValue *args, int nargs) {
-    (void)nargs;
+    ChValue env = (nargs >= 2) ? args[1] : CH_VOID;
     ChValue result = CH_VOID;
-    if (ch_eval_datum(vm, args[0], args[1], &result) != 0) {
+    if (ch_eval_datum(vm, args[0], env, &result) != 0) {
         return CH_UNDEFINED;
     }
     return result;
@@ -308,7 +308,7 @@ static ChValue prim_time_nanosecond(ChVM *vm, ChValue *args, int nargs) {
 }
 
 void ch_register_eval_primitives(ChVM *vm) {
-    define_prim(vm, "eval", prim_eval, 2, 2);
+    define_prim(vm, "eval", prim_eval, -1, 1);
     define_prim(vm, "environment", prim_environment, -1, 0);
     define_prim(vm, "interaction-environment", prim_interaction_environment, 0, 0);
     define_prim(vm, "null-environment", prim_null_environment, 1, 1);

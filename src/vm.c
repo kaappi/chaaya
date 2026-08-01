@@ -120,13 +120,37 @@ static ChVMStatus runtime_error(ChVM *vm, const char *msg) {
     return CH_VM_RUNTIME_ERROR;
 }
 
-static ChVMStatus raise_unbound(ChVM *vm, const char *name, uint8_t dst, ChValue *regs) {
+static ChVMStatus raise_message_to_slot(ChVM *vm, const char *msg, size_t result_slot) {
     if (vm->handler_count == 0) {
-        snprintf(vm->error, sizeof(vm->error), "unbound variable: %s", name);
+        snprintf(vm->error, sizeof(vm->error), "%s", msg);
         return CH_VM_RUNTIME_ERROR;
     }
+    vm->error[0] = '\0';
+    ChValue msgstr = ch_gc_make_string_cstr(&vm->gc, msg);
+    ch_gc_push(&vm->gc, &msgstr);
+    ChValue err = ch_gc_make_error_object(&vm->gc, msgstr, CH_NIL, 0);
+    ch_gc_pop(&vm->gc);
+    ChValue result = ch_vm_raise(vm, err, 0);
+    if (vm->continuation_invoked) {
+        return CH_VM_CONTINUATION_INVOKED;
+    }
+    if (vm->error[0] != '\0') {
+        return CH_VM_RUNTIME_ERROR;
+    }
+    vm->regs[result_slot] = result;
+    if (vm->frame_count == 0) {
+        vm->result = result;
+    }
+    return CH_VM_OK;
+}
+
+static ChVMStatus raise_unbound(ChVM *vm, const char *name, uint8_t dst, ChValue *regs) {
     char buf[256];
     snprintf(buf, sizeof(buf), "unbound variable: %s", name);
+    if (vm->handler_count == 0) {
+        snprintf(vm->error, sizeof(vm->error), "%s", buf);
+        return CH_VM_RUNTIME_ERROR;
+    }
     ChValue msg = ch_gc_make_string_cstr(&vm->gc, buf);
     ch_gc_push(&vm->gc, &msg);
     ChValue err = ch_gc_make_error_object(&vm->gc, msg, CH_NIL, 0);
@@ -424,6 +448,11 @@ static ChVMStatus apply_thunk(ChVM *vm, ChValue thunk) {
 /* After a top-level continuation restore, keep running until the stack empties. */
 static ChVMStatus resume_after_continuation(ChVM *vm, ChVMStatus st) {
     if (st == CH_VM_CONTINUATION_INVOKED) {
+        /* Value already in vm->result from invoke_continuation. If frames
+         * remain, drain them; if already empty, that value is the answer. */
+        if (vm->frame_count == 0) {
+            return CH_VM_OK;
+        }
         return run_until(vm, 0);
     }
     return st;
@@ -559,12 +588,18 @@ ChVMStatus ch_vm_invoke_continuation(ChVM *vm, ChContinuation *cont, ChValue val
     memcpy(vm->wind_stack, cont->winds, cont->wind_count * sizeof(ChWindRecord));
     vm->wind_count = cont->wind_count;
 
+    /* close_all_open_upvalues (above) saved live set! mutations into closed_value.
+     * Prefer those over the register snapshot so mutable bindings persist across
+     * continuation re-entry (R7RS / assignment semantics), then reopen. */
     vm->open_upvalues = NULL;
     for (size_t i = 0; i < cont->open_uv_count; i++) {
         ChUpvalue *uv = cont->open_uvs[i].uv;
         size_t idx = cont->open_uvs[i].reg_index;
         if (idx >= vm->reg_top) {
             continue;
+        }
+        if (uv->is_closed) {
+            vm->regs[idx] = uv->closed_value;
         }
         uv->location = &vm->regs[idx];
         uv->is_closed = false;
@@ -573,6 +608,8 @@ ChVMStatus ch_vm_invoke_continuation(ChVM *vm, ChContinuation *cont, ChValue val
     }
 
     vm->regs[cont->result_slot] = value;
+    /* Top-level / barrier resumes read vm->result when frames are empty. */
+    vm->result = value;
     vm->continuation_invoked = true;
     return CH_VM_CONTINUATION_INVOKED;
 }
@@ -761,8 +798,9 @@ static ChVMStatus run_until(ChVM *vm, size_t target_frames) {
             ChVMStatus st =
                 call_value(vm, regs[base], frame->reg_base + base, nargs, op == CH_OP_TAIL_CALL);
             if (st == CH_VM_CONTINUATION_INVOKED) {
-                /* Nested apply must stop mid-wind; outermost run_until(0) resumes. */
-                if (target_frames > 0) {
+                /* Keep running if the restore is still above our barrier;
+                 * otherwise propagate so ch_vm_apply can deliver regs[base]. */
+                if (vm->frame_count <= target_frames) {
                     return CH_VM_CONTINUATION_INVOKED;
                 }
                 continue;
@@ -866,16 +904,6 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
 
     if (ch_is_native(callee)) {
         ChNative *n = ch_as_native(callee);
-        if (n->arity >= 0 && nargs != n->arity) {
-            snprintf(vm->error, sizeof(vm->error), "%s: expected %d args, got %d", n->name, n->arity,
-                     nargs);
-            return CH_VM_RUNTIME_ERROR;
-        }
-        if (n->arity < 0 && nargs < n->min_arity) {
-            snprintf(vm->error, sizeof(vm->error), "%s: expected at least %d args, got %d", n->name,
-                     n->min_arity, nargs);
-            return CH_VM_RUNTIME_ERROR;
-        }
         ChValue *args = &vm->regs[arg_base + 1];
         size_t result_slot = arg_base;
         if (tail && vm->frame_count > 0) {
@@ -884,6 +912,17 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
             close_upvalues(vm, frame_regs(vm, frame));
             result_slot = frame->reg_base;
             vm->frame_count--;
+        }
+        if (n->arity >= 0 && nargs != n->arity) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "%s: expected %d args, got %d", n->name, n->arity, nargs);
+            return raise_message_to_slot(vm, buf, result_slot);
+        }
+        if (n->arity < 0 && nargs < n->min_arity) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "%s: expected at least %d args, got %d", n->name, n->min_arity,
+                     nargs);
+            return raise_message_to_slot(vm, buf, result_slot);
         }
         vm->native_result_slot = result_slot;
         vm->continuation_invoked = false;
@@ -895,7 +934,9 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
             return CH_VM_CONTINUATION_INVOKED;
         }
         if (vm->error[0] != '\0' && result == CH_UNDEFINED) {
-            return CH_VM_RUNTIME_ERROR;
+            char buf[256];
+            snprintf(buf, sizeof(buf), "%s", vm->error);
+            return raise_message_to_slot(vm, buf, result_slot);
         }
         vm->regs[result_slot] = result;
         if (tail && vm->frame_count == 0) {
@@ -970,7 +1011,11 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
     }
 
     if (!ch_is_closure(callee)) {
-        return runtime_error(vm, "attempt to call non-procedure");
+        char *printed = ch_value_to_string(callee, false);
+        snprintf(vm->error, sizeof(vm->error), "attempt to call non-procedure: %s",
+                 printed ? printed : "#<unknown>");
+        free(printed);
+        return CH_VM_RUNTIME_ERROR;
     }
 
     ChClosure *cl = ch_as_closure(callee);
@@ -1041,44 +1086,100 @@ ChVMStatus ch_vm_apply(ChVM *vm, ChValue proc, ChValue *args, int nargs, ChValue
     vm->reg_top = base + 1 + (size_t)nargs;
 
     ChVMStatus st = call_value(vm, proc, base, nargs, false);
-    if (st != CH_VM_OK) {
-        return st;
-    }
-    if (vm->frame_count > saved_frames) {
-        st = run_until(vm, saved_frames);
+    for (;;) {
+        if (st == CH_VM_CONTINUATION_INVOKED) {
+            if (vm->frame_count < saved_frames) {
+                /* Escaped past this apply. */
+                return CH_VM_CONTINUATION_INVOKED;
+            }
+            if (vm->frame_count == saved_frames) {
+                /* Landed at our barrier; invoke_continuation set vm->result. */
+                *out = vm->result;
+                return CH_VM_OK;
+            }
+            /* Re-entered above us — keep running until we settle. */
+            st = run_until(vm, saved_frames);
+            continue;
+        }
         if (st != CH_VM_OK) {
             return st;
         }
+        if (vm->frame_count > saved_frames) {
+            st = run_until(vm, saved_frames);
+            continue;
+        }
+        break;
     }
     *out = vm->regs[base];
     return CH_VM_OK;
 }
 
 ChVMStatus ch_vm_eval_function(ChVM *vm, ChFunction *fn, ChValue *out) {
+    /* Save caller execution state so nested (eval ...) does not wipe frames. */
+    size_t saved_frames = vm->frame_count;
+    size_t saved_reg_top = vm->reg_top;
+    size_t saved_winds = vm->wind_count;
+    size_t saved_handlers = vm->handler_count;
+    size_t saved_params = vm->parameter_count;
+    ChValue saved_result = vm->result;
+    bool saved_cont = vm->continuation_invoked;
+
     size_t gcount = vm->global_count;
     ChValue fn_v = ch_make_pointer(&fn->header);
+    ChValue cl_v = CH_FALSE;
     ch_gc_push(&vm->gc, &fn_v);
+    ch_gc_push(&vm->gc, &cl_v);
     for (size_t i = 0; i < gcount; i++) {
         ch_gc_push(&vm->gc, &vm->globals[i].value);
     }
-    ChValue cl_v = ch_gc_make_closure(&vm->gc, ch_as_function(fn_v), NULL);
-    /* Install closure in regs before dropping roots so a GC cannot collect it. */
-    vm->reg_top = 1;
-    vm->frame_count = 0;
-    vm->wind_count = 0;
-    vm->handler_count = 0;
-    vm->parameter_count = 0;
+    cl_v = ch_gc_make_closure(&vm->gc, ch_as_function(fn_v), NULL);
+    ch_gc_pop_n(&vm->gc, gcount);
+
+    /* Run the thunk in a fresh frame window above the caller's registers. */
+    size_t base = saved_reg_top;
+    if (base + 1 > CH_VM_MAX_REGS) {
+        ch_gc_pop_n(&vm->gc, 2);
+        return CH_VM_STACK_OVERFLOW;
+    }
+    vm->regs[base] = cl_v;
+    vm->reg_top = base + 1;
     vm->continuation_invoked = false;
-    vm->regs[0] = cl_v;
-    ch_gc_pop_n(&vm->gc, 1 + gcount);
-    ChVMStatus st = push_frame(vm, ch_as_closure(vm->regs[0]), 0);
+
+    ChVMStatus st = push_frame(vm, ch_as_closure(cl_v), base);
     if (st != CH_VM_OK) {
+        ch_gc_pop_n(&vm->gc, 2);
+        vm->frame_count = saved_frames;
+        vm->reg_top = saved_reg_top;
+        vm->continuation_invoked = saved_cont;
         return st;
     }
-    st = resume_after_continuation(vm, run_until(vm, 0));
-    if (st == CH_VM_OK) {
-        *out = vm->result;
+    st = run_until(vm, saved_frames);
+    if (st == CH_VM_CONTINUATION_INVOKED) {
+        if (vm->frame_count <= saved_frames) {
+            /* Continuation delivered a value at/below our barrier. */
+            *out = vm->result;
+            st = CH_VM_OK;
+        } else {
+            ch_gc_pop_n(&vm->gc, 2);
+            return st;
+        }
+    } else if (st == CH_VM_OK) {
+        /* Result: either vm->result (top-level-style return) or regs[base]. */
+        if (saved_frames == 0) {
+            *out = vm->result;
+        } else {
+            *out = vm->regs[base];
+        }
     }
+
+    vm->frame_count = saved_frames;
+    vm->reg_top = saved_reg_top;
+    vm->wind_count = saved_winds;
+    vm->handler_count = saved_handlers;
+    vm->parameter_count = saved_params;
+    vm->result = saved_result;
+    vm->continuation_invoked = saved_cont;
+    ch_gc_pop_n(&vm->gc, 2);
     return st;
 }
 
@@ -1099,7 +1200,7 @@ ChVMStatus ch_vm_call_closure(ChVM *vm, ChValue closure, ChValue *args, int narg
 
     ChVMStatus st = call_value(vm, closure, base, nargs, false);
     if (st == CH_VM_CONTINUATION_INVOKED) {
-        st = run_until(vm, 0);
+        st = resume_after_continuation(vm, st);
         if (st == CH_VM_OK) {
             *out = vm->result;
         }

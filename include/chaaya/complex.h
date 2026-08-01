@@ -8,11 +8,14 @@
 extern "C" {
 #endif
 
-/* Rectangular complex; imag == 0.0 → flonum(real). */
+/* Rectangular complex; imag == 0.0 → flonum(real). Parts marked inexact. */
 ChValue ch_make_complex(ChGC *gc, double real, double imag);
 
 /* Always allocate a complex object (used when +0.0i must stay complex). */
 ChValue ch_make_complex_raw(ChGC *gc, double real, double imag);
+
+/* Rectangular complex with per-part exactness (R7RS read/write). */
+ChValue ch_make_complex_ex(ChGC *gc, double real, double imag, bool exact_real, bool exact_imag);
 
 /* Split any number into rectangular parts. Returns 0 if not a number. */
 int ch_complex_parts(ChValue v, double *real_out, double *imag_out);
