@@ -1,0 +1,2 @@
+(DEFINE (FOLDED-ADD A B)
+  (+ A B))

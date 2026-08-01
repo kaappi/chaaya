@@ -1,6 +1,7 @@
 #include "chaaya/cli.h"
 
 #include "chaaya/eval.h"
+#include "chaaya/expander.h"
 #include "chaaya/opcode.h"
 #include "chaaya/printer.h"
 #include "chaaya/reader.h"
@@ -372,9 +373,12 @@ static int cmd_features(int json) {
 #endif
         printf("  \"opcodes\": %d,\n", (int)CH_OP_HALT + 1);
         printf("  \"stage\": \"bootstrap\",\n");
+        printf("  \"call_cc\": true,\n");
+        printf("  \"dynamic_wind\": true,\n");
+        printf("  \"exceptions\": true,\n");
         printf("  \"r7rs_small\": false,\n");
-        printf("  \"libraries\": false,\n");
-        printf("  \"macros\": false,\n");
+        printf("  \"libraries\": true,\n");
+        printf("  \"macros\": true,\n");
         printf("  \"native_backend\": false\n");
         printf("}\n");
     } else {
@@ -387,9 +391,12 @@ static int cmd_features(int json) {
 #endif
         printf("opcodes:      %d\n", (int)CH_OP_HALT + 1);
         printf("stage:        bootstrap\n");
-        printf("r7rs-small:   not yet\n");
-        printf("libraries:    not yet\n");
-        printf("macros:       not yet\n");
+        printf("call/cc:      yes\n");
+        printf("dynamic-wind: yes\n");
+        printf("exceptions:   yes\n");
+        printf("r7rs-small:   partial\n");
+        printf("libraries:    yes\n");
+        printf("macros:       yes\n");
         printf("native:       not yet\n");
     }
     return CH_EXIT_OK;
@@ -519,6 +526,54 @@ static int cmd_ast(const char *path) {
     return CH_EXIT_OK;
 }
 
+static int cmd_expand(const char *path) {
+    size_t len = 0;
+    char *src = ch_read_file(path, &len);
+    if (!src) {
+        fprintf(stderr, "Error opening file '%s'\n", path);
+        return CH_EXIT_ERROR;
+    }
+    ChVM vm;
+    ch_vm_init(&vm);
+    ch_vm_register_primitives(&vm);
+    ChReader reader;
+    ch_reader_init(&reader, &vm.gc, src, len);
+    for (;;) {
+        ChValue v = CH_NIL;
+        ch_gc_push(&vm.gc, &v);
+        ChReadStatus st = ch_read_datum(&reader, &v);
+        if (st == CH_READ_EOF) {
+            ch_gc_pop(&vm.gc);
+            break;
+        }
+        if (st != CH_READ_OK) {
+            fprintf(stderr, "read error: %s\n", ch_reader_error(&reader));
+            ch_gc_pop(&vm.gc);
+            free(src);
+            ch_vm_deinit(&vm);
+            return CH_EXIT_ERROR;
+        }
+        ChValue out = CH_NIL;
+        ch_gc_push(&vm.gc, &out);
+        char err[256];
+        if (ch_expand_toplevel(&vm, v, &out, err, sizeof(err)) != CH_EXPAND_OK) {
+            fprintf(stderr, "expand error: %s\n", err);
+            ch_gc_pop_n(&vm.gc, 2);
+            free(src);
+            ch_vm_deinit(&vm);
+            return CH_EXIT_ERROR;
+        }
+        if (out != CH_VOID) {
+            ch_print_value(stdout, out, false);
+            fputc('\n', stdout);
+        }
+        ch_gc_pop_n(&vm.gc, 2);
+    }
+    free(src);
+    ch_vm_deinit(&vm);
+    return CH_EXIT_OK;
+}
+
 static int cmd_cache_status(void) {
     printf("Bytecode cache: not implemented yet (bootstrap)\n");
     printf("Future location: ~/.chaaya/cache (or $CHAAYA_HOME/cache)\n");
@@ -635,7 +690,12 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
     case CH_CMD_TEST:
         return not_implemented("test");
     case CH_CMD_EXPAND:
-        return not_implemented("expand");
+        if (!opts->file) {
+            fprintf(stderr, "expand: missing file\n");
+            usage_hint(argv0);
+            return CH_EXIT_USAGE;
+        }
+        return cmd_expand(opts->file);
     case CH_CMD_IR:
         return not_implemented("ir");
     case CH_CMD_FMT:

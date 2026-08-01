@@ -8,6 +8,11 @@ extern "C" {
 #endif
 
 void ch_register_core_primitives(ChVM *vm);
+void ch_register_control_primitives(ChVM *vm);
+void ch_register_list_primitives(ChVM *vm);
+void ch_register_data_primitives(ChVM *vm);
+void ch_register_port_primitives(ChVM *vm);
+void ch_register_record_primitives(ChVM *vm);
 
 #ifdef __cplusplus
 }

@@ -15,24 +15,27 @@ Bytecode, IR, and ABI are independent.
 ```text
 Source
   → Reader          (UTF-8 datum parser)
-  → Compiler        (AST → bytecode; no IR yet)
+  → Expander        (`define-syntax` / `syntax-rules`; hygiene via `__hyg_N_` renames)
+  → Compiler        (AST → bytecode; derived forms desugared in C)
   → VM              (register bytecode)
   → GC              (stop-the-world mark-sweep)
 ```
 
 Kaappi’s full pipeline is Reader → Expander → IR → Analysis → Optim → Bytecode →
-VM. Chaaya collapses expander and IR until later phases; special forms are
-handled directly in the compiler today.
+VM. Chaaya has a hygienic expander MVP and still collapses IR; special forms and
+derived forms (`cond`, `let*`, `letrec`, `when`, `unless`, `quasiquote`) are
+handled in the compiler.
 
 | Stage | Files | Role |
 |-------|-------|------|
 | **Reader** | [`src/reader.c`](../../src/reader.c), [`include/chaaya/reader.h`](../../include/chaaya/reader.h) | Recursive-descent datum reader: lists, vectors, quote/quasiquote abbrevs, strings, numbers, `#t`/`#f`, characters |
+| **Expander** | [`src/expander.c`](../../src/expander.c), [`include/chaaya/expander.h`](../../include/chaaya/expander.h) | `syntax-rules` match/instantiate, macro table, `chaaya expand` |
 | **Printer** | [`src/printer.c`](../../src/printer.c), [`include/chaaya/printer.h`](../../include/chaaya/printer.h) | `write` / `display` rendering |
 | **Compiler** | [`src/compiler.c`](../../src/compiler.c), [`include/chaaya/compiler.h`](../../include/chaaya/compiler.h) | Top-level AST → `ChFunction` bytecode; lexical locals + upvalues |
 | **VM** | [`src/vm.c`](../../src/vm.c), [`include/chaaya/vm.h`](../../include/chaaya/vm.h) | Dispatch loop, calls/tail-calls, globals, upvalue close-over |
 | **GC** | [`src/gc.c`](../../src/gc.c), [`include/chaaya/gc.h`](../../include/chaaya/gc.h) | Mark-sweep heap, root stack, symbol intern table |
 | **Values** | [`src/value.c`](../../src/value.c), [`include/chaaya/value.h`](../../include/chaaya/value.h) | NaN-boxed `ChValue`, heap object tags, equality |
-| **Primitives** | [`src/prim_core.c`](../../src/prim_core.c), [`include/chaaya/prim.h`](../../include/chaaya/prim.h) | Native procedures registered into VM globals |
+| **Primitives** | [`src/prim_core.c`](../../src/prim_core.c), [`src/prim_control.c`](../../src/prim_control.c) | Core natives + `call/cc` / wind / exceptions |
 | **Eval** | [`src/eval.c`](../../src/eval.c) | Shared top-level eval + `_` binding |
 | **CLI** | [`src/cli.c`](../../src/cli.c), [`include/chaaya/cli.h`](../../include/chaaya/cli.h) | Kaappi-shaped help/flags/subcommands; see [cli.md](cli.md) |
 | **REPL** | [`src/repl.c`](../../src/repl.c), [`include/chaaya/repl.h`](../../include/chaaya/repl.h) | Interactive loop; see [repl.md](repl.md) |
@@ -64,9 +67,16 @@ GC’s intrusive list. Bootstrap tags:
 | `CH_TAG_FUNCTION` | Bytecode prototype (code, constants, upvalue descriptors) |
 | `CH_TAG_CLOSURE` | Function + captured upvalues |
 | `CH_TAG_NATIVE` | C primitive (`ChNativeFn`) |
+| `CH_TAG_CONTINUATION` | `call/cc` snapshot (regs, frames, winds, handlers) |
+| `CH_TAG_VALUES` | Multiple return values |
+| `CH_TAG_PORT` | Text ports (stdio or string) |
+| `CH_TAG_TRANSFORMER` | `syntax-rules` macro transformer |
+| `CH_TAG_RECORD_TYPE` | R7RS record type descriptor |
+| `CH_TAG_RECORD` | Record instance (fields[]) |
 
-Later R7RS work will add ports, bytevectors, records, continuations, promises,
-parameters, numeric tower heap types, etc.
+Control stacks on the VM (not heap tags): dynamic-wind records and exception
+handlers. `dynamic-wind` is Scheme over `%push-wind` / `%pop-wind` (Kaappi
+pattern) so continuation restores re-enter `after` correctly.
 
 ---
 
@@ -119,7 +129,7 @@ tests/scheme/     Scheme smoke programs
 tests/cli/        CLI integration helpers
 docs/dev/         Contributor documentation
 third_party/      Vendored C deps (linenoise)
-lib/              Portable .sld trees (reserved; after library system)
+lib/              Portable .sld trees (search via --lib-path / ./lib)
 ```
 
 Build: CMake 3.20+ produces `chaaya` and links tests against static
@@ -131,10 +141,16 @@ Build: CMake 3.20+ produces `chaaya` and links tests against static
 
 | Next capability | Likely touch points |
 |-----------------|---------------------|
-| `call/cc`, `dynamic-wind`, exceptions | New heap tags; VM frame/wind stacks; control primitives |
-| `syntax-rules` | Expander stage before compile; hygiene |
-| R7RS libraries | Library registry + `.sld` loader; built-in `(scheme …)` like Kaappi (core is not portable `.sld`) |
+| Full R7RS-small surface | More prims; case-lambda; lazy; file ports; numeric tower |
+| Ports / numeric tower / records | New heap tags; primitives; reader |
 | IR + opts | Insert between expander and bytecode; prep for LLVM |
 | FFI / fibers / LSP / WASM | After R7RS-small sequential interpreter is solid |
 
-See the root [README](../../README.md) for the phase table.
+Done: `call/cc`, `dynamic-wind`, exceptions; hygienic `syntax-rules`; R7RS library
+system; `include` / `cond-expand` / `(features)`; R7RS `define-record-type`
+([`src/prim_record.c`](../../src/prim_record.c), expander desugar); built-in
+`(scheme base|write|read|cxr|char|process-context)`.
+
+See the root [README](../../README.md) for the phase table. Conformance /
+compatibility tests borrowed from Kaappi are documented in
+[scheme-tests.md](scheme-tests.md).

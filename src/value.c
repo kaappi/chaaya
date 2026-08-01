@@ -86,8 +86,32 @@ bool ch_is_function(ChValue v) {
     return CH_IS_TAG(v, CH_TAG_FUNCTION);
 }
 
+bool ch_is_continuation(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_CONTINUATION);
+}
+
+bool ch_is_values(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_VALUES);
+}
+
+bool ch_is_port(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_PORT);
+}
+
+bool ch_is_transformer(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_TRANSFORMER);
+}
+
+bool ch_is_record_type(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_RECORD_TYPE);
+}
+
+bool ch_is_record(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_RECORD);
+}
+
 bool ch_is_procedure(ChValue v) {
-    return ch_is_closure(v) || ch_is_native(v);
+    return ch_is_closure(v) || ch_is_native(v) || ch_is_continuation(v);
 }
 
 ChPair *ch_as_pair(ChValue v) {
@@ -116,6 +140,56 @@ ChClosure *ch_as_closure(ChValue v) {
 
 ChNative *ch_as_native(ChValue v) {
     return (ChNative *)ch_to_object(v);
+}
+
+ChContinuation *ch_as_continuation(ChValue v) {
+    return (ChContinuation *)ch_to_object(v);
+}
+
+ChValues *ch_as_values(ChValue v) {
+    return (ChValues *)ch_to_object(v);
+}
+
+ChPort *ch_as_port(ChValue v) {
+    return (ChPort *)ch_to_object(v);
+}
+
+ChTransformer *ch_as_transformer(ChValue v) {
+    return (ChTransformer *)ch_to_object(v);
+}
+
+ChRecordType *ch_as_record_type(ChValue v) {
+    return (ChRecordType *)ch_to_object(v);
+}
+
+ChRecord *ch_as_record(ChValue v) {
+    return (ChRecord *)ch_to_object(v);
+}
+
+const char *ch_symbol_basename(ChSymbol *sym) {
+    const char *name = sym->name;
+    if (strncmp(name, "__hyg_", 6) != 0) {
+        return name;
+    }
+    const char *p = name + 6;
+    while (*p >= '0' && *p <= '9') {
+        p++;
+    }
+    if (*p == '_' && p[1] != '\0') {
+        return p + 1;
+    }
+    return name;
+}
+
+ChValue ch_coerce_single(ChValue v) {
+    if (!ch_is_values(v)) {
+        return v;
+    }
+    ChValues *vs = ch_as_values(v);
+    if (vs->count == 0) {
+        return CH_VOID;
+    }
+    return vs->items[0];
 }
 
 ChValue ch_car(ChValue v) {

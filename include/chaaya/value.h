@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,6 +40,12 @@ typedef enum ChObjectTag {
     CH_TAG_FUNCTION = 4,
     CH_TAG_CLOSURE = 5,
     CH_TAG_NATIVE = 6,
+    CH_TAG_CONTINUATION = 7,
+    CH_TAG_VALUES = 8,
+    CH_TAG_PORT = 9,
+    CH_TAG_TRANSFORMER = 10,
+    CH_TAG_RECORD_TYPE = 11,
+    CH_TAG_RECORD = 12,
 } ChObjectTag;
 
 typedef struct ChObject {
@@ -112,6 +119,97 @@ typedef struct ChClosure {
     ChUpvalue **upvalues;
 } ChClosure;
 
+/* Saved call frame inside a continuation snapshot (R7RS 6.10). */
+typedef struct ChSavedFrame {
+    ChClosure *closure;
+    size_t ip_offset; /* offset from closure->fn->code */
+    size_t reg_base;
+    uint8_t num_regs;
+} ChSavedFrame;
+
+typedef struct ChWindRecord {
+    ChValue before;
+    ChValue after;
+} ChWindRecord;
+
+typedef struct ChExceptionHandler {
+    ChValue handler;
+    size_t frame_count; /* frames present when handler was installed */
+    size_t wind_count;
+} ChExceptionHandler;
+
+typedef struct ChSavedUpvalue {
+    ChUpvalue *uv;
+    size_t reg_index; /* absolute index into vm->regs at capture */
+} ChSavedUpvalue;
+
+typedef struct ChContinuation {
+    ChObject header;
+    ChValue *registers;
+    size_t register_count;
+    ChSavedFrame *frames;
+    size_t frame_count;
+    ChWindRecord *winds;
+    size_t wind_count;
+    ChExceptionHandler *handlers;
+    size_t handler_count;
+    ChSavedUpvalue *open_uvs;
+    size_t open_uv_count;
+    size_t result_slot; /* absolute register index for call/cc result */
+} ChContinuation;
+
+typedef struct ChValues {
+    ChObject header;
+    size_t count;
+    ChValue *items;
+} ChValues;
+
+typedef enum ChPortKind {
+    CH_PORT_STDIO = 0,
+    CH_PORT_STRING_IN = 1,
+    CH_PORT_STRING_OUT = 2,
+} ChPortKind;
+
+typedef struct ChPort {
+    ChObject header;
+    ChPortKind kind;
+    uint8_t input;
+    uint8_t output;
+    uint8_t closed;
+    FILE *file; /* CH_PORT_STDIO */
+    char *buf;  /* string ports (owned) */
+    size_t len;
+    size_t cap;
+    size_t pos;
+} ChPort;
+
+#define CH_TRANSFORMER_MAX_RULES 32
+#define CH_TRANSFORMER_MAX_LITERALS 16
+
+typedef struct ChTransformer {
+    ChObject header;
+    ChSymbol *literals[CH_TRANSFORMER_MAX_LITERALS];
+    size_t literal_count;
+    ChValue patterns[CH_TRANSFORMER_MAX_RULES];
+    ChValue templates[CH_TRANSFORMER_MAX_RULES];
+    size_t rule_count;
+} ChTransformer;
+
+#define CH_RECORD_MAX_FIELDS 64
+
+typedef struct ChRecordType {
+    ChObject header;
+    ChValue name; /* string */
+    uint16_t num_fields;
+} ChRecordType;
+
+typedef struct ChRecord {
+    ChObject header;
+    ChRecordType *rtype;
+    uint16_t num_fields;
+    ChValue fields[]; /* flexible array */
+} ChRecord;
+
 static inline bool ch_is_flonum(ChValue v) {
     return v < CH_NANBOX_THRESHOLD;
 }
@@ -158,6 +256,12 @@ bool ch_is_vector(ChValue v);
 bool ch_is_closure(ChValue v);
 bool ch_is_native(ChValue v);
 bool ch_is_function(ChValue v);
+bool ch_is_continuation(ChValue v);
+bool ch_is_values(ChValue v);
+bool ch_is_port(ChValue v);
+bool ch_is_transformer(ChValue v);
+bool ch_is_record_type(ChValue v);
+bool ch_is_record(ChValue v);
 bool ch_is_procedure(ChValue v);
 
 ChPair *ch_as_pair(ChValue v);
@@ -167,6 +271,18 @@ ChVector *ch_as_vector(ChValue v);
 ChFunction *ch_as_function(ChValue v);
 ChClosure *ch_as_closure(ChValue v);
 ChNative *ch_as_native(ChValue v);
+ChContinuation *ch_as_continuation(ChValue v);
+ChValues *ch_as_values(ChValue v);
+ChPort *ch_as_port(ChValue v);
+ChTransformer *ch_as_transformer(ChValue v);
+ChRecordType *ch_as_record_type(ChValue v);
+ChRecord *ch_as_record(ChValue v);
+
+/* Collapse multiple values to the first (or void if none). */
+ChValue ch_coerce_single(ChValue v);
+
+/* Strip __hyg_N_ prefix for special-form recognition. */
+const char *ch_symbol_basename(ChSymbol *sym);
 
 ChValue ch_car(ChValue v);
 ChValue ch_cdr(ChValue v);

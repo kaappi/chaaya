@@ -14,6 +14,9 @@ Bootstrap interpreter:
 - Register bytecode VM
 - Special forms: `quote`, `if`, `lambda`, `define`, `set!`, `begin`, `and`, `or`, `let`
 - Core primitives (lists, arithmetic, equality, I/O)
+- Control: `call/cc`, `dynamic-wind`, `with-exception-handler`, `raise` / `raise-continuable`, `error`
+- Lists/`apply`/`map`/`for-each`, strings, vectors, `values`/`call-with-values`
+- Ports: stdio + string ports; `read` / `display` / `write` take optional ports
 - Kaappi-shaped CLI (`features`, `doctor`, `ast`, …) and linenoise REPL
   (`chaaya>`, multiline, `,help`, `_`)
 
@@ -63,11 +66,14 @@ See [docs/dev/cli.md](docs/dev/cli.md) and [docs/dev/repl.md](docs/dev/repl.md).
 | Phase | Focus |
 |------:|-------|
 | 0–3 | Scaffold, values/GC, reader, bytecode REPL (**done**) |
-| 4 | `call/cc`, `dynamic-wind`, exceptions |
-| 5 | Hygienic `syntax-rules` |
-| 6 | R7RS libraries + portable `.sld` reuse from Kaappi |
-| 7 | Full R7RS-small surface |
+| 4 | `call/cc`, `dynamic-wind`, exceptions (**done**) |
+| 5 | Hygienic `syntax-rules` + derived forms (**done**) |
+| 6 | R7RS libraries + portable `.sld` reuse from Kaappi (**done**) |
+| 7 | Full R7RS-small surface (**in progress**: include/cond-expand/features) |
 | 8+ | IR/opts, SRFIs, FFI, concurrency, tooling, LLVM, WASM, LSP, packages |
+
+Language-parity target (≈99% Kaappi language surface): R7RS-small + portable
+SRFIs. Deferred for later: fibers, FFI, LLVM, WASM, LSP, thottam.
 
 ## Relationship to Kaappi
 
@@ -83,6 +89,7 @@ Contributor documentation lives in [docs/dev/](docs/dev/):
 - [Architecture](docs/dev/architecture.md) — pipeline, values, GC, VM, layout
 - [CLI](docs/dev/cli.md) — help shape, exit codes, stubs
 - [REPL](docs/dev/repl.md) — prompts, comma-commands, history
+- [Scheme tests](docs/dev/scheme-tests.md) — bootstrap suites, probes, deferred Kaappi/R7RS
 
 ## License
 

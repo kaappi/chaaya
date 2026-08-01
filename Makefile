@@ -13,7 +13,7 @@ JOBS ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
 CHAAYA := $(BUILD_DIR)/chaaya
 
-.PHONY: all configure build test run clean distclean install help
+.PHONY: all configure build test bootstrap-scheme run clean distclean install help
 
 all: build
 
@@ -27,6 +27,9 @@ build: configure
 
 test: build
 	$(CTEST) --test-dir $(BUILD_DIR) --output-on-failure
+
+bootstrap-scheme: build
+	bash tests/scheme/run-bootstrap.sh $(CHAAYA)
 
 run: build
 	$(CHAAYA)
@@ -44,6 +47,7 @@ help:
 	@echo "Targets:"
 	@echo "  make / make build   Configure and build ($(BUILD_TYPE) in $(BUILD_DIR)/)"
 	@echo "  make test           Build and run ctest"
+	@echo "  make bootstrap-scheme  Run Kaappi-shaped bootstrap Scheme suites"
 	@echo "  make run            Build and start the REPL"
 	@echo "  make install        Install chaaya (DESTDIR / CMAKE_INSTALL_PREFIX apply)"
 	@echo "  make clean          Remove built objects (keep CMake cache)"

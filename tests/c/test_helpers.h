@@ -13,11 +13,16 @@ static inline int ch_test_eval(ChVM *vm, const char *src, ChValue *out) {
     ch_reader_init(&reader, &vm->gc, src, strlen(src));
     ChValue expr = CH_NIL;
     ch_gc_push(&vm->gc, &expr);
+    for (size_t i = 0; i < vm->global_count; i++) {
+        ch_gc_push(&vm->gc, &vm->globals[i].value);
+    }
+    size_t sticky = vm->global_count;
     if (ch_read_datum(&reader, &expr) != CH_READ_OK) {
         fprintf(stderr, "read: %s\n  in: %s\n", ch_reader_error(&reader), src);
-        ch_gc_pop(&vm->gc);
+        ch_gc_pop_n(&vm->gc, 1 + sticky);
         return 0;
     }
+    ch_gc_pop_n(&vm->gc, sticky);
     ChCompiler compiler;
     ch_compiler_init(&compiler, vm);
     ChFunction *fn = NULL;

@@ -1,0 +1,11 @@
+(user 1 2)
+(user* 6 7)
+(user* 6 1)
+(user* 6 0)
+user<
+lt-then
+user-not
+n-then
+n2-then
+6
+user-

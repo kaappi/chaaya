@@ -19,8 +19,16 @@ add_library(chaaya_core STATIC
   src/reader.c
   src/printer.c
   src/compiler.c
+  src/expander.c
+  src/library.c
+  src/features.c
   src/vm.c
   src/prim_core.c
+  src/prim_control.c
+  src/prim_list.c
+  src/prim_data.c
+  src/prim_port.c
+  src/prim_record.c
   src/eval.c
   src/cli.c
   src/repl.c
@@ -86,6 +94,65 @@ chaaya_scheme_test(fact)
 chaaya_scheme_test(lists)
 chaaya_scheme_test(closures)
 chaaya_scheme_test(tail)
+
+# Bootstrap conformance suites (Kaappi-compatible check-* harness, no import)
+function(chaaya_bootstrap_test name)
+  add_test(
+    NAME bootstrap_${name}
+    COMMAND ${CMAKE_COMMAND}
+      -DCHAAYA=$<TARGET_FILE:chaaya>
+      -DHARNESS=${CMAKE_SOURCE_DIR}/tests/scheme/bootstrap/harness.scm
+      -DINPUT=${CMAKE_SOURCE_DIR}/tests/scheme/bootstrap/${name}.scm
+      -P ${CMAKE_SOURCE_DIR}/tests/scheme/run_bootstrap.cmake
+  )
+endfunction()
+
+chaaya_bootstrap_test(basic)
+chaaya_bootstrap_test(lists)
+chaaya_bootstrap_test(control)
+chaaya_bootstrap_test(closures)
+chaaya_bootstrap_test(equality)
+chaaya_bootstrap_test(quote)
+chaaya_bootstrap_test(numbers)
+chaaya_bootstrap_test(control-cont)
+chaaya_bootstrap_test(wave2)
+chaaya_bootstrap_test(macros)
+chaaya_bootstrap_test(derived)
+
+function(chaaya_bootstrap_test_libpath name)
+  add_test(
+    NAME bootstrap_${name}
+    COMMAND ${CMAKE_COMMAND}
+      -DCHAAYA=$<TARGET_FILE:chaaya>
+      -DHARNESS=${CMAKE_SOURCE_DIR}/tests/scheme/bootstrap/harness.scm
+      -DINPUT=${CMAKE_SOURCE_DIR}/tests/scheme/bootstrap/${name}.scm
+      -DLIB_PATH=${CMAKE_SOURCE_DIR}/lib
+      -P ${CMAKE_SOURCE_DIR}/tests/scheme/run_bootstrap.cmake
+  )
+endfunction()
+
+chaaya_bootstrap_test_libpath(libraries)
+chaaya_bootstrap_test(include-cond)
+chaaya_bootstrap_test(records)
+
+# Display probes adapted from Kaappi differential/probes
+function(chaaya_probe_test name)
+  add_test(
+    NAME probe_${name}
+    COMMAND ${CMAKE_COMMAND}
+      -DCHAAYA=$<TARGET_FILE:chaaya>
+      -DINPUT=${CMAKE_SOURCE_DIR}/tests/scheme/probes/${name}.scm
+      -DEXPECTED=${CMAKE_SOURCE_DIR}/tests/scheme/probes/${name}.expected
+      -P ${CMAKE_SOURCE_DIR}/tests/scheme/run_expect.cmake
+  )
+endfunction()
+
+chaaya_probe_test(begin-simplify)
+chaaya_probe_test(dead-branch)
+chaaya_probe_test(const-fold)
+chaaya_probe_test(boolean-simplify)
+chaaya_probe_test(identity-elim)
+chaaya_probe_test(redefined-builtins)
 
 # CLI integration tests via the chaaya binary
 add_test(NAME cli_version COMMAND $<TARGET_FILE:chaaya> --version)

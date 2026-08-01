@@ -1,6 +1,7 @@
 #include "chaaya/eval.h"
 
 #include "chaaya/compiler.h"
+#include "chaaya/library.h"
 #include "chaaya/printer.h"
 #include "chaaya/reader.h"
 
@@ -54,6 +55,9 @@ const char *ch_value_type_name(ChValue v) {
     if (ch_is_native(v)) {
         return "native";
     }
+    if (ch_is_continuation(v)) {
+        return "continuation";
+    }
     if (ch_is_function(v)) {
         return "function";
     }
@@ -63,8 +67,6 @@ const char *ch_value_type_name(ChValue v) {
 int ch_eval_source(ChVM *vm, const char *source, size_t len, int print_results) {
     ChReader reader;
     ch_reader_init(&reader, &vm->gc, source, len);
-    ChCompiler compiler;
-    ch_compiler_init(&compiler, vm);
 
     for (;;) {
         ChValue expr = CH_NIL;
@@ -72,8 +74,12 @@ int ch_eval_source(ChVM *vm, const char *source, size_t len, int print_results) 
         for (size_t i = 0; i < vm->global_count; i++) {
             ch_gc_push(&vm->gc, &vm->globals[i].value);
         }
+        for (size_t i = 0; i < vm->macro_count; i++) {
+            ch_gc_push(&vm->gc, &vm->macros[i].transformer);
+        }
+        size_t lib_roots = ch_library_push_gc_roots(vm);
         ChReadStatus rs = ch_read_datum(&reader, &expr);
-        ch_gc_pop_n(&vm->gc, vm->global_count);
+        ch_gc_pop_n(&vm->gc, vm->global_count + vm->macro_count + lib_roots);
         if (rs == CH_READ_EOF) {
             ch_gc_pop(&vm->gc);
             break;
@@ -84,6 +90,23 @@ int ch_eval_source(ChVM *vm, const char *source, size_t len, int print_results) 
             return 1;
         }
 
+        if (ch_is_pair(expr) && ch_is_symbol(ch_car(expr))) {
+            const char *head = ch_symbol_basename(ch_as_symbol(ch_car(expr)));
+            if (strcmp(head, "import") == 0 || strcmp(head, "define-library") == 0 ||
+                strcmp(head, "include") == 0 || strcmp(head, "include-ci") == 0 ||
+                strcmp(head, "cond-expand") == 0) {
+                if (ch_eval_toplevel_form(vm, expr) != 0) {
+                    fprintf(stderr, "error: %s\n", ch_vm_error(vm));
+                    ch_gc_pop(&vm->gc);
+                    return 1;
+                }
+                ch_gc_pop(&vm->gc);
+                continue;
+            }
+        }
+
+        ChCompiler compiler;
+        ch_compiler_init(&compiler, vm);
         ChFunction *fn = NULL;
         if (ch_compile_toplevel(&compiler, expr, &fn) != CH_COMPILE_OK) {
             fprintf(stderr, "compile error: %s\n", ch_compiler_error(&compiler));

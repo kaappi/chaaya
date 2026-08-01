@@ -1,5 +1,6 @@
 #include "chaaya/gc.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -30,6 +31,33 @@ static void free_object(ChObject *obj) {
         free(cl->upvalues);
         break;
     }
+    case CH_TAG_CONTINUATION: {
+        ChContinuation *c = (ChContinuation *)obj;
+        free(c->registers);
+        free(c->frames);
+        free(c->winds);
+        free(c->handlers);
+        free(c->open_uvs);
+        break;
+    }
+    case CH_TAG_VALUES: {
+        ChValues *vs = (ChValues *)obj;
+        free(vs->items);
+        break;
+    }
+    case CH_TAG_PORT: {
+        ChPort *p = (ChPort *)obj;
+        if (p->kind != CH_PORT_STDIO && p->buf) {
+            free(p->buf);
+        }
+        break;
+    }
+    case CH_TAG_TRANSFORMER:
+        break;
+    case CH_TAG_RECORD_TYPE:
+        break;
+    case CH_TAG_RECORD:
+        break;
     default:
         break;
     }
@@ -109,10 +137,71 @@ static void mark_object(ChObject *obj) {
         }
         break;
     }
+    case CH_TAG_CONTINUATION: {
+        ChContinuation *c = (ChContinuation *)obj;
+        for (size_t i = 0; i < c->register_count; i++) {
+            mark_value(c->registers[i]);
+        }
+        for (size_t i = 0; i < c->frame_count; i++) {
+            if (c->frames[i].closure) {
+                mark_object(&c->frames[i].closure->header);
+            }
+        }
+        for (size_t i = 0; i < c->wind_count; i++) {
+            mark_value(c->winds[i].before);
+            mark_value(c->winds[i].after);
+        }
+        for (size_t i = 0; i < c->handler_count; i++) {
+            mark_value(c->handlers[i].handler);
+        }
+        for (size_t i = 0; i < c->open_uv_count; i++) {
+            ChUpvalue *uv = c->open_uvs[i].uv;
+            if (uv && uv->is_closed) {
+                mark_value(uv->closed_value);
+            }
+        }
+        break;
+    }
+    case CH_TAG_VALUES: {
+        ChValues *vs = (ChValues *)obj;
+        for (size_t i = 0; i < vs->count; i++) {
+            mark_value(vs->items[i]);
+        }
+        break;
+    }
+    case CH_TAG_PORT:
     case CH_TAG_SYMBOL:
     case CH_TAG_STRING:
     case CH_TAG_NATIVE:
         break;
+    case CH_TAG_TRANSFORMER: {
+        ChTransformer *tr = (ChTransformer *)obj;
+        for (size_t i = 0; i < tr->literal_count; i++) {
+            if (tr->literals[i]) {
+                mark_object(&tr->literals[i]->header);
+            }
+        }
+        for (size_t i = 0; i < tr->rule_count; i++) {
+            mark_value(tr->patterns[i]);
+            mark_value(tr->templates[i]);
+        }
+        break;
+    }
+    case CH_TAG_RECORD_TYPE: {
+        ChRecordType *rt = (ChRecordType *)obj;
+        mark_value(rt->name);
+        break;
+    }
+    case CH_TAG_RECORD: {
+        ChRecord *r = (ChRecord *)obj;
+        if (r->rtype) {
+            mark_object(&r->rtype->header);
+        }
+        for (uint16_t i = 0; i < r->num_fields; i++) {
+            mark_value(r->fields[i]);
+        }
+        break;
+    }
     }
 }
 
@@ -256,4 +345,102 @@ ChValue ch_gc_make_native(ChGC *gc, ChNativeFn fn, const char *name, int arity, 
     n->arity = arity;
     n->min_arity = min_arity;
     return ch_make_pointer(&n->header);
+}
+
+ChValue ch_gc_make_continuation(ChGC *gc) {
+    ChContinuation *c = (ChContinuation *)ch_gc_alloc(gc, sizeof(ChContinuation), CH_TAG_CONTINUATION);
+    return ch_make_pointer(&c->header);
+}
+
+ChValue ch_gc_make_values(ChGC *gc, ChValue *items, size_t count) {
+    ChValues *vs = (ChValues *)ch_gc_alloc(gc, sizeof(ChValues), CH_TAG_VALUES);
+    vs->count = count;
+    vs->items = (ChValue *)calloc(count == 0 ? 1 : count, sizeof(ChValue));
+    if (!vs->items) {
+        abort();
+    }
+    for (size_t i = 0; i < count; i++) {
+        vs->items[i] = items[i];
+    }
+    return ch_make_pointer(&vs->header);
+}
+
+ChValue ch_gc_make_stdio_port(ChGC *gc, FILE *file, int input, int output) {
+    ChPort *p = (ChPort *)ch_gc_alloc(gc, sizeof(ChPort), CH_TAG_PORT);
+    p->kind = CH_PORT_STDIO;
+    p->input = (uint8_t)(input ? 1 : 0);
+    p->output = (uint8_t)(output ? 1 : 0);
+    p->closed = 0;
+    p->file = file;
+    return ch_make_pointer(&p->header);
+}
+
+ChValue ch_gc_make_string_input_port(ChGC *gc, const char *bytes, size_t len) {
+    ChPort *p = (ChPort *)ch_gc_alloc(gc, sizeof(ChPort), CH_TAG_PORT);
+    p->kind = CH_PORT_STRING_IN;
+    p->input = 1;
+    p->output = 0;
+    p->closed = 0;
+    p->buf = (char *)malloc(len + 1);
+    if (!p->buf) {
+        abort();
+    }
+    if (len > 0) {
+        memcpy(p->buf, bytes, len);
+    }
+    p->buf[len] = '\0';
+    p->len = len;
+    p->cap = len + 1;
+    p->pos = 0;
+    return ch_make_pointer(&p->header);
+}
+
+ChValue ch_gc_make_string_output_port(ChGC *gc) {
+    ChPort *p = (ChPort *)ch_gc_alloc(gc, sizeof(ChPort), CH_TAG_PORT);
+    p->kind = CH_PORT_STRING_OUT;
+    p->input = 0;
+    p->output = 1;
+    p->closed = 0;
+    p->cap = 64;
+    p->buf = (char *)malloc(p->cap);
+    if (!p->buf) {
+        abort();
+    }
+    p->buf[0] = '\0';
+    p->len = 0;
+    p->pos = 0;
+    return ch_make_pointer(&p->header);
+}
+
+ChValue ch_gc_make_transformer(ChGC *gc) {
+    ChTransformer *tr = (ChTransformer *)ch_gc_alloc(gc, sizeof(ChTransformer), CH_TAG_TRANSFORMER);
+    tr->literal_count = 0;
+    tr->rule_count = 0;
+    return ch_make_pointer(&tr->header);
+}
+
+ChValue ch_gc_make_record_type(ChGC *gc, ChValue name, uint16_t num_fields) {
+    ch_gc_push(gc, &name);
+    ChRecordType *rt = (ChRecordType *)ch_gc_alloc(gc, sizeof(ChRecordType), CH_TAG_RECORD_TYPE);
+    ch_gc_pop(gc);
+    rt->name = name;
+    rt->num_fields = num_fields;
+    return ch_make_pointer(&rt->header);
+}
+
+ChValue ch_gc_make_record(ChGC *gc, ChRecordType *rtype, ChValue *fields, uint16_t nfields) {
+    ChValue rtv = ch_make_pointer(&rtype->header);
+    ch_gc_push(gc, &rtv);
+    for (uint16_t i = 0; i < nfields; i++) {
+        ch_gc_push(gc, &fields[i]);
+    }
+    size_t bytes = sizeof(ChRecord) + (size_t)nfields * sizeof(ChValue);
+    ChRecord *r = (ChRecord *)ch_gc_alloc(gc, bytes, CH_TAG_RECORD);
+    ch_gc_pop_n(gc, 1 + (size_t)nfields);
+    r->rtype = rtype;
+    r->num_fields = nfields;
+    for (uint16_t i = 0; i < nfields; i++) {
+        r->fields[i] = fields[i];
+    }
+    return ch_make_pointer(&r->header);
 }

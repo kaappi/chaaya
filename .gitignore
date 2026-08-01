@@ -4,6 +4,9 @@ cmake-build-*/
 .cache/
 compile_commands.json
 
+# Bootstrap runner temps
+tests/scheme/bootstrap/.bootstrap_*.scm
+
 # Prerequisites
 *.d
 

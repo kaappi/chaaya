@@ -3,6 +3,7 @@
 #include "chaaya/printer.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static void define_prim(ChVM *vm, const char *name, ChNativeFn fn, int arity, int min_arity) {
@@ -356,6 +357,42 @@ static ChValue prim_boolean_p(ChVM *vm, ChValue *args, int nargs) {
     return (args[0] == CH_TRUE || args[0] == CH_FALSE) ? CH_TRUE : CH_FALSE;
 }
 
+static ChValue prim_exit(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    int code = 0;
+    if (nargs >= 1) {
+        if (ch_is_fixnum(args[0])) {
+            code = (int)ch_to_fixnum(args[0]);
+        } else if (args[0] == CH_FALSE) {
+            code = 1;
+        } else if (args[0] != CH_TRUE) {
+            code = 1;
+        }
+    }
+    exit(code);
+    return CH_VOID; /* unreachable */
+}
+
+static ChValue prim_command_line(ChVM *vm, ChValue *args, int nargs) {
+    (void)args;
+    if (nargs != 0) {
+        snprintf(vm->error, sizeof(vm->error), "command-line: expected 0 arguments");
+        return CH_UNDEFINED;
+    }
+    ChValue list = CH_NIL;
+    ch_gc_push(&vm->gc, &list);
+    for (size_t i = vm->script_arg_count; i > 0; i--) {
+        const char *a = vm->script_args[i - 1];
+        ChValue s = ch_gc_make_string_cstr(&vm->gc, a ? a : "");
+        list = ch_gc_cons(&vm->gc, s, list);
+    }
+    const char *prog = vm->script_path ? vm->script_path : "chaaya";
+    ChValue ps = ch_gc_make_string_cstr(&vm->gc, prog);
+    list = ch_gc_cons(&vm->gc, ps, list);
+    ch_gc_pop(&vm->gc);
+    return list;
+}
+
 void ch_register_core_primitives(ChVM *vm) {
     define_prim(vm, "cons", prim_cons, 2, 2);
     define_prim(vm, "car", prim_car, 1, 1);
@@ -388,4 +425,6 @@ void ch_register_core_primitives(ChVM *vm) {
     define_prim(vm, "write", prim_write, 1, 1);
     define_prim(vm, "list", prim_list, -1, 0);
     define_prim(vm, "vector", prim_vector, -1, 0);
+    define_prim(vm, "exit", prim_exit, -1, 0);
+    define_prim(vm, "command-line", prim_command_line, 0, 0);
 }

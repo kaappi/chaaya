@@ -10,6 +10,7 @@ void ch_reader_init(ChReader *r, ChGC *gc, const char *src, size_t len) {
     r->src = src;
     r->len = len;
     r->pos = 0;
+    r->fold_case = 0;
     r->error[0] = '\0';
 }
 
@@ -45,6 +46,27 @@ static void skip_ws_and_comments(ChReader *r) {
         }
         if (isspace(c)) {
             advance(r);
+            continue;
+        }
+        /* #!fold-case / #!no-fold-case directives */
+        if (c == '#' && r->pos + 1 < r->len && r->src[r->pos + 1] == '!') {
+            size_t start = r->pos;
+            while (peek(r) >= 0 && peek(r) != '\n' && !isspace(peek(r))) {
+                advance(r);
+            }
+            size_t n = r->pos - start;
+            if (n == 12 && strncmp(r->src + start, "#!fold-case", 12) == 0) {
+                r->fold_case = 1;
+                continue;
+            }
+            if (n == 15 && strncmp(r->src + start, "#!no-fold-case", 15) == 0) {
+                r->fold_case = 0;
+                continue;
+            }
+            /* Unknown #! — treat as comment to EOL */
+            while (peek(r) >= 0 && peek(r) != '\n') {
+                advance(r);
+            }
             continue;
         }
         return;
@@ -215,6 +237,20 @@ static ChReadStatus read_atom(ChReader *r, ChValue *out) {
     ChValue num;
     if (try_parse_number(text, len, &num)) {
         *out = num;
+        return CH_READ_OK;
+    }
+    if (r->fold_case) {
+        char *folded = (char *)malloc(len + 1);
+        if (!folded) {
+            return fail(r, "out of memory");
+        }
+        for (size_t i = 0; i < len; i++) {
+            unsigned char ch = (unsigned char)text[i];
+            folded[i] = (char)((ch < 0x80) ? tolower(ch) : ch);
+        }
+        folded[len] = '\0';
+        *out = ch_gc_intern_symbol(r->gc, folded, len);
+        free(folded);
         return CH_READ_OK;
     }
     *out = ch_gc_intern_symbol(r->gc, text, len);

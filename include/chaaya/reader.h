@@ -19,6 +19,7 @@ typedef struct ChReader {
     const char *src;
     size_t len;
     size_t pos;
+    int fold_case; /* ASCII fold for identifiers when non-zero */
     char error[256];
 } ChReader;
 

@@ -135,12 +135,39 @@ static void print_value_rec(FILE *out, ChValue v, bool display) {
         fputc(')', out);
         return;
     }
+    if (ch_is_record(v)) {
+        ChRecord *r = ch_as_record(v);
+        const char *nm = "?";
+        if (r->rtype && ch_is_string(r->rtype->name)) {
+            nm = ch_as_string(r->rtype->name)->data;
+        }
+        fprintf(out, "#<%s>", nm);
+        return;
+    }
+    if (ch_is_record_type(v)) {
+        ChRecordType *rt = ch_as_record_type(v);
+        const char *nm = ch_is_string(rt->name) ? ch_as_string(rt->name)->data : "?";
+        fprintf(out, "#<record-type %s>", nm);
+        return;
+    }
     if (ch_is_closure(v)) {
         fputs("#<closure>", out);
         return;
     }
     if (ch_is_native(v)) {
         fprintf(out, "#<native %s>", ch_as_native(v)->name);
+        return;
+    }
+    if (ch_is_continuation(v)) {
+        fputs("#<continuation>", out);
+        return;
+    }
+    if (ch_is_values(v)) {
+        fputs("#<values>", out);
+        return;
+    }
+    if (ch_is_port(v)) {
+        fputs("#<port>", out);
         return;
     }
     if (ch_is_function(v)) {

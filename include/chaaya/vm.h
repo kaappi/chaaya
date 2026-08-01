@@ -15,11 +15,18 @@ extern "C" {
 #define CH_VM_MAX_GLOBALS 1024
 #define CH_VM_MAX_LIB_PATHS 32
 #define CH_VM_MAX_SCRIPT_ARGS 64
+#define CH_VM_MAX_WINDS 64
+#define CH_VM_MAX_HANDLERS 64
+#define CH_VM_MAX_MACROS 256
+
+struct ChLibEnv;
+struct ChLibraryRegistry;
 
 typedef enum ChVMStatus {
     CH_VM_OK = 0,
     CH_VM_RUNTIME_ERROR,
     CH_VM_STACK_OVERFLOW,
+    CH_VM_CONTINUATION_INVOKED,
 } ChVMStatus;
 
 typedef struct ChCallFrame {
@@ -35,6 +42,11 @@ typedef struct ChGlobal {
     bool defined;
 } ChGlobal;
 
+typedef struct ChMacroEntry {
+    ChSymbol *name;
+    ChValue transformer; /* CH_TAG_TRANSFORMER — rooted for GC */
+} ChMacroEntry;
+
 typedef struct ChVM {
     ChGC gc;
     ChValue regs[CH_VM_MAX_REGS];
@@ -46,6 +58,29 @@ typedef struct ChVM {
     ChUpvalue *open_upvalues;
     ChValue result;
     char error[256];
+
+    /* dynamic-wind + exception handlers */
+    ChWindRecord wind_stack[CH_VM_MAX_WINDS];
+    size_t wind_count;
+    ChExceptionHandler handler_stack[CH_VM_MAX_HANDLERS];
+    size_t handler_count;
+
+    /* compile-time macros (define-syntax) */
+    ChMacroEntry macros[CH_VM_MAX_MACROS];
+    size_t macro_count;
+    uint32_t hyg_counter;
+
+    /* set by call_value before invoking a native; used by call/cc */
+    size_t native_result_slot;
+    bool continuation_invoked; /* native saw a continuation restore */
+
+    /* R7RS libraries */
+    struct ChLibraryRegistry *libraries;
+    struct ChLibEnv *active_lib_env; /* non-NULL while compiling/running library body */
+    char *loading_libs[32];
+    size_t loading_lib_count;
+    char *current_lib_dir; /* owned; directory of .sld being loaded */
+
     /* CLI / script context (owned strings are not strdup'd — point at argv) */
     const char *lib_paths[CH_VM_MAX_LIB_PATHS];
     size_t lib_path_count;
@@ -64,6 +99,13 @@ void ch_vm_register_primitives(ChVM *vm);
 
 ChVMStatus ch_vm_call_closure(ChVM *vm, ChValue closure, ChValue *args, int nargs, ChValue *out);
 ChVMStatus ch_vm_eval_function(ChVM *vm, ChFunction *fn, ChValue *out);
+
+/* Call a procedure without clearing the existing stack (for dynamic-wind etc.). */
+ChVMStatus ch_vm_apply(ChVM *vm, ChValue proc, ChValue *args, int nargs, ChValue *out);
+
+ChValue ch_vm_capture_continuation(ChVM *vm, size_t result_slot);
+ChVMStatus ch_vm_invoke_continuation(ChVM *vm, ChContinuation *cont, ChValue value);
+ChVMStatus ch_vm_wind_transition(ChVM *vm, const ChWindRecord *target, size_t target_count);
 
 const char *ch_vm_error(const ChVM *vm);
 

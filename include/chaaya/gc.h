@@ -45,6 +45,14 @@ ChValue ch_gc_make_vector(ChGC *gc, size_t len, ChValue fill);
 ChValue ch_gc_make_function(ChGC *gc);
 ChValue ch_gc_make_closure(ChGC *gc, ChFunction *fn, ChUpvalue **upvalues);
 ChValue ch_gc_make_native(ChGC *gc, ChNativeFn fn, const char *name, int arity, int min_arity);
+ChValue ch_gc_make_continuation(ChGC *gc);
+ChValue ch_gc_make_values(ChGC *gc, ChValue *items, size_t count);
+ChValue ch_gc_make_stdio_port(ChGC *gc, FILE *file, int input, int output);
+ChValue ch_gc_make_string_input_port(ChGC *gc, const char *bytes, size_t len);
+ChValue ch_gc_make_string_output_port(ChGC *gc);
+ChValue ch_gc_make_transformer(ChGC *gc);
+ChValue ch_gc_make_record_type(ChGC *gc, ChValue name, uint16_t num_fields);
+ChValue ch_gc_make_record(ChGC *gc, ChRecordType *rtype, ChValue *fields, uint16_t nfields);
 
 #ifdef __cplusplus
 }
