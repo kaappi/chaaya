@@ -46,5 +46,6 @@ See `tests/scheme/kaappi-deferred/README.md`. Rough gates:
 4. Exact integers / bignum — **done** (MVP; demote to fixnum)
 5. Rationals + exact `/` — **done** (MVP)
 6. Complexes (inexact rectangular) — **done** (MVP)
-7. SRFI-64 or `(chibi test)`
-8. Re-run Kaappi’s `tests/scheme/run-all.sh` corpus against `chaaya`
+7. `(scheme inexact)` / `(scheme exact)` + math prims — **done** (MVP)
+8. SRFI-64 or `(chibi test)`
+9. Re-run Kaappi’s `tests/scheme/run-all.sh` corpus against `chaaya`

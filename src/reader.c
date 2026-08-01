@@ -301,6 +301,10 @@ static bool try_parse_number(ChGC *gc, const char *text, size_t len, ChValue *ou
     return false;
 }
 
+bool ch_parse_number(ChGC *gc, const char *text, size_t len, ChValue *out) {
+    return try_parse_number(gc, text, len, out);
+}
+
 static ChReadStatus read_atom(ChReader *r, ChValue *out) {
     size_t start = r->pos;
     while (!is_delim(peek(r))) {

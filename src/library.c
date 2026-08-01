@@ -220,6 +220,10 @@ int ch_register_builtin_libraries(ChVM *vm) {
         "file-exists?",         "delete-file"};
     static const char *const complex_exports[] = {
         "angle", "imag-part", "magnitude", "make-polar", "make-rectangular", "real-part"};
+    static const char *const inexact_exports[] = {
+        "acos", "asin", "atan", "cos", "exp", "finite?", "infinite?", "log", "nan?", "sin", "sqrt",
+        "tan"};
+    static const char *const exact_exports[] = {"exact", "exact-integer-sqrt", "inexact"};
     if (register_exports_from_globals(vm, "scheme.write", write_exports,
                                       sizeof(write_exports) / sizeof(write_exports[0])) != 0) {
         return -1;
@@ -250,6 +254,14 @@ int ch_register_builtin_libraries(ChVM *vm) {
     }
     if (register_exports_from_globals(vm, "scheme.complex", complex_exports,
                                       sizeof(complex_exports) / sizeof(complex_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "scheme.inexact", inexact_exports,
+                                      sizeof(inexact_exports) / sizeof(inexact_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "scheme.exact", exact_exports,
+                                      sizeof(exact_exports) / sizeof(exact_exports[0])) != 0) {
         return -1;
     }
     /* case-lambda is a compiler special form; library exists for R7RS import. */

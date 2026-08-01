@@ -52,4 +52,12 @@
 (check-eqv "scheme.complex real-part" 1.0 (real-part 1+2i))
 (check-eqv "scheme.complex imag-part" 2.0 (imag-part 1+2i))
 
+(import (only (scheme inexact) sqrt sin finite?))
+(check-assert "scheme.inexact sqrt" (= (sqrt 9) 3.0))
+(check-assert "scheme.inexact finite?" (finite? 1.5))
+
+(import (only (scheme exact) exact inexact))
+(check-assert "scheme.exact exact" (= (exact 2.5) 5/2))
+(check-assert "scheme.exact inexact" (inexact? (inexact 3)))
+
 (check-finish)

@@ -30,6 +30,7 @@ add_library(chaaya_core STATIC
   src/prim_control.c
   src/prim_list.c
   src/prim_data.c
+  src/prim_math.c
   src/prim_port.c
   src/prim_record.c
   src/prim_lazy.c

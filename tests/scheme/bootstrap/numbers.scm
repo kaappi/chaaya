@@ -82,4 +82,34 @@
 (check-assert "make-polar roundtrip"
               (= (make-polar 5 0) 5.0))
 
+;; Math / exactness / string convert
+(check-eqv "floor" 3 (floor 13/4))
+(check-eqv "ceiling" 4 (ceiling 13/4))
+(check-eqv "truncate" 3 (truncate 13/4))
+(check-assert "exact 1.5" (= (exact 1.5) 3/2))
+(check-assert "inexact 2" (inexact? (inexact 2)))
+(check-assert "positive?" (positive? 3))
+(check-assert "negative?" (negative? -1))
+(check-assert "odd?" (odd? 3))
+(check-assert "even?" (even? 4))
+(check-eqv "max" 9 (max 1 9 3))
+(check-eqv "min" 1 (min 1 9 3))
+(check-eqv "modulo" 1 (modulo 13 4))
+(check-eqv "modulo neg" 3 (modulo -13 4))
+(check-eqv "gcd" 4 (gcd 32 12))
+(check-eqv "lcm" 36 (lcm 12 18))
+(check-eqv "square" 9 (square 3))
+(check-eqv "expt" 8 (expt 2 3))
+(check-assert "expt neg" (= (expt 2 -3) 1/8))
+(check-assert "sqrt 4" (= (sqrt 4) 2.0))
+(check-assert "sin 0" (= (sin 0) 0.0))
+(check-assert "finite?" (finite? 1.0))
+(check-assert "number->string" (string=? (number->string 42) "42"))
+(check-assert "string->number" (= (string->number "1/2") 1/2))
+(check-assert "string->number hex" (= (string->number "ff" 16) 255))
+(check-assert "number->string hex" (string=? (number->string 255 16) "ff"))
+(check-eqv "exact-integer-sqrt"
+           5
+           (call-with-values (lambda () (exact-integer-sqrt 27)) (lambda (s r) s)))
+
 (check-finish)

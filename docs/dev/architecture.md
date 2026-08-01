@@ -151,7 +151,7 @@ system; `include` / `cond-expand` / `(features)`; R7RS `define-record-type`;
 `case-lambda`; `delay`/`force` (`(scheme lazy)`); file ports (`(scheme file)`);
 bignum exact integers (`src/bignum.c`); exact rationals
 (`src/rational.c`); inexact complexes (`src/complex.c`); built-in
-`(scheme base|write|read|cxr|char|process-context|lazy|file|complex|case-lambda)`.
+`(scheme base|write|read|cxr|char|process-context|lazy|file|complex|inexact|exact|case-lambda)`.
 
 See the root [README](../../README.md) for the phase table. Conformance /
 compatibility tests borrowed from Kaappi are documented in

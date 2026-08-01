@@ -27,6 +27,9 @@ void ch_reader_init(ChReader *r, ChGC *gc, const char *src, size_t len);
 ChReadStatus ch_read_datum(ChReader *r, ChValue *out);
 const char *ch_reader_error(const ChReader *r);
 
+/* Parse a full numeric literal (no surrounding whitespace). Returns false on failure. */
+bool ch_parse_number(ChGC *gc, const char *text, size_t len, ChValue *out);
+
 #ifdef __cplusplus
 }
 #endif
