@@ -46,8 +46,9 @@ Work tracked here intentionally stays **documentation and stubs** until a dedica
 ### kaappi-deferred compliance in CTest
 
 - Runner: [`tests/scheme/run_kaappi_deferred.cmake`](../scheme/run_kaappi_deferred.cmake) (mirrors R7RS runner).
-- **Tier 1 enabled:** `sqrt-exact`, `lists`, `vectors` under [`tests/scheme/kaappi-deferred/compliance/`](../scheme/kaappi-deferred/compliance/).
-- **Tier 2+:** numeric/string/macro gaps — enable per-file after local green; see [`tests/scheme/kaappi-deferred/README.md`](../scheme/kaappi-deferred/README.md).
+- **Tier 1 enabled (CTest):** `sqrt-exact`, `lists`, `vectors` — SRFI-64 `(test-begin …)` works after library export/GC fixes; suites still fail on numeric/test-macro runtime gaps (not import blockers).
+- **Tier 2 candidates (local green before CTest):** `macro-export-scope`, `eval`, `lazy`, `chars`, `bytevectors`.
+- **Next engine work:** nested quasiquote (`,,`) segfault in full `r7rs-tests.scm` (~line 354); SRFI-64 `test-equal` / `guard` interaction in deferred compliance.
 
 ## LLVM native stub
 

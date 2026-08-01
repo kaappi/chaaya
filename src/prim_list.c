@@ -101,29 +101,28 @@ static ChValue prim_append(ChVM *vm, ChValue *args, int nargs) {
     ch_gc_push(&vm->gc, &result);
     for (int i = nargs - 2; i >= 0; i--) {
         ChValue lst = args[i];
-        /* copy lst onto result */
-        ChValue parts[256];
-        int n = 0;
+        ChValue rev = CH_NIL;
+        ch_gc_push(&vm->gc, &rev);
         while (ch_is_pair(lst)) {
-            if (n >= 256) {
-                ch_gc_pop(&vm->gc);
-                snprintf(vm->error, sizeof(vm->error), "append: list too long");
-                return CH_UNDEFINED;
-            }
-            parts[n++] = ch_car(lst);
+            ChValue item = ch_car(lst);
+            ch_gc_push(&vm->gc, &item);
+            rev = ch_gc_cons(&vm->gc, item, rev);
+            ch_gc_pop(&vm->gc);
             lst = ch_cdr(lst);
         }
         if (!ch_is_nil(lst)) {
-            ch_gc_pop(&vm->gc);
+            ch_gc_pop_n(&vm->gc, 2);
             snprintf(vm->error, sizeof(vm->error), "append: not a proper list");
             return CH_UNDEFINED;
         }
-        for (int j = n - 1; j >= 0; j--) {
-            ChValue item = parts[j];
+        while (ch_is_pair(rev)) {
+            ChValue item = ch_car(rev);
             ch_gc_push(&vm->gc, &item);
             result = ch_gc_cons(&vm->gc, item, result);
             ch_gc_pop(&vm->gc);
+            rev = ch_cdr(rev);
         }
+        ch_gc_pop(&vm->gc);
     }
     ch_gc_pop(&vm->gc);
     return result;
@@ -262,6 +261,34 @@ static ChValue prim_list_copy(ChVM *vm, ChValue *args, int nargs) {
     }
     ch_gc_pop_n(&vm->gc, 2);
     return head;
+}
+
+static ChValue prim_make_list(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 1 || nargs > 2) {
+        snprintf(vm->error, sizeof(vm->error), "make-list: wrong number of arguments");
+        return CH_UNDEFINED;
+    }
+    if (!ch_is_fixnum(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "make-list: expected integer");
+        return CH_UNDEFINED;
+    }
+    int64_t n = ch_to_fixnum(args[0]);
+    if (n < 0) {
+        snprintf(vm->error, sizeof(vm->error), "make-list: negative length");
+        return CH_UNDEFINED;
+    }
+    ChValue fill = (nargs == 2) ? args[1] : CH_FALSE;
+    ChValue result = CH_NIL;
+    ch_gc_push(&vm->gc, &result);
+    ch_gc_push(&vm->gc, &fill);
+    for (int64_t i = 0; i < n; i++) {
+        ChValue item = fill;
+        ch_gc_push(&vm->gc, &item);
+        result = ch_gc_cons(&vm->gc, item, result);
+        ch_gc_pop(&vm->gc);
+    }
+    ch_gc_pop_n(&vm->gc, 2);
+    return result;
 }
 
 static ChValue prim_caar(ChVM *vm, ChValue *args, int nargs) {
@@ -475,6 +502,7 @@ void ch_register_list_primitives(ChVM *vm) {
     define_prim(vm, "list-tail", prim_list_tail, 2, 2);
     define_prim(vm, "list-set!", prim_list_set, 3, 3);
     define_prim(vm, "list-copy", prim_list_copy, 1, 1);
+    define_prim(vm, "make-list", prim_make_list, -1, 1);
     define_prim(vm, "caar", prim_caar, 1, 1);
     define_prim(vm, "cadr", prim_cadr, 1, 1);
     define_prim(vm, "cdar", prim_cdar, 1, 1);

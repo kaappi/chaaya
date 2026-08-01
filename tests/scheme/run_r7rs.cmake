@@ -17,6 +17,11 @@ string(REGEX MATCHALL "([0-9]+) pass, ([0-9]+) fail" section_summaries "${combin
 list(LENGTH section_summaries section_count)
 
 if(section_count EQUAL 0)
+  if(NOT rc EQUAL 0)
+    message(FATAL_ERROR
+      "r7rs suite crashed or failed (exit ${rc}) without section summaries.\n"
+      "--- stdout ---\n${out}\n--- stderr ---\n${err}")
+  endif()
   message(FATAL_ERROR
     "r7rs suite did not report section pass/fail counts.\n"
     "--- stdout ---\n${out}\n--- stderr ---\n${err}")

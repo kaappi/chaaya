@@ -407,13 +407,16 @@ static int merge_env_into_globals(ChVM *vm, const ChLibEnv *env, ChLibEnv *macro
         int idx = ch_vm_intern_global(vm, env->bindings[i].name);
         ch_vm_define_global(vm, idx, env->bindings[i].value);
         if (ch_is_transformer(env->bindings[i].value)) {
-            if (ch_vm_define_macro(vm, env->bindings[i].name,
-                                   ch_as_transformer(env->bindings[i].value)) != 0) {
+            ChLibEnv *saved_lib = vm->active_lib_env;
+            if (macro_home) {
+                vm->active_lib_env = macro_home;
+            }
+            int mrc = ch_vm_define_macro(vm, env->bindings[i].name,
+                                         ch_as_transformer(env->bindings[i].value));
+            vm->active_lib_env = saved_lib;
+            if (mrc != 0) {
                 snprintf(vm->error, sizeof(vm->error), "import: macro table full");
                 return -1;
-            }
-            if (macro_home && vm->macro_count > 0) {
-                vm->macros[vm->macro_count - 1].home_env = macro_home;
             }
         }
     }
@@ -569,6 +572,14 @@ size_t ch_library_push_gc_roots(ChVM *vm) {
         for (size_t j = 0; j < lib->export_count; j++) {
             ch_gc_push(&vm->gc, &lib->export_values[j]);
             n++;
+        }
+        if (lib->runtime_env) {
+            for (size_t j = 0; j < lib->runtime_env->count; j++) {
+                if (lib->runtime_env->bindings[j].defined) {
+                    ch_gc_push(&vm->gc, &lib->runtime_env->bindings[j].value);
+                    n++;
+                }
+            }
         }
     }
     return n;
@@ -1034,6 +1045,30 @@ int ch_handle_import(ChVM *vm, ChValue args) {
     return 0;
 }
 
+static void push_lib_env_roots(ChVM *vm, ChLibEnv *env) {
+    if (!env) {
+        return;
+    }
+    for (size_t i = 0; i < env->count; i++) {
+        if (env->bindings[i].defined) {
+            ch_gc_push(&vm->gc, &env->bindings[i].value);
+        }
+    }
+}
+
+static size_t lib_env_root_count(ChLibEnv *env) {
+    if (!env) {
+        return 0;
+    }
+    size_t n = 0;
+    for (size_t i = 0; i < env->count; i++) {
+        if (env->bindings[i].defined) {
+            n++;
+        }
+    }
+    return n;
+}
+
 static int eval_library_begin(ChVM *vm, ChLibEnv *env, ChValue body) {
     /* Evaluate library bodies in isolated env; do not pollute VM globals. */
     ChLibEnv *saved = vm->active_lib_env;
@@ -1045,14 +1080,15 @@ static int eval_library_begin(ChVM *vm, ChLibEnv *env, ChValue body) {
         for (size_t i = 0; i < vm->global_count; i++) {
             ch_gc_push(&vm->gc, &vm->globals[i].value);
         }
-        size_t groots = vm->global_count;
+        push_lib_env_roots(vm, env);
+        size_t extra_roots = vm->global_count + lib_env_root_count(env);
 
         if (eval_toplevel_form(vm, form) != 0) {
-            ch_gc_pop_n(&vm->gc, 1 + groots);
+            ch_gc_pop_n(&vm->gc, 1 + extra_roots);
             vm->active_lib_env = saved;
             return -1;
         }
-        ch_gc_pop_n(&vm->gc, 1 + groots);
+        ch_gc_pop_n(&vm->gc, 1 + extra_roots);
     }
 
     vm->active_lib_env = saved;

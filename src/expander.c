@@ -500,14 +500,36 @@ static ChValue nth_of(ChValue lst, int n) {
     return ch_is_pair(lst) ? ch_car(lst) : CH_NIL;
 }
 
+static ChValue deep_copy_instantiate(ChExpandCtx *ctx, ChValue v) {
+    if (ch_is_pair(v)) {
+        ChValue car = deep_copy_instantiate(ctx, ch_car(v));
+        ch_gc_push(&ctx->vm->gc, &car);
+        ChValue cdr = deep_copy_instantiate(ctx, ch_cdr(v));
+        ch_gc_push(&ctx->vm->gc, &cdr);
+        ChValue out = ch_gc_cons(&ctx->vm->gc, car, cdr);
+        ch_gc_pop_n(&ctx->vm->gc, 2);
+        return out;
+    }
+    if (ch_is_vector(v)) {
+        ChVector *src = ch_as_vector(v);
+        ChValue out = ch_gc_make_vector(&ctx->vm->gc, src->len, CH_UNDEFINED);
+        ChVector *dst = ch_as_vector(out);
+        for (size_t i = 0; i < src->len; i++) {
+            dst->items[i] = deep_copy_instantiate(ctx, src->items[i]);
+        }
+        return out;
+    }
+    return v;
+}
+
 static ChValue instantiate_with_index(ChExpandCtx *ctx, ChValue tmpl, int index) {
     if (ch_is_symbol(tmpl)) {
         ChBinding *b = find_bind(ctx, ch_as_symbol(tmpl));
         if (b) {
             if (b->ellipsis) {
-                return nth_of(b->value, index);
+                return deep_copy_instantiate(ctx, nth_of(b->value, index));
             }
-            return b->value;
+            return deep_copy_instantiate(ctx, b->value);
         }
         if (is_literal(ctx, ch_as_symbol(tmpl)) ||
             is_well_known(ch_symbol_basename(ch_as_symbol(tmpl)))) {
@@ -692,7 +714,7 @@ static ChValue instantiate(ChExpandCtx *ctx, ChValue tmpl) {
         ChSymbol *s = ch_as_symbol(tmpl);
         ChBinding *b = find_bind(ctx, s);
         if (b) {
-            return b->value;
+            return deep_copy_instantiate(ctx, b->value);
         }
         if (ctx->in_quote) {
             return tmpl;

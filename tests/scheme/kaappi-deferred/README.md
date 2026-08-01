@@ -1,23 +1,25 @@
 # Deferred Kaappi suites
 
 These trees are copied from [Kaappi](https://github.com/kaappi/kaappi)
-`tests/scheme/` for future enablement. They are **not** run by `make test`
-yet.
+`tests/scheme/` for future enablement.
 
-| Tree | Source | Blockers on Chaaya v0.1 |
-|------|--------|-------------------------|
-| `smoke/` | `kaappi/tests/scheme/smoke/` | `(import …)`, SRFI-64 / chibi-test, macros, most R7RS libraries |
-| `compliance/` | `kaappi/tests/scheme/compliance/` | Same + full R7RS procedure surface |
-| `differential-probes/` | `kaappi/tests/scheme/differential/probes/` | Full numeric tower, error mid-stream, `zero?`/`exact?`/`expt`, … |
+| Tree | Source | CTest / blockers (2026-08) |
+|------|--------|----------------------------|
+| `smoke/` | `kaappi/tests/scheme/smoke/` | not wired — enable after compliance Tier-1 stabilizes |
+| `compliance/` | `kaappi/tests/scheme/compliance/` | **Tier 1 wired:** `sqrt-exact`, `lists`, `vectors` (still failing on test-runtime gaps, not SRFI-64 import) |
+| `differential-probes/` | `kaappi/tests/scheme/differential/probes/` | not wired — needs full numeric tower + error semantics |
 
-Active ports that already run:
+Active ports that already run under `make test`:
 
-- `tests/scheme/bootstrap/` — SRFI-64-style checks without `import` (harness prepended)
-- `tests/scheme/probes/` — display-based probes adapted from Kaappi’s differential probes
-- `tests/scheme/r7rs/r7rs-tests.scm` — canonical R7RS-small suite (also deferred; needs libraries + `(chibi test)`)
+- `tests/scheme/bootstrap/` — Kaappi-shaped `check-*` suites (includes `srfi-smoke.scm`)
+- `tests/scheme/probes/` — display-based probes
+- `tests/scheme/r7rs/r7rs-tests.scm` — `r7rs_suite` (§4.1–4.3 green in slices; full file segfaults on nested quasiquote ~line 354)
 
-When Phase 6+ lands (libraries, `syntax-rules`, SRFI-64), prefer enabling these
-files in place over rewriting them. Re-sync from Kaappi periodically:
+Runner: [`tests/scheme/run_kaappi_deferred.cmake`](../run_kaappi_deferred.cmake).
+
+**Enablement process:** local green with `./build/chaaya --lib-path ./lib <file>.scm`, then add `chaaya_kaappi_deferred_test(...)` in [`CMakeLists.txt`](../../../CMakeLists.txt).
+
+Re-sync from Kaappi periodically:
 
 ```bash
 rsync -a --delete --include='*/' --include='*.scm' --include='*.sh' --include='*.sbc' --exclude='*' \
