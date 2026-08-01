@@ -127,6 +127,25 @@ static ChValue prim_thread_p(ChVM *vm, ChValue *args, int nargs) {
     return CH_FALSE;
 }
 
+static ChValue prim_thread_name(ChVM *vm, ChValue *args, int nargs) {
+    (void)args;
+    (void)nargs;
+    return thread_nyi(vm, "thread-name");
+}
+
+static ChValue prim_make_mutex(ChVM *vm, ChValue *args, int nargs) {
+    (void)args;
+    (void)nargs;
+    return thread_nyi(vm, "make-mutex");
+}
+
+static ChValue prim_mutex_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)args;
+    (void)nargs;
+    return CH_FALSE;
+}
+
 void ch_register_fiber_primitives(ChVM *vm) {
     define_prim(vm, "spawn-fiber", prim_spawn_fiber, 1, 1);
     define_prim(vm, "fiber-yield", prim_fiber_yield, 0, 0);
@@ -144,4 +163,7 @@ void ch_register_fiber_primitives(ChVM *vm) {
     define_prim(vm, "thread-yield!", prim_thread_yield, 0, 0);
     define_prim(vm, "current-thread", prim_current_thread, 0, 0);
     define_prim(vm, "thread?", prim_thread_p, 1, 1);
+    define_prim(vm, "thread-name", prim_thread_name, 1, 1);
+    define_prim(vm, "make-mutex", prim_make_mutex, -1, 0);
+    define_prim(vm, "mutex?", prim_mutex_p, 1, 1);
 }

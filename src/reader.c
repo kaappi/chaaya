@@ -429,6 +429,38 @@ static ChReadStatus read_atom(ChReader *r, ChValue *out) {
         *out = ch_make_char((unsigned char)text[2]);
         return CH_READ_OK;
     }
+    if (len >= 3 && text[0] == '#') {
+        int base = 0;
+        size_t num_start = 2;
+        switch (text[1]) {
+        case 'x':
+        case 'X':
+            base = 16;
+            break;
+        case 'o':
+        case 'O':
+            base = 8;
+            break;
+        case 'b':
+        case 'B':
+            base = 2;
+            break;
+        case 'd':
+        case 'D':
+            base = 10;
+            break;
+        default:
+            break;
+        }
+        if (base != 0) {
+            char *end = NULL;
+            unsigned long long uv = strtoull(text + num_start, &end, base);
+            if (end && (size_t)(end - text) == len) {
+                *out = ch_make_integer(r->gc, (int64_t)uv);
+                return CH_READ_OK;
+            }
+        }
+    }
     ChValue num;
     if (try_parse_number(r->gc, text, len, &num)) {
         *out = num;

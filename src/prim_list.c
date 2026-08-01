@@ -413,6 +413,27 @@ static ChValue prim_map(ChVM *vm, ChValue *args, int nargs) {
     return acc;
 }
 
+static ChValue prim_symbol_eq(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 2) {
+        return CH_TRUE;
+    }
+    if (!ch_is_symbol(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "symbol=?: not a symbol");
+        return CH_UNDEFINED;
+    }
+    ChSymbol *s0 = ch_as_symbol(args[0]);
+    for (int i = 1; i < nargs; i++) {
+        if (!ch_is_symbol(args[i])) {
+            snprintf(vm->error, sizeof(vm->error), "symbol=?: not a symbol");
+            return CH_UNDEFINED;
+        }
+        if (ch_as_symbol(args[i]) != s0) {
+            return CH_FALSE;
+        }
+    }
+    return CH_TRUE;
+}
+
 static ChValue prim_for_each(ChVM *vm, ChValue *args, int nargs) {
     if (nargs != 2) {
         snprintf(vm->error, sizeof(vm->error), "for-each: expected procedure and one list (bootstrap)");
@@ -466,4 +487,5 @@ void ch_register_list_primitives(ChVM *vm) {
     define_prim(vm, "assoc", prim_assoc, 2, 2);
     define_prim(vm, "map", prim_map, -1, 2);
     define_prim(vm, "for-each", prim_for_each, -1, 2);
+    define_prim(vm, "symbol=?", prim_symbol_eq, -1, 2);
 }

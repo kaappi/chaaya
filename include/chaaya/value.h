@@ -60,6 +60,9 @@ typedef enum ChObjectTag {
     CH_TAG_CHANNEL = 24,
     CH_TAG_FOREIGN_LIBRARY = 25,
     CH_TAG_FOREIGN_PROC = 26,
+    CH_TAG_RANDOM_SOURCE = 27,
+    CH_TAG_EPHEMERON = 28,
+    CH_TAG_FILE_INFO = 29,
 } ChObjectTag;
 
 typedef struct ChObject {
@@ -156,10 +159,13 @@ typedef struct ChFunction {
     uint8_t *uv_index;
 } ChFunction;
 
+struct ChLibEnv;
+
 typedef struct ChClosure {
     ChObject header;
     ChFunction *fn;
     ChUpvalue **upvalues;
+    struct ChLibEnv *home_env; /* library env for CH_ENV_LIB_BIT global ops */
 } ChClosure;
 
 /* Saved call frame inside a continuation snapshot (R7RS 6.10). */
@@ -242,6 +248,7 @@ typedef struct ChTransformer {
     ChObject header;
     ChSymbol *literals[CH_TRANSFORMER_MAX_LITERALS];
     size_t literal_count;
+    ChSymbol *ellipsis_id; /* NULL => "..." */
     ChValue patterns[CH_TRANSFORMER_MAX_RULES];
     ChValue templates[CH_TRANSFORMER_MAX_RULES];
     size_t rule_count;
@@ -333,6 +340,35 @@ typedef struct ChTime {
     ChValue type_sym; /* time-utc, time-monotonic, etc. */
 } ChTime;
 
+typedef struct ChRandomSource {
+    ChObject header;
+    uint64_t s[4]; /* xoshiro256** state */
+} ChRandomSource;
+
+typedef struct ChEphemeron {
+    ChObject header;
+    ChValue key;
+    ChValue value;
+    uint8_t broken;
+} ChEphemeron;
+
+typedef struct ChFileInfo {
+    ChObject header;
+    uint32_t mode;
+    int64_t size;
+    int64_t mtime_sec;
+    int64_t atime_sec;
+    int64_t ctime_sec;
+    uint64_t dev;
+    uint64_t ino;
+    uint64_t nlinks;
+    uint64_t rdev;
+    int64_t blksize;
+    int64_t blocks;
+    uint32_t uid;
+    uint32_t gid;
+} ChFileInfo;
+
 /* Signed i48 fixnum range. */
 #define CH_FIXNUM_MIN (-((int64_t)1 << 47))
 #define CH_FIXNUM_MAX (((int64_t)1 << 47) - 1)
@@ -402,6 +438,9 @@ bool ch_is_fiber(ChValue v);
 bool ch_is_channel(ChValue v);
 bool ch_is_foreign_library(ChValue v);
 bool ch_is_foreign_procedure(ChValue v);
+bool ch_is_random_source(ChValue v);
+bool ch_is_ephemeron(ChValue v);
+bool ch_is_file_info(ChValue v);
 bool ch_is_exact_integer(ChValue v);
 bool ch_is_exact(ChValue v); /* integer or rational */
 bool ch_is_number(ChValue v);
@@ -433,6 +472,9 @@ ChFiber *ch_as_fiber(ChValue v);
 ChChannel *ch_as_channel(ChValue v);
 ChForeignLibrary *ch_as_foreign_library(ChValue v);
 ChForeignProcedure *ch_as_foreign_procedure(ChValue v);
+ChRandomSource *ch_as_random_source(ChValue v);
+ChEphemeron *ch_as_ephemeron(ChValue v);
+ChFileInfo *ch_as_file_info(ChValue v);
 
 /* Collapse multiple values to the first (or void if none). */
 ChValue ch_coerce_single(ChValue v);

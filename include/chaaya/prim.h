@@ -16,11 +16,15 @@ void ch_register_record_primitives(ChVM *vm);
 void ch_register_lazy_primitives(ChVM *vm);
 void ch_register_math_primitives(ChVM *vm);
 void ch_register_eval_primitives(ChVM *vm);
+void ch_register_process_primitives(ChVM *vm);
 void ch_register_error_primitives(ChVM *vm);
 void ch_register_hashtable_primitives(ChVM *vm);
 void ch_register_bytevector_primitives(ChVM *vm);
 void ch_register_fiber_primitives(ChVM *vm);
 void ch_register_ffi_primitives(ChVM *vm);
+void ch_register_random_primitives(ChVM *vm);
+void ch_register_filesystem_primitives(ChVM *vm);
+void ch_register_weak_primitives(ChVM *vm);
 
 #ifdef __cplusplus
 }

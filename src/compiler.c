@@ -1,5 +1,6 @@
 #include "chaaya/compiler.h"
 
+#include "chaaya/eval.h"
 #include "chaaya/expander.h"
 #include "chaaya/ir.h"
 #include "chaaya/library.h"
@@ -20,6 +21,7 @@ static size_t guard_gensym_counter = 0;
 static size_t parameterize_gensym_counter = 0;
 static size_t do_gensym_counter = 0;
 static size_t case_gensym_counter = 0;
+static size_t let_values_gensym_counter = 0;
 
 typedef struct ChLocal {
     ChSymbol *name;
@@ -380,6 +382,174 @@ static ChCompileStatus compile_begin(ChCompiler *c, ChFuncCompiler *fc, ChValue 
     return CH_COMPILE_OK;
 }
 
+typedef struct ChMacroSave {
+    ChSymbol *name;
+    ChValue old_transformer;
+} ChMacroSave;
+
+static ChValue lookup_macro_value(ChVM *vm, ChSymbol *name) {
+    const char *base = ch_symbol_basename(name);
+    for (size_t i = 0; i < vm->macro_count; i++) {
+        if (strcmp(ch_symbol_basename(vm->macros[i].name), base) == 0) {
+            return vm->macros[i].transformer;
+        }
+    }
+    return CH_NIL;
+}
+
+static void remove_macro_binding(ChVM *vm, ChSymbol *name) {
+    const char *base = ch_symbol_basename(name);
+    for (size_t i = 0; i < vm->macro_count; i++) {
+        if (strcmp(ch_symbol_basename(vm->macros[i].name), base) == 0) {
+            vm->macro_count--;
+            vm->macros[i] = vm->macros[vm->macro_count];
+            return;
+        }
+    }
+}
+
+static void restore_macro_binding(ChVM *vm, const ChMacroSave *save) {
+    if (save->old_transformer == CH_NIL) {
+        remove_macro_binding(vm, save->name);
+    } else {
+        ch_vm_define_macro(vm, save->name, ch_as_transformer(save->old_transformer));
+    }
+}
+
+static ChCompileStatus compile_cond_expand(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
+                                           uint8_t dst, bool tail) {
+    ChValue body = CH_NIL;
+    char err[256];
+    int sel = ch_cond_expand_select(c->vm, args, &body, err, sizeof(err));
+    if (sel < 0) {
+        return fail(c, err);
+    }
+    if (sel == 1) {
+        emit_byte(fc, CH_OP_LOAD_VOID);
+        emit_byte(fc, dst);
+        return CH_COMPILE_OK;
+    }
+    return compile_begin(c, fc, body, dst, tail);
+}
+
+static ChCompileStatus compile_define_property(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
+                                               uint8_t dst) {
+    if (!fc->is_toplevel || fc->scope_depth > 0) {
+        return fail(c, "define-property: not allowed in body");
+    }
+    if (!ch_is_pair(args) || !ch_is_symbol(ch_car(args)) || !ch_is_pair(ch_cdr(args))) {
+        return fail(c, "define-property: bad syntax");
+    }
+    ChSymbol *id = ch_as_symbol(ch_car(args));
+    ChValue rest1 = ch_cdr(args);
+    if (!ch_is_symbol(ch_car(rest1)) || !ch_is_pair(ch_cdr(rest1)) ||
+        !ch_is_nil(ch_cdr(ch_cdr(rest1)))) {
+        return fail(c, "define-property: bad syntax");
+    }
+    ChSymbol *key = ch_as_symbol(ch_car(rest1));
+    ChValue expr = ch_car(ch_cdr(rest1));
+    ChValue val = CH_VOID;
+    ch_gc_push(&c->vm->gc, &val);
+    if (ch_eval_datum(c->vm, expr, CH_VOID, &val) != 0) {
+        ch_gc_pop(&c->vm->gc);
+        return fail(c, c->vm->error);
+    }
+    if (ch_vm_syntax_property_set(c->vm, ch_symbol_basename(id), ch_symbol_basename(key), val) !=
+        0) {
+        ch_gc_pop(&c->vm->gc);
+        return fail(c, "define-property: property table full");
+    }
+    ch_gc_pop(&c->vm->gc);
+    emit_byte(fc, CH_OP_LOAD_VOID);
+    emit_byte(fc, dst);
+    return CH_COMPILE_OK;
+}
+
+static ChCompileStatus compile_let_syntax(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
+                                        uint8_t dst, bool tail, int letrec) {
+    if (!ch_is_pair(args) || !ch_is_pair(ch_cdr(args))) {
+        return fail(c, letrec ? "letrec-syntax: bad syntax" : "let-syntax: bad syntax");
+    }
+    ChValue bindings = ch_car(args);
+    ChValue body = ch_cdr(args);
+
+    ChMacroSave saves[CH_MAX_DERIVED_BINDINGS];
+    int nsaves = 0;
+    ChSymbol *names[CH_MAX_DERIVED_BINDINGS];
+    ChTransformer *transformers[CH_MAX_DERIVED_BINDINGS];
+    int nbinds = 0;
+
+    if (!letrec) {
+        for (ChValue bl = bindings; ch_is_pair(bl); bl = ch_cdr(bl)) {
+            ChValue bind = ch_car(bl);
+            if (!ch_is_pair(bind) || !ch_is_symbol(ch_car(bind)) || !ch_is_pair(ch_cdr(bind))) {
+                return fail(c, "let-syntax: bad binding");
+            }
+            if (nbinds >= CH_MAX_DERIVED_BINDINGS) {
+                return fail(c, "let-syntax: too many bindings");
+            }
+            ChSymbol *kw = ch_as_symbol(ch_car(bind));
+            ChValue spec = ch_car(ch_cdr(bind));
+            ChTransformer *tr = NULL;
+            char err[256];
+            if (ch_parse_syntax_rules(c->vm, spec, &tr, err, sizeof(err)) != CH_EXPAND_OK) {
+                for (int i = 0; i < nsaves; i++) {
+                    restore_macro_binding(c->vm, &saves[i]);
+                }
+                return fail(c, err);
+            }
+            saves[nsaves].name = kw;
+            saves[nsaves].old_transformer = lookup_macro_value(c->vm, kw);
+            nsaves++;
+            names[nbinds] = kw;
+            transformers[nbinds++] = tr;
+        }
+        for (int i = 0; i < nbinds; i++) {
+            if (ch_vm_define_macro(c->vm, names[i], transformers[i]) != 0) {
+                for (int j = 0; j < nsaves; j++) {
+                    restore_macro_binding(c->vm, &saves[j]);
+                }
+                return fail(c, "let-syntax: too many macros");
+            }
+        }
+    } else {
+        for (ChValue bl = bindings; ch_is_pair(bl); bl = ch_cdr(bl)) {
+            ChValue bind = ch_car(bl);
+            if (!ch_is_pair(bind) || !ch_is_symbol(ch_car(bind)) || !ch_is_pair(ch_cdr(bind))) {
+                return fail(c, "letrec-syntax: bad binding");
+            }
+            if (nsaves >= CH_MAX_DERIVED_BINDINGS) {
+                return fail(c, "letrec-syntax: too many bindings");
+            }
+            ChSymbol *kw = ch_as_symbol(ch_car(bind));
+            ChValue spec = ch_car(ch_cdr(bind));
+            saves[nsaves].name = kw;
+            saves[nsaves].old_transformer = lookup_macro_value(c->vm, kw);
+            nsaves++;
+            ChTransformer *tr = NULL;
+            char err[256];
+            if (ch_parse_syntax_rules(c->vm, spec, &tr, err, sizeof(err)) != CH_EXPAND_OK) {
+                for (int i = 0; i < nsaves; i++) {
+                    restore_macro_binding(c->vm, &saves[i]);
+                }
+                return fail(c, err);
+            }
+            if (ch_vm_define_macro(c->vm, kw, tr) != 0) {
+                for (int i = 0; i < nsaves; i++) {
+                    restore_macro_binding(c->vm, &saves[i]);
+                }
+                return fail(c, "letrec-syntax: too many macros");
+            }
+        }
+    }
+
+    ChCompileStatus st = compile_begin(c, fc, body, dst, tail);
+    for (int i = 0; i < nsaves; i++) {
+        restore_macro_binding(c->vm, &saves[i]);
+    }
+    return st;
+}
+
 static ChCompileStatus compile_set(ChCompiler *c, ChFuncCompiler *fc, ChValue args, uint8_t dst) {
     if (!ch_is_pair(args) || !ch_is_pair(ch_cdr(args)) || !ch_is_nil(ch_cdr(ch_cdr(args)))) {
         return fail(c, "set!: bad syntax");
@@ -722,6 +892,412 @@ static ChCompileStatus compile_delay(ChCompiler *c, ChFuncCompiler *fc, ChValue 
     form = ch_gc_cons(gc, make_sym, form);
     ch_gc_pop_n(gc, 2);
     return compile_expr(c, fc, form, dst, tail);
+}
+
+static ChCompileStatus compile_delay_force(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
+                                           uint8_t dst, bool tail) {
+    /* delay-force: same lowering as delay; force iterates promises (prim_force). */
+    return compile_delay(c, fc, args, dst, tail);
+}
+
+static int parse_define_values_formals(ChValue formals, ChSymbol **names, int max_names,
+                                       ChSymbol **rest_name) {
+    *rest_name = NULL;
+    if (ch_is_nil(formals)) {
+        return 0;
+    }
+    if (ch_is_symbol(formals)) {
+        *rest_name = ch_as_symbol(formals);
+        return 0;
+    }
+    int count = 0;
+    for (ChValue f = formals; !ch_is_nil(f);) {
+        if (ch_is_symbol(f)) {
+            *rest_name = ch_as_symbol(f);
+            break;
+        }
+        if (!ch_is_pair(f) || !ch_is_symbol(ch_car(f))) {
+            return -1;
+        }
+        if (count >= max_names) {
+            return -1;
+        }
+        names[count++] = ch_as_symbol(ch_car(f));
+        f = ch_cdr(f);
+    }
+    return count;
+}
+
+static ChValue build_void_define_args(ChGC *gc, ChSymbol *name) {
+    ChValue val = ch_gc_cons(gc, CH_FALSE, CH_NIL);
+    val = ch_gc_cons(gc, CH_FALSE, val);
+    ChValue if_sym = ch_gc_intern_symbol_cstr(gc, "if");
+    val = ch_gc_cons(gc, if_sym, val);
+    ChValue one = ch_gc_cons(gc, val, CH_NIL);
+    return ch_gc_cons(gc, ch_make_pointer(&name->header), one);
+}
+
+static ChValue build_list_ref(ChGC *gc, ChValue list_expr, int index) {
+    ChValue cur = list_expr;
+    ChValue cdr_sym = ch_gc_intern_symbol_cstr(gc, "cdr");
+    for (int j = 0; j < index; j++) {
+        cur = ch_gc_cons(gc, cdr_sym, ch_gc_cons(gc, cur, CH_NIL));
+    }
+    ChValue car_sym = ch_gc_intern_symbol_cstr(gc, "car");
+    return ch_gc_cons(gc, car_sym, ch_gc_cons(gc, cur, CH_NIL));
+}
+
+/* Build assignment for top-level define-values; names must already be bound. */
+static ChCompileStatus build_define_values_assign_form(ChCompiler *c, ChSymbol **names, int name_count,
+                                                       ChSymbol *rest_name, ChValue expr,
+                                                       ChValue *out) {
+    ChGC *gc = &c->vm->gc;
+    ChValue lambda_sym = ch_gc_intern_symbol_cstr(gc, "lambda");
+    ChValue cwv_sym = ch_gc_intern_symbol_cstr(gc, "call-with-values");
+    ChValue list_sym = ch_gc_intern_symbol_cstr(gc, "list");
+    ChValue set_sym = ch_gc_intern_symbol_cstr(gc, "set!");
+
+    if (name_count == 0 && rest_name == NULL) {
+        *out = expr;
+        return CH_COMPILE_OK;
+    }
+
+    if (name_count == 0 && rest_name != NULL) {
+        /* (define-values x expr) → (set! x (call-with-values (lambda () expr) list)) */
+        ChValue producer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, expr, CH_NIL)));
+        ChValue cwv = ch_gc_cons(gc, cwv_sym,
+                                 ch_gc_cons(gc, producer, ch_gc_cons(gc, list_sym, CH_NIL)));
+        *out = ch_gc_cons(gc, set_sym,
+                          ch_gc_cons(gc, ch_make_pointer(&rest_name->header), ch_gc_cons(gc, cwv, CH_NIL)));
+        return CH_COMPILE_OK;
+    }
+
+    ChValue consumer_body = CH_NIL;
+    ch_gc_push(gc, &consumer_body);
+
+    if (rest_name != NULL && name_count > 0) {
+        ChSymbol *param = ch_as_symbol(ch_gc_intern_symbol_cstr(gc, "__dv_rest"));
+        ChValue set_form = ch_gc_cons(
+            gc, set_sym,
+            ch_gc_cons(gc, ch_make_pointer(&rest_name->header),
+                       ch_gc_cons(gc, ch_make_pointer(&param->header), CH_NIL)));
+        consumer_body = ch_gc_cons(gc, set_form, consumer_body);
+    }
+
+    for (int i = name_count - 1; i >= 0; i--) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "__dv_%d", i);
+        ChSymbol *param = ch_as_symbol(ch_gc_intern_symbol_cstr(gc, buf));
+        ChValue set_form =
+            ch_gc_cons(gc, set_sym,
+                       ch_gc_cons(gc, ch_make_pointer(&names[i]->header),
+                                  ch_gc_cons(gc, ch_make_pointer(&param->header), CH_NIL)));
+        consumer_body = ch_gc_cons(gc, set_form, consumer_body);
+    }
+
+    ChValue consumer_params = CH_NIL;
+    if (rest_name != NULL && name_count > 0) {
+        ChSymbol *rest_param = ch_as_symbol(ch_gc_intern_symbol_cstr(gc, "__dv_rest"));
+        consumer_params = ch_make_pointer(&rest_param->header);
+    }
+    for (int i = name_count - 1; i >= 0; i--) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "__dv_%d", i);
+        ChSymbol *param = ch_as_symbol(ch_gc_intern_symbol_cstr(gc, buf));
+        consumer_params = ch_gc_cons(gc, ch_make_pointer(&param->header), consumer_params);
+    }
+
+    ChValue consumer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, consumer_params, consumer_body));
+    ChValue producer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, expr, CH_NIL)));
+    *out = ch_gc_cons(gc, cwv_sym, ch_gc_cons(gc, producer, ch_gc_cons(gc, consumer, CH_NIL)));
+    ch_gc_pop(gc);
+    return CH_COMPILE_OK;
+}
+
+static ChCompileStatus compile_define_values_local_assign(ChCompiler *c, ChFuncCompiler *fc,
+                                                          ChSymbol **names, int name_count,
+                                                          ChSymbol *rest_name, ChValue expr,
+                                                          uint8_t dst) {
+    ChGC *gc = &c->vm->gc;
+
+    if (name_count == 0 && rest_name == NULL) {
+        return compile_expr(c, fc, expr, dst, false);
+    }
+
+    if (name_count == 0 && rest_name != NULL) {
+        ChValue lambda_sym = ch_gc_intern_symbol_cstr(gc, "lambda");
+        ChValue cwv_sym = ch_gc_intern_symbol_cstr(gc, "call-with-values");
+        ChValue list_sym = ch_gc_intern_symbol_cstr(gc, "list");
+        ChValue set_sym = ch_gc_intern_symbol_cstr(gc, "set!");
+        ChValue producer =
+            ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, expr, CH_NIL)));
+        ChValue cwv =
+            ch_gc_cons(gc, cwv_sym, ch_gc_cons(gc, producer, ch_gc_cons(gc, list_sym, CH_NIL)));
+        ChValue assign = ch_gc_cons(
+            gc, set_sym,
+            ch_gc_cons(gc, ch_make_pointer(&rest_name->header), ch_gc_cons(gc, cwv, CH_NIL)));
+        return compile_expr(c, fc, assign, dst, false);
+    }
+
+    /* Multi-name locals: evaluate to a temp list, then store into each local
+     * register directly (same-scope multi-set! on define locals is broken). */
+    ChSymbol *tmp = ch_as_symbol(ch_gc_intern_symbol_cstr(gc, "__dv_tmp"));
+    if (add_local(c, fc, tmp) < 0) {
+        return CH_COMPILE_ERROR;
+    }
+    int dv_idx = resolve_local(fc, tmp);
+
+    ChValue lambda_sym = ch_gc_intern_symbol_cstr(gc, "lambda");
+    ChValue cwv_sym = ch_gc_intern_symbol_cstr(gc, "call-with-values");
+    ChValue list_sym = ch_gc_intern_symbol_cstr(gc, "list");
+    ChValue producer =
+        ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, expr, CH_NIL)));
+    ChValue cwv =
+        ch_gc_cons(gc, cwv_sym, ch_gc_cons(gc, producer, ch_gc_cons(gc, list_sym, CH_NIL)));
+    if (compile_expr(c, fc, cwv, local_reg(fc, dv_idx), false) != CH_COMPILE_OK) {
+        return CH_COMPILE_ERROR;
+    }
+
+    ChValue dv_v = ch_make_pointer(&tmp->header);
+    for (int i = 0; i < name_count; i++) {
+        int li = resolve_local(fc, names[i]);
+        if (li < 0) {
+            return fail(c, "define-values: internal error");
+        }
+        ChValue ref = build_list_ref(gc, dv_v, i);
+        if (compile_expr(c, fc, ref, local_reg(fc, li), false) != CH_COMPILE_OK) {
+            return CH_COMPILE_ERROR;
+        }
+    }
+    if (rest_name != NULL) {
+        int ri = resolve_local(fc, rest_name);
+        if (ri < 0) {
+            return fail(c, "define-values: internal error");
+        }
+        ChValue tail_sym = ch_gc_intern_symbol_cstr(gc, "list-tail");
+        ChValue idx = ch_make_fixnum(name_count);
+        ChValue tail_call =
+            ch_gc_cons(gc, tail_sym, ch_gc_cons(gc, dv_v, ch_gc_cons(gc, idx, CH_NIL)));
+        if (compile_expr(c, fc, tail_call, local_reg(fc, ri), false) != CH_COMPILE_OK) {
+            return CH_COMPILE_ERROR;
+        }
+    }
+
+    /* Avoid clobbering a local slot when begin reuses dst for this form. */
+    if ((int)dst >= fc->local_count) {
+        emit_byte(fc, CH_OP_LOAD_VOID);
+        emit_byte(fc, dst);
+    }
+    return CH_COMPILE_OK;
+}
+
+static ChCompileStatus compile_define_values(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
+                                             uint8_t dst) {
+    if (!ch_is_pair(args) || !ch_is_pair(ch_cdr(args)) || !ch_is_nil(ch_cdr(ch_cdr(args)))) {
+        return fail(c, "define-values: bad syntax");
+    }
+    ChValue formals = ch_car(args);
+    ChValue expr = ch_car(ch_cdr(args));
+
+    ChSymbol *names[64];
+    ChSymbol *rest_name = NULL;
+    int name_count = parse_define_values_formals(formals, names, 64, &rest_name);
+    if (name_count < 0) {
+        return fail(c, "define-values: bad formals");
+    }
+
+    bool local = !fc->is_toplevel && fc->scope_depth > 0;
+    for (int i = 0; i < name_count; i++) {
+        if (local) {
+            if (add_local(c, fc, names[i]) < 0) {
+                return CH_COMPILE_ERROR;
+            }
+        } else {
+            ChValue def_args = build_void_define_args(&c->vm->gc, names[i]);
+            if (compile_define(c, fc, def_args, dst) != CH_COMPILE_OK) {
+                return CH_COMPILE_ERROR;
+            }
+        }
+    }
+    if (rest_name != NULL) {
+        if (local) {
+            if (add_local(c, fc, rest_name) < 0) {
+                return CH_COMPILE_ERROR;
+            }
+        } else {
+            ChValue def_args = build_void_define_args(&c->vm->gc, rest_name);
+            if (compile_define(c, fc, def_args, dst) != CH_COMPILE_OK) {
+                return CH_COMPILE_ERROR;
+            }
+        }
+    }
+
+    if (local) {
+        return compile_define_values_local_assign(c, fc, names, name_count, rest_name, expr, dst);
+    }
+
+    ChValue assign = CH_NIL;
+    ch_gc_push(&c->vm->gc, &assign);
+    if (build_define_values_assign_form(c, names, name_count, rest_name, expr, &assign) !=
+        CH_COMPILE_OK) {
+        ch_gc_pop(&c->vm->gc);
+        return CH_COMPILE_ERROR;
+    }
+    ChCompileStatus st = compile_expr(c, fc, assign, dst, false);
+    ch_gc_pop(&c->vm->gc);
+    if (st != CH_COMPILE_OK) {
+        return st;
+    }
+    emit_byte(fc, CH_OP_LOAD_VOID);
+    emit_byte(fc, dst);
+    return CH_COMPILE_OK;
+}
+
+/* (let-values (((a b) e) ...) body...) — all producers in outer scope (R7RS §4.2.2). */
+static ChCompileStatus compile_let_values(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
+                                          uint8_t dst, bool tail) {
+    if (!ch_is_pair(args) || !ch_is_pair(ch_cdr(args))) {
+        return fail(c, "let-values: bad syntax");
+    }
+    ChValue bindings = ch_car(args);
+    ChValue body = ch_cdr(args);
+
+    ChGC *gc = &c->vm->gc;
+    ChValue lambda_sym = ch_gc_intern_symbol_cstr(gc, "lambda");
+    ChValue apply_sym = ch_gc_intern_symbol_cstr(gc, "apply");
+    ChValue let_sym = ch_gc_intern_symbol_cstr(gc, "let");
+    ChValue begin_sym = ch_gc_intern_symbol_cstr(gc, "begin");
+    ChValue cwv_sym = ch_gc_intern_symbol_cstr(gc, "call-with-values");
+    ChValue list_sym = ch_gc_intern_symbol_cstr(gc, "list");
+
+    ChValue formals_arr[64];
+    ChValue exprs[64];
+    ChValue temp_syms[64];
+    int count = 0;
+
+    for (ChValue bl = bindings; ch_is_pair(bl); bl = ch_cdr(bl)) {
+        ChValue binding = ch_car(bl);
+        if (!ch_is_pair(binding) || !ch_is_pair(ch_cdr(binding))) {
+            return fail(c, "let-values: bad binding");
+        }
+        if (count >= 64) {
+            return fail(c, "let-values: too many bindings");
+        }
+        formals_arr[count] = ch_car(binding);
+        exprs[count] = ch_car(ch_cdr(binding));
+        let_values_gensym_counter++;
+        char buf[64];
+        snprintf(buf, sizeof(buf), "__lv_temp_%zu", let_values_gensym_counter);
+        temp_syms[count] = ch_gc_intern_symbol_cstr(gc, buf);
+        count++;
+    }
+    if (!ch_is_nil(bindings) && !ch_is_pair(bindings)) {
+        return fail(c, "let-values: bad bindings list");
+    }
+
+    ChValue inner = CH_NIL;
+    ch_gc_push(gc, &inner);
+    if (ch_is_nil(body)) {
+        inner = CH_VOID;
+    } else if (ch_is_nil(ch_cdr(body))) {
+        inner = ch_car(body);
+    } else {
+        inner = ch_gc_cons(gc, begin_sym, body);
+    }
+
+    for (int i = count - 1; i >= 0; i--) {
+        ChValue consumer_body = ch_gc_cons(gc, inner, CH_NIL);
+        ChValue consumer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, formals_arr[i], consumer_body));
+        inner = ch_gc_cons(gc, apply_sym, ch_gc_cons(gc, consumer, ch_gc_cons(gc, temp_syms[i], CH_NIL)));
+    }
+
+    ChValue let_binds = CH_NIL;
+    ch_gc_push(gc, &let_binds);
+    for (int i = count - 1; i >= 0; i--) {
+        ChValue producer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, exprs[i], CH_NIL)));
+        ChValue cwv = ch_gc_cons(gc, cwv_sym, ch_gc_cons(gc, producer, ch_gc_cons(gc, list_sym, CH_NIL)));
+        ChValue bind = ch_gc_cons(gc, temp_syms[i], ch_gc_cons(gc, cwv, CH_NIL));
+        let_binds = ch_gc_cons(gc, bind, let_binds);
+    }
+
+    ChValue form = CH_NIL;
+    ch_gc_push(gc, &form);
+    if (count == 0) {
+        form = ch_gc_cons(gc, let_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, inner, CH_NIL)));
+    } else {
+        form = ch_gc_cons(gc, let_sym, ch_gc_cons(gc, let_binds, ch_gc_cons(gc, inner, CH_NIL)));
+    }
+    ChCompileStatus st = compile_expr(c, fc, form, dst, tail);
+    ch_gc_pop_n(gc, 3);
+    return st;
+}
+
+/* Build nested call-with-values for sequential let*-values. */
+static ChCompileStatus build_let_star_values(ChCompiler *c, ChValue bindings, ChValue body,
+                                             ChValue *out) {
+    ChGC *gc = &c->vm->gc;
+    ChValue lambda_sym = ch_gc_intern_symbol_cstr(gc, "lambda");
+    ChValue cwv_sym = ch_gc_intern_symbol_cstr(gc, "call-with-values");
+    ChValue begin_sym = ch_gc_intern_symbol_cstr(gc, "begin");
+
+    if (ch_is_nil(bindings)) {
+        ChValue let_sym = ch_gc_intern_symbol_cstr(gc, "let");
+        ChValue inner;
+        if (ch_is_nil(body)) {
+            inner = CH_VOID;
+        } else if (ch_is_nil(ch_cdr(body))) {
+            inner = ch_car(body);
+        } else {
+            inner = ch_gc_cons(gc, begin_sym, body);
+        }
+        /* Empty let*-values still introduces a body scope for internal define. */
+        *out = ch_gc_cons(gc, let_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, inner, CH_NIL)));
+        return CH_COMPILE_OK;
+    }
+    if (!ch_is_pair(bindings)) {
+        return fail(c, "let*-values: bad bindings");
+    }
+
+    ChValue binding = ch_car(bindings);
+    ChValue rest = ch_cdr(bindings);
+    if (!ch_is_pair(binding) || !ch_is_pair(ch_cdr(binding))) {
+        return fail(c, "let*-values: bad binding");
+    }
+    ChValue formals = ch_car(binding);
+    ChValue expr = ch_car(ch_cdr(binding));
+
+    ChValue inner = CH_NIL;
+    ch_gc_push(gc, &inner);
+    if (build_let_star_values(c, rest, body, &inner) != CH_COMPILE_OK) {
+        ch_gc_pop(gc);
+        return CH_COMPILE_ERROR;
+    }
+
+    ChValue producer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, expr, CH_NIL)));
+    ChValue consumer_body = ch_gc_cons(gc, inner, CH_NIL);
+    ChValue consumer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, formals, consumer_body));
+    *out = ch_gc_cons(gc, cwv_sym, ch_gc_cons(gc, producer, ch_gc_cons(gc, consumer, CH_NIL)));
+    ch_gc_pop(gc);
+    return CH_COMPILE_OK;
+}
+
+static ChCompileStatus compile_let_star_values(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
+                                               uint8_t dst, bool tail) {
+    if (!ch_is_pair(args) || !ch_is_pair(ch_cdr(args))) {
+        return fail(c, "let*-values: bad syntax");
+    }
+    ChValue bindings = ch_car(args);
+    ChValue body = ch_cdr(args);
+
+    ChValue form = CH_NIL;
+    ch_gc_push(&c->vm->gc, &form);
+    if (build_let_star_values(c, bindings, body, &form) != CH_COMPILE_OK) {
+        ch_gc_pop(&c->vm->gc);
+        return CH_COMPILE_ERROR;
+    }
+    ChCompileStatus st = compile_expr(c, fc, form, dst, tail);
+    ch_gc_pop(&c->vm->gc);
+    return st;
 }
 
 static ChCompileStatus finish_function(ChCompiler *c, ChFuncCompiler *fc) {
@@ -1154,8 +1730,11 @@ static ChCompileStatus compile_cond(ChCompiler *c, ChFuncCompiler *fc, ChValue a
         ChValue form = ch_gc_cons(&c->vm->gc, begin_sym, exprs);
         return compile_expr(c, fc, form, dst, tail);
     }
-    /* (=> recipient) */
-    if (ch_is_pair(exprs) && is_symbol_named(ch_car(exprs), "=>")) {
+    /* (=> recipient) — only when => is not shadowed by a local binding */
+    ChValue arrow_v = ch_gc_intern_symbol_cstr(&c->vm->gc, "=>");
+    ChSymbol *arrow = ch_as_symbol(arrow_v);
+    if (ch_is_pair(exprs) && is_symbol_named(ch_car(exprs), "=>") && resolve_local(fc, arrow) < 0 &&
+        resolve_upvalue(fc, arrow) < 0) {
         if (!ch_is_pair(ch_cdr(exprs)) || !ch_is_nil(ch_cdr(ch_cdr(exprs)))) {
             return fail(c, "cond: bad => clause");
         }
@@ -1767,6 +2346,29 @@ static ChValue qq_expand_list(ChCompiler *c, ChValue xs, int level) {
 }
 
 static ChValue qq_expand(ChCompiler *c, ChValue x, int level) {
+    if (ch_is_vector(x)) {
+        ChValue x_root = x;
+        ch_gc_push(&c->vm->gc, &x_root);
+        ChVector *vec = ch_as_vector(x_root);
+        ChValue lst = CH_NIL;
+        ch_gc_push(&c->vm->gc, &lst);
+        for (size_t i = vec->len; i > 0; i--) {
+            ChValue item = vec->items[i - 1];
+            ch_gc_push(&c->vm->gc, &item);
+            lst = ch_gc_cons(&c->vm->gc, item, lst);
+            ch_gc_pop(&c->vm->gc);
+        }
+        ChValue expanded_list = qq_expand_list(c, lst, level);
+        if (expanded_list == CH_FALSE) {
+            ch_gc_pop_n(&c->vm->gc, 2);
+            return CH_FALSE;
+        }
+        ch_gc_push(&c->vm->gc, &expanded_list);
+        ChValue l2v_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "list->vector");
+        ChValue out = ch_gc_cons(&c->vm->gc, l2v_sym, ch_gc_cons(&c->vm->gc, expanded_list, CH_NIL));
+        ch_gc_pop_n(&c->vm->gc, 3);
+        return out;
+    }
     if (ch_is_pair(x)) {
         if (is_symbol_named(ch_car(x), "unquote")) {
             ChValue args = ch_cdr(x);
@@ -1887,11 +2489,25 @@ static ChCompileStatus compile_expr_impl(ChCompiler *c, ChFuncCompiler *fc, ChVa
             ChValue expanded = CH_NIL;
             ch_gc_push(&c->vm->gc, &expanded);
             char err[256];
+            ChLibEnv *saved_lib = c->vm->active_lib_env;
+            ChLibEnv *home = NULL;
+            const char *base = ch_symbol_basename(ch_as_symbol(head));
+            for (size_t i = 0; i < c->vm->macro_count; i++) {
+                if (strcmp(ch_symbol_basename(c->vm->macros[i].name), base) == 0) {
+                    home = c->vm->macros[i].home_env;
+                    break;
+                }
+            }
+            if (home) {
+                c->vm->active_lib_env = home;
+            }
             if (ch_expand_macro(c->vm, tr, expr, &expanded, err, sizeof(err)) != CH_EXPAND_OK) {
+                c->vm->active_lib_env = saved_lib;
                 ch_gc_pop(&c->vm->gc);
                 return fail(c, err);
             }
             ChCompileStatus st = compile_expr(c, fc, expanded, dst, tail);
+            c->vm->active_lib_env = saved_lib;
             ch_gc_pop(&c->vm->gc);
             return st;
         }
@@ -1921,6 +2537,18 @@ static ChCompileStatus compile_expr_impl(ChCompiler *c, ChFuncCompiler *fc, ChVa
         emit_byte(fc, dst);
         return CH_COMPILE_OK;
     }
+    if (is_symbol_named(head, "define-property")) {
+        return compile_define_property(c, fc, args, dst);
+    }
+    if (is_symbol_named(head, "let-syntax")) {
+        return compile_let_syntax(c, fc, args, dst, tail, 0);
+    }
+    if (is_symbol_named(head, "letrec-syntax")) {
+        return compile_let_syntax(c, fc, args, dst, tail, 1);
+    }
+    if (is_symbol_named(head, "cond-expand")) {
+        return compile_cond_expand(c, fc, args, dst, tail);
+    }
     if (is_symbol_named(head, "lambda")) {
         return compile_lambda(c, fc, args, dst);
     }
@@ -1929,6 +2557,12 @@ static ChCompileStatus compile_expr_impl(ChCompiler *c, ChFuncCompiler *fc, ChVa
     }
     if (is_symbol_named(head, "delay")) {
         return compile_delay(c, fc, args, dst, tail);
+    }
+    if (is_symbol_named(head, "delay-force")) {
+        return compile_delay_force(c, fc, args, dst, tail);
+    }
+    if (is_symbol_named(head, "define-values")) {
+        return compile_define_values(c, fc, args, dst);
     }
     if (is_symbol_named(head, "and")) {
         return compile_and(c, fc, args, dst, tail);
@@ -1948,6 +2582,12 @@ static ChCompileStatus compile_expr_impl(ChCompiler *c, ChFuncCompiler *fc, ChVa
     if (is_symbol_named(head, "letrec*")) {
         /* MVP: reuse letrec lowering; semantic gaps are tracked by suite failures. */
         return compile_letrec(c, fc, args, dst, tail);
+    }
+    if (is_symbol_named(head, "let-values")) {
+        return compile_let_values(c, fc, args, dst, tail);
+    }
+    if (is_symbol_named(head, "let*-values")) {
+        return compile_let_star_values(c, fc, args, dst, tail);
     }
     if (is_symbol_named(head, "cond")) {
         return compile_cond(c, fc, args, dst, tail);

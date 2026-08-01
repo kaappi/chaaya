@@ -711,6 +711,180 @@ static ChValue prim_nan_p(ChVM *vm, ChValue *args, int nargs) {
 
 /* ---- exact-integer-sqrt ---- */
 
+static uint32_t exact_int_bit_length(ChValue v) {
+    if (ch_is_fixnum(v)) {
+        uint64_t n = (uint64_t)ch_to_fixnum(v);
+        if (n == 0) {
+            return 0;
+        }
+        return 64 - (uint32_t)__builtin_clzll(n);
+    }
+    ChBignum *bn = ch_as_bignum(v);
+    if (bn->len == 0) {
+        return 0;
+    }
+    uint64_t top = bn->limbs[bn->len - 1];
+    uint32_t top_bits = top == 0 ? 0 : 64 - (uint32_t)__builtin_clzll(top);
+    return (uint32_t)((bn->len - 1) * 64 + top_bits);
+}
+
+typedef struct {
+    ChValue root;
+    ChValue rem;
+} IsqrtResult;
+
+/* Quotient via binary search using multiply/compare (for exact isqrt). */
+static ChValue bignum_quotient_bs(ChGC *gc, ChValue a, ChValue b) {
+    if (is_zero_int(b)) {
+        return CH_UNDEFINED;
+    }
+    ch_gc_push(gc, &a);
+    ch_gc_push(gc, &b);
+    ChValue lo = ch_make_fixnum(0);
+    ch_gc_push(gc, &lo);
+    ChValue hi = ch_make_fixnum(1);
+    ch_gc_push(gc, &hi);
+    ChValue two = ch_make_fixnum(2);
+
+    for (int guard = 0; guard < 256; guard++) {
+        ChValue prod = ch_bignum_mul(gc, b, hi);
+        ch_gc_push(gc, &prod);
+        if (ch_bignum_compare(prod, a) > 0) {
+            ch_gc_pop(gc);
+            break;
+        }
+        ch_gc_pop(gc);
+        lo = hi;
+        ch_gc_pop(gc);
+        ch_gc_push(gc, &lo);
+        hi = ch_bignum_mul(gc, hi, two);
+        ch_gc_pop(gc);
+        ch_gc_push(gc, &hi);
+    }
+
+    while (ch_bignum_compare(lo, hi) < 0) {
+        ChValue sum = ch_bignum_add(gc, lo, hi);
+        ch_gc_push(gc, &sum);
+        ChValue mid = ch_bignum_quotient(gc, sum, two);
+        ch_gc_pop(gc);
+        ch_gc_push(gc, &mid);
+        ChValue prod = ch_bignum_mul(gc, b, mid);
+        ch_gc_push(gc, &prod);
+        if (ch_bignum_compare(prod, a) <= 0) {
+            ch_gc_pop(gc);
+            ch_gc_pop(gc);
+            lo = mid;
+            ch_gc_pop(gc);
+            ch_gc_push(gc, &lo);
+        } else {
+            ch_gc_pop(gc);
+            ch_gc_pop(gc);
+            hi = ch_bignum_sub(gc, mid, ch_make_fixnum(1));
+            ch_gc_pop(gc);
+            ch_gc_push(gc, &hi);
+        }
+    }
+
+    ChValue out = lo;
+    ch_gc_pop_n(gc, 4);
+    return out;
+}
+
+static IsqrtResult isqrt_non_negative(ChVM *vm, ChValue n) {
+    ChGC *gc = &vm->gc;
+    if (ch_is_fixnum(n)) {
+        int64_t ni = ch_to_fixnum(n);
+        double f = (double)ni;
+        int64_t s = (int64_t)sqrt(f);
+        while (s * s > ni) {
+            s--;
+        }
+        while ((s + 1) * (s + 1) <= ni) {
+            s++;
+        }
+        return (IsqrtResult){ch_make_fixnum(s), ch_make_fixnum(ni - s * s)};
+    }
+
+    ch_gc_push(gc, &n);
+    ChValue s;
+    double f64_val = ch_bignum_to_f64(n);
+    if (!isfinite(f64_val)) {
+        uint32_t bit_len = exact_int_bit_length(n);
+        uint32_t shift = ((bit_len - 52) + 1u) & ~1u;
+        ChValue pow2 = ch_make_fixnum(1);
+        ch_gc_push(gc, &pow2);
+        for (uint32_t i = 0; i < shift; i++) {
+            pow2 = ch_bignum_mul(gc, pow2, ch_make_fixnum(2));
+        }
+        ChValue shifted = ch_bignum_quotient(gc, n, pow2);
+        ch_gc_pop(gc);
+        ch_gc_push(gc, &shifted);
+        double approx = sqrt(ch_bignum_to_f64(shifted));
+        int64_t approx_i = approx < 1.0 ? 1 : (int64_t)approx;
+        s = ch_make_integer(gc, approx_i);
+        ch_gc_pop(gc);
+        ch_gc_push(gc, &s);
+        for (uint32_t j = 0; j < shift / 2; j++) {
+            s = ch_bignum_mul(gc, s, ch_make_fixnum(2));
+        }
+    } else {
+        double approx = sqrt(f64_val);
+        int64_t approx_i;
+        if (approx < 1.0) {
+            approx_i = 1;
+        } else if (approx >= (double)INT64_MAX) {
+            approx_i = INT64_MAX;
+        } else {
+            approx_i = (int64_t)approx;
+        }
+        s = ch_make_integer(gc, approx_i);
+        ch_gc_push(gc, &s);
+    }
+
+    ChValue two = ch_make_fixnum(2);
+    for (int iters = 0; iters < 500; iters++) {
+        if (is_zero_int(s)) {
+            break;
+        }
+        ch_gc_push(gc, &s);
+        ChValue q = bignum_quotient_bs(gc, n, s);
+        ch_gc_push(gc, &q);
+        ChValue sum = ch_bignum_add(gc, s, q);
+        ch_gc_pop(gc);
+        ch_gc_pop(gc);
+        ch_gc_push(gc, &sum);
+        ChValue next = ch_bignum_quotient(gc, sum, two);
+        ch_gc_pop(gc);
+        if (ch_bignum_compare(next, s) == 0) {
+            s = next;
+            break;
+        }
+        s = next;
+    }
+
+    ch_gc_push(gc, &s);
+    ChValue s2 = ch_bignum_mul(gc, s, s);
+    while (ch_bignum_compare(s2, n) > 0) {
+        s = ch_bignum_sub(gc, s, ch_make_fixnum(1));
+        s2 = ch_bignum_mul(gc, s, s);
+    }
+
+    ChValue one = ch_make_fixnum(1);
+    ChValue s1 = ch_bignum_add(gc, s, one);
+    ChValue s1_sq = ch_bignum_mul(gc, s1, s1);
+    while (ch_bignum_compare(s1_sq, n) <= 0) {
+        s = s1;
+        s2 = s1_sq;
+        s1 = ch_bignum_add(gc, s, one);
+        s1_sq = ch_bignum_mul(gc, s1, s1);
+    }
+
+    ChValue rem = ch_bignum_sub(gc, n, s2);
+    IsqrtResult out = {ch_bignum_normalize(gc, s), ch_bignum_normalize(gc, rem)};
+    ch_gc_pop_n(gc, 2);
+    return out;
+}
+
 static ChValue prim_exact_integer_sqrt(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
     if (!ch_is_exact_integer(args[0]) || ch_bignum_compare(args[0], ch_make_fixnum(0)) < 0) {
@@ -721,40 +895,62 @@ static ChValue prim_exact_integer_sqrt(ChVM *vm, ChValue *args, int nargs) {
         ChValue vals[2] = {args[0], ch_make_fixnum(0)};
         return ch_gc_make_values(&vm->gc, vals, 2);
     }
-    /* Newton's method on integers: s := (s + n/s) / 2 */
-    ChValue n = args[0];
-    ch_gc_push(&vm->gc, &n);
-    ChValue s = ch_make_fixnum(1);
-    /* rough start from f64 when possible */
-    double approx = ch_bignum_to_f64(n);
-    if (isfinite(approx) && approx > 0) {
-        s = ch_make_integer(&vm->gc, (int64_t)sqrt(approx));
-        if (is_zero_int(s)) {
-            s = ch_make_fixnum(1);
-        }
-    }
-    ch_gc_push(&vm->gc, &s);
-    for (;;) {
-        ChValue q = ch_bignum_quotient(&vm->gc, n, s);
-        ch_gc_push(&vm->gc, &q);
-        ChValue sum = ch_bignum_add(&vm->gc, s, q);
-        ch_gc_pop(&vm->gc);
-        ChValue next = ch_bignum_quotient(&vm->gc, sum, ch_make_fixnum(2));
-        if (ch_bignum_compare(next, s) >= 0) {
-            break;
-        }
-        s = next;
-    }
-    ChValue sq = ch_bignum_mul(&vm->gc, s, s);
-    ch_gc_push(&vm->gc, &sq);
-    ChValue rem = ch_bignum_sub(&vm->gc, n, sq);
-    ch_gc_pop_n(&vm->gc, 3);
-    ChValue vals[2] = {s, rem};
+    IsqrtResult r = isqrt_non_negative(vm, args[0]);
+    ChValue vals[2] = {r.root, r.rem};
     ch_gc_push(&vm->gc, &vals[0]);
     ch_gc_push(&vm->gc, &vals[1]);
     ChValue out = ch_gc_make_values(&vm->gc, vals, 2);
     ch_gc_pop_n(&vm->gc, 2);
     return out;
+}
+
+/* ---- floor/ and truncate/ ---- */
+
+static ChValue exact_div_pair(ChVM *vm, ChValue a, ChValue b, const char *who, int use_floor) {
+    if (ch_is_flonum(a) || ch_is_flonum(b)) {
+        double da, db;
+        if (!require_real(vm, a, who, &da) || !require_real(vm, b, who, &db)) {
+            return CH_UNDEFINED;
+        }
+        if (db == 0.0) {
+            snprintf(vm->error, sizeof(vm->error), "%s: division by zero", who);
+            return CH_UNDEFINED;
+        }
+        double q = use_floor ? floor(da / db) : trunc(da / db);
+        ChValue vals[2] = {ch_make_flonum(q), ch_make_flonum(da - q * db)};
+        return ch_gc_make_values(&vm->gc, vals, 2);
+    }
+    if (!ch_is_exact_integer(a) || !ch_is_exact_integer(b)) {
+        snprintf(vm->error, sizeof(vm->error), "%s: expected exact integers", who);
+        return CH_UNDEFINED;
+    }
+    if (is_zero_int(b)) {
+        snprintf(vm->error, sizeof(vm->error), "%s: division by zero", who);
+        return CH_UNDEFINED;
+    }
+    ChGC *gc = &vm->gc;
+    ch_gc_push(gc, &a);
+    ch_gc_push(gc, &b);
+    ChValue q = ch_bignum_quotient(gc, a, b);
+    ChValue r = ch_bignum_remainder(gc, a, b);
+    if (use_floor && !is_zero_int(r) &&
+        ((ch_bignum_compare(a, ch_make_fixnum(0)) < 0) != (ch_bignum_compare(b, ch_make_fixnum(0)) < 0))) {
+        q = ch_bignum_sub(gc, q, ch_make_fixnum(1));
+        r = ch_bignum_add(gc, r, b);
+    }
+    ch_gc_pop_n(gc, 2);
+    ChValue vals[2] = {q, r};
+    return ch_gc_make_values(gc, vals, 2);
+}
+
+static ChValue prim_floor_div(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    return exact_div_pair(vm, args[0], args[1], "floor/", 1);
+}
+
+static ChValue prim_truncate_div(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    return exact_div_pair(vm, args[0], args[1], "truncate/", 0);
 }
 
 /* ---- string conversion ---- */
@@ -958,6 +1154,8 @@ void ch_register_math_primitives(ChVM *vm) {
     define_prim(vm, "infinite?", prim_infinite_p, 1, 1);
     define_prim(vm, "nan?", prim_nan_p, 1, 1);
     define_prim(vm, "exact-integer-sqrt", prim_exact_integer_sqrt, 1, 1);
+    define_prim(vm, "floor/", prim_floor_div, 2, 2);
+    define_prim(vm, "truncate/", prim_truncate_div, 2, 2);
     define_prim(vm, "number->string", prim_number_to_string, -1, 1);
     define_prim(vm, "string->number", prim_string_to_number, -1, 1);
 }

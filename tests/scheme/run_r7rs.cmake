@@ -32,15 +32,23 @@ foreach(summary IN LISTS section_summaries)
   math(EXPR total_fail "${total_fail} + ${section_fail}")
 endforeach()
 
-if(rc EQUAL 0)
-  message(STATUS
-    "r7rs suite executed: ${section_count} sections, ${total_pass} pass, ${total_fail} fail")
-else()
+if(NOT rc EQUAL 0)
   string(REGEX MATCH "error:[^\n]*" first_error "${combined}")
   if(first_error STREQUAL "")
     set(first_error "no explicit error line")
   endif()
-  message(STATUS
-    "r7rs suite executed with non-zero exit (${rc}): ${section_count} sections, "
-    "${total_pass} pass, ${total_fail} fail, ${first_error}")
+  message(FATAL_ERROR
+    "r7rs suite failed with exit ${rc}: ${section_count} sections, "
+    "${total_pass} pass, ${total_fail} fail, ${first_error}\n"
+    "--- stdout ---\n${out}\n--- stderr ---\n${err}")
 endif()
+
+if(total_fail GREATER 0)
+  message(FATAL_ERROR
+    "r7rs suite reported failures: ${section_count} sections, "
+    "${total_pass} pass, ${total_fail} fail\n"
+    "--- stdout ---\n${out}\n--- stderr ---\n${err}")
+endif()
+
+message(STATUS
+  "r7rs suite passed: ${section_count} sections, ${total_pass} pass, ${total_fail} fail")

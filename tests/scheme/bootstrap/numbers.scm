@@ -111,5 +111,9 @@
 (check-eqv "exact-integer-sqrt"
            5
            (call-with-values (lambda () (exact-integer-sqrt 27)) (lambda (s r) s)))
+(check-eqv "exact-integer-sqrt large"
+           31622776601683793319
+           (call-with-values (lambda () (exact-integer-sqrt (expt 10 39)))
+                             (lambda (s r) s)))
 
 (check-finish)

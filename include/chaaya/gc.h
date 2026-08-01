@@ -29,6 +29,10 @@ typedef struct ChGC {
     uint8_t major_interval;
     ChValue *roots[CH_GC_ROOT_MAX];
     size_t root_count;
+    /* Ephemerons pending weak-key fixpoint during collection. */
+    ChValue *pending_ephemerons;
+    size_t pending_ephem_count;
+    size_t pending_ephem_cap;
     /* symbol intern table */
     ChSymbol **symbols;
     size_t symbol_count;
@@ -74,6 +78,11 @@ ChValue ch_gc_make_parameter(ChGC *gc, ChValue init, ChValue converter);
 ChValue ch_gc_make_hashtable(ChGC *gc, size_t capacity);
 ChValue ch_gc_make_bytevector(ChGC *gc, size_t len, uint8_t fill);
 ChValue ch_gc_make_time(ChGC *gc, int64_t seconds, int32_t nanoseconds, ChValue type_sym);
+ChValue ch_gc_make_random_source(ChGC *gc, uint64_t seed);
+void ch_random_source_seed(ChRandomSource *rs, uint64_t seed);
+uint64_t ch_random_source_next_u64(ChRandomSource *rs);
+ChValue ch_gc_make_ephemeron(ChGC *gc, ChValue key, ChValue value);
+ChValue ch_gc_make_file_info(ChGC *gc, const ChFileInfo *info);
 
 #ifdef __cplusplus
 }

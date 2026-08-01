@@ -52,7 +52,13 @@ add_library(chaaya_core STATIC
   src/prim_record.c
   src/prim_lazy.c
   src/prim_eval.c
+  src/prim_process.c
   src/prim_hashtable.c
+  src/prim_random.c
+  src/prim_filesystem.c
+  src/prim_weak.c
+  src/unicode.c
+  src/unicode_tables.c
   src/eval.c
   src/cache.c
   src/cli.c
@@ -189,6 +195,7 @@ chaaya_bootstrap_test(include-cond)
 chaaya_bootstrap_test(records)
 chaaya_bootstrap_test(case-lambda)
 chaaya_bootstrap_test(lazy)
+chaaya_bootstrap_test(multivalue)
 chaaya_bootstrap_test(file-ports)
 chaaya_bootstrap_test(bytevectors)
 chaaya_bootstrap_test(eval)
@@ -207,6 +214,23 @@ add_test(
     -P ${CMAKE_SOURCE_DIR}/tests/scheme/run_r7rs.cmake
 )
 set_tests_properties(r7rs_suite PROPERTIES TIMEOUT 300)
+
+function(chaaya_kaappi_deferred_test name relpath)
+  add_test(
+    NAME kaappi_deferred_${name}
+    COMMAND ${CMAKE_COMMAND}
+      -DCHAAYA=$<TARGET_FILE:chaaya>
+      -DINPUT=${CMAKE_SOURCE_DIR}/${relpath}
+      -DLIB_PATH=${CMAKE_SOURCE_DIR}/lib
+      -P ${CMAKE_SOURCE_DIR}/tests/scheme/run_kaappi_deferred.cmake
+  )
+  set_tests_properties(kaappi_deferred_${name} PROPERTIES TIMEOUT 120)
+endfunction()
+
+# Tier 1 kaappi-deferred compliance (narrow surface, SRFI-64 + scheme base)
+chaaya_kaappi_deferred_test(sqrt_exact tests/scheme/kaappi-deferred/compliance/sqrt-exact.scm)
+chaaya_kaappi_deferred_test(lists tests/scheme/kaappi-deferred/compliance/lists.scm)
+chaaya_kaappi_deferred_test(vectors tests/scheme/kaappi-deferred/compliance/vectors.scm)
 
 # Display probes adapted from Kaappi differential/probes
 function(chaaya_probe_test name)

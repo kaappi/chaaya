@@ -19,6 +19,7 @@ extern "C" {
 #define CH_VM_MAX_HANDLERS 64
 #define CH_VM_MAX_PARAMETER_BINDINGS 256
 #define CH_VM_MAX_MACROS 256
+#define CH_VM_MAX_SYNTAX_PROPS 128
 #define CH_VM_MAX_BREAKPOINTS 32
 
 struct ChLibEnv;
@@ -48,7 +49,13 @@ typedef struct ChGlobal {
 typedef struct ChMacroEntry {
     ChSymbol *name;
     ChValue transformer; /* CH_TAG_TRANSFORMER — rooted for GC */
+    struct ChLibEnv *home_env; /* library env for template free-identifier resolution */
 } ChMacroEntry;
+
+typedef struct ChSyntaxProp {
+    char *key; /* owned composite "<id>\x1f<key>" */
+    ChValue value;
+} ChSyntaxProp;
 
 typedef struct ChVM {
     ChGC gc;
@@ -75,6 +82,10 @@ typedef struct ChVM {
     size_t macro_count;
     uint32_t hyg_counter;
 
+    /* SRFI 213 define-property table (macro-expansion time) */
+    ChSyntaxProp syntax_props[CH_VM_MAX_SYNTAX_PROPS];
+    size_t syntax_prop_count;
+
     /* set by call_value before invoking a native; used by call/cc */
     size_t native_result_slot;
     bool continuation_invoked; /* native saw a continuation restore */
@@ -95,6 +106,9 @@ typedef struct ChVM {
 
     /* Phase 10: cooperative fibers + timer reactor. */
     struct ChFiberRuntime *fiber_runtime;
+
+    /* SRFI 27 default random source (owned heap object). */
+    ChValue default_random_source;
 
     /* REPL debugger (Phase 8 MVP). */
     bool debug_mode;
@@ -131,6 +145,10 @@ ChVMStatus ch_vm_invoke_continuation(ChVM *vm, ChContinuation *cont, ChValue val
 ChVMStatus ch_vm_wind_transition(ChVM *vm, const ChWindRecord *target, size_t target_count);
 
 const char *ch_vm_error(const ChVM *vm);
+
+/* SRFI 213 syntax properties keyed by identifier and property name. */
+int ch_vm_syntax_property_set(ChVM *vm, const char *id, const char *key, ChValue val);
+ChValue ch_vm_syntax_property_get(ChVM *vm, const char *id, const char *key);
 
 #ifdef __cplusplus
 }

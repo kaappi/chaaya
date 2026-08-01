@@ -165,6 +165,18 @@ bool ch_is_foreign_procedure(ChValue v) {
     return CH_IS_TAG(v, CH_TAG_FOREIGN_PROC);
 }
 
+bool ch_is_random_source(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_RANDOM_SOURCE);
+}
+
+bool ch_is_ephemeron(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_EPHEMERON);
+}
+
+bool ch_is_file_info(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_FILE_INFO);
+}
+
 bool ch_is_exact_integer(ChValue v) {
     return ch_is_fixnum(v) || ch_is_bignum(v);
 }
@@ -285,6 +297,18 @@ ChForeignLibrary *ch_as_foreign_library(ChValue v) {
 
 ChForeignProcedure *ch_as_foreign_procedure(ChValue v) {
     return (ChForeignProcedure *)ch_to_object(v);
+}
+
+ChRandomSource *ch_as_random_source(ChValue v) {
+    return (ChRandomSource *)ch_to_object(v);
+}
+
+ChEphemeron *ch_as_ephemeron(ChValue v) {
+    return (ChEphemeron *)ch_to_object(v);
+}
+
+ChFileInfo *ch_as_file_info(ChValue v) {
+    return (ChFileInfo *)ch_to_object(v);
 }
 
 const char *ch_symbol_basename(ChSymbol *sym) {

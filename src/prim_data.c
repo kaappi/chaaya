@@ -3,6 +3,7 @@
 #include "chaaya/bignum.h"
 #include "chaaya/complex.h"
 #include "chaaya/rational.h"
+#include "chaaya/unicode.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -323,6 +324,129 @@ static ChValue prim_char_to_integer(ChVM *vm, ChValue *args, int nargs) {
     return ch_make_fixnum((int64_t)ch_to_char(args[0]));
 }
 
+static int require_char(ChVM *vm, ChValue v, const char *who) {
+    if (!ch_is_char(v)) {
+        snprintf(vm->error, sizeof(vm->error), "%s: not a char", who);
+        return -1;
+    }
+    return 0;
+}
+
+static ChValue compare_ci_chars(ChVM *vm, ChValue *args, int nargs, const char *who,
+                                int (*cmp)(uint32_t, uint32_t)) {
+    if (nargs < 2) {
+        return CH_TRUE;
+    }
+    for (int i = 0; i < nargs; i++) {
+        if (require_char(vm, args[i], who) != 0) {
+            return CH_UNDEFINED;
+        }
+    }
+    for (int i = 1; i < nargs; i++) {
+        uint32_t a = ch_unicode_foldcase(ch_to_char(args[i - 1]));
+        uint32_t b = ch_unicode_foldcase(ch_to_char(args[i]));
+        if (!cmp(a, b)) {
+            return CH_FALSE;
+        }
+    }
+    return CH_TRUE;
+}
+
+static int ci_lt(uint32_t a, uint32_t b) { return a < b; }
+static int ci_le(uint32_t a, uint32_t b) { return a <= b; }
+static int ci_eq(uint32_t a, uint32_t b) { return a == b; }
+static int ci_ge(uint32_t a, uint32_t b) { return a >= b; }
+static int ci_gt(uint32_t a, uint32_t b) { return a > b; }
+
+static ChValue prim_char_ci_eq(ChVM *vm, ChValue *args, int nargs) {
+    return compare_ci_chars(vm, args, nargs, "char-ci=?", ci_eq);
+}
+static ChValue prim_char_ci_lt(ChVM *vm, ChValue *args, int nargs) {
+    return compare_ci_chars(vm, args, nargs, "char-ci<?", ci_lt);
+}
+static ChValue prim_char_ci_le(ChVM *vm, ChValue *args, int nargs) {
+    return compare_ci_chars(vm, args, nargs, "char-ci<=?", ci_le);
+}
+static ChValue prim_char_ci_gt(ChVM *vm, ChValue *args, int nargs) {
+    return compare_ci_chars(vm, args, nargs, "char-ci>?", ci_gt);
+}
+static ChValue prim_char_ci_ge(ChVM *vm, ChValue *args, int nargs) {
+    return compare_ci_chars(vm, args, nargs, "char-ci>=?", ci_ge);
+}
+
+static ChValue prim_char_alphabetic_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_char(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "char-alphabetic?: not a char");
+        return CH_UNDEFINED;
+    }
+    return ch_unicode_is_alphabetic(ch_to_char(args[0])) ? CH_TRUE : CH_FALSE;
+}
+
+static ChValue prim_char_numeric_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_char(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "char-numeric?: not a char");
+        return CH_UNDEFINED;
+    }
+    return ch_unicode_is_numeric(ch_to_char(args[0])) ? CH_TRUE : CH_FALSE;
+}
+
+static ChValue prim_char_whitespace_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_char(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "char-whitespace?: not a char");
+        return CH_UNDEFINED;
+    }
+    return ch_unicode_is_whitespace(ch_to_char(args[0])) ? CH_TRUE : CH_FALSE;
+}
+
+static ChValue prim_char_upper_case_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_char(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "char-upper-case?: not a char");
+        return CH_UNDEFINED;
+    }
+    return ch_unicode_is_uppercase(ch_to_char(args[0])) ? CH_TRUE : CH_FALSE;
+}
+
+static ChValue prim_char_lower_case_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_char(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "char-lower-case?: not a char");
+        return CH_UNDEFINED;
+    }
+    return ch_unicode_is_lowercase(ch_to_char(args[0])) ? CH_TRUE : CH_FALSE;
+}
+
+static ChValue prim_char_upcase(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_char(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "char-upcase: not a char");
+        return CH_UNDEFINED;
+    }
+    return ch_make_char(ch_unicode_upcase(ch_to_char(args[0])));
+}
+
+static ChValue prim_char_downcase(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_char(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "char-downcase: not a char");
+        return CH_UNDEFINED;
+    }
+    return ch_make_char(ch_unicode_downcase(ch_to_char(args[0])));
+}
+
+static ChValue prim_digit_value(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_char(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "digit-value: not a char");
+        return CH_UNDEFINED;
+    }
+    int dv = ch_unicode_digit_value(ch_to_char(args[0]));
+    return dv < 0 ? CH_FALSE : ch_make_fixnum(dv);
+}
+
 static ChValue prim_integer_to_char(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
     if (!ch_is_fixnum(args[0])) {
@@ -619,6 +743,352 @@ static ChValue prim_string_eq(ChVM *vm, ChValue *args, int nargs) {
     return CH_TRUE;
 }
 
+static ChValue compare_ci_strings(ChVM *vm, ChValue *args, int nargs, const char *who, int mode) {
+    if (nargs < 2) {
+        return CH_TRUE;
+    }
+    if (!ch_is_string(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "%s: not a string", who);
+        return CH_UNDEFINED;
+    }
+    ChString *s0 = ch_as_string(args[0]);
+    for (int i = 1; i < nargs; i++) {
+        if (!ch_is_string(args[i])) {
+            snprintf(vm->error, sizeof(vm->error), "%s: not a string", who);
+            return CH_UNDEFINED;
+        }
+        ChString *si = ch_as_string(args[i]);
+        int cmp = ch_unicode_fold_compare_strings(s0->data, s0->len, si->data, si->len);
+        int pass = 0;
+        switch (mode) {
+        case 0:
+            pass = cmp < 0;
+            break;
+        case 1:
+            pass = cmp <= 0;
+            break;
+        case 2:
+            pass = cmp == 0;
+            break;
+        case 3:
+            pass = cmp >= 0;
+            break;
+        case 4:
+            pass = cmp > 0;
+            break;
+        }
+        if (!pass) {
+            return CH_FALSE;
+        }
+        s0 = si;
+    }
+    return CH_TRUE;
+}
+
+static ChValue prim_string_ci_eq(ChVM *vm, ChValue *args, int nargs) {
+    return compare_ci_strings(vm, args, nargs, "string-ci=?", 2);
+}
+static ChValue prim_string_ci_lt(ChVM *vm, ChValue *args, int nargs) {
+    return compare_ci_strings(vm, args, nargs, "string-ci<?", 0);
+}
+static ChValue prim_string_ci_le(ChVM *vm, ChValue *args, int nargs) {
+    return compare_ci_strings(vm, args, nargs, "string-ci<=?", 1);
+}
+static ChValue prim_string_ci_gt(ChVM *vm, ChValue *args, int nargs) {
+    return compare_ci_strings(vm, args, nargs, "string-ci>?", 4);
+}
+static ChValue prim_string_ci_ge(ChVM *vm, ChValue *args, int nargs) {
+    return compare_ci_strings(vm, args, nargs, "string-ci>=?", 3);
+}
+
+static bool append_codepoint(char **buf, size_t *len, size_t *cap, uint32_t cp) {
+    char encoded[4];
+    size_t encoded_len = 0;
+    if (cp <= 0x7Fu) {
+        encoded[0] = (char)cp;
+        encoded_len = 1;
+    } else if (cp <= 0x7FFu) {
+        encoded[0] = (char)(0xC0u | (cp >> 6));
+        encoded[1] = (char)(0x80u | (cp & 0x3Fu));
+        encoded_len = 2;
+    } else if (cp >= 0xD800 && cp <= 0xDFFF) {
+        return false;
+    } else if (cp <= 0xFFFFu) {
+        encoded[0] = (char)(0xE0u | (cp >> 12));
+        encoded[1] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        encoded[2] = (char)(0x80u | (cp & 0x3Fu));
+        encoded_len = 3;
+    } else if (cp <= 0x10FFFFu) {
+        encoded[0] = (char)(0xF0u | (cp >> 18));
+        encoded[1] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+        encoded[2] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        encoded[3] = (char)(0x80u | (cp & 0x3Fu));
+        encoded_len = 4;
+    } else {
+        return false;
+    }
+    if (*len + encoded_len > *cap) {
+        size_t ncap = *cap ? *cap : 64;
+        while (ncap < *len + encoded_len) {
+            ncap *= 2;
+        }
+        char *nb = (char *)realloc(*buf, ncap + 1);
+        if (!nb) {
+            abort();
+        }
+        *buf = nb;
+        *cap = ncap;
+    }
+    memcpy(*buf + *len, encoded, encoded_len);
+    *len += encoded_len;
+    return true;
+}
+
+typedef enum { CH_CASE_UP, CH_CASE_DOWN } ChCaseMode;
+
+static bool append_case_codepoint(char **buf, size_t *len, size_t *cap, uint32_t cp, ChCaseMode mode) {
+    if (mode == CH_CASE_UP) {
+        switch (cp) {
+        case 0x00DF:
+            return append_codepoint(buf, len, cap, 'S') && append_codepoint(buf, len, cap, 'S');
+        case 0x01F0:
+            return append_codepoint(buf, len, cap, 'J') && append_codepoint(buf, len, cap, 0x030C);
+        case 0x0390:
+            return append_codepoint(buf, len, cap, 0x0399) &&
+                   append_codepoint(buf, len, cap, 0x0308) &&
+                   append_codepoint(buf, len, cap, 0x0301);
+        case 0x03B0:
+            return append_codepoint(buf, len, cap, 0x03A5) &&
+                   append_codepoint(buf, len, cap, 0x0308) &&
+                   append_codepoint(buf, len, cap, 0x0301);
+        case 0xFB00:
+            return append_codepoint(buf, len, cap, 'F') && append_codepoint(buf, len, cap, 'F');
+        case 0xFB01:
+            return append_codepoint(buf, len, cap, 'F') && append_codepoint(buf, len, cap, 'I');
+        case 0xFB02:
+            return append_codepoint(buf, len, cap, 'F') && append_codepoint(buf, len, cap, 'L');
+        case 0xFB03:
+            return append_codepoint(buf, len, cap, 'F') && append_codepoint(buf, len, cap, 'F') &&
+                   append_codepoint(buf, len, cap, 'I');
+        case 0xFB04:
+            return append_codepoint(buf, len, cap, 'F') && append_codepoint(buf, len, cap, 'F') &&
+                   append_codepoint(buf, len, cap, 'L');
+        default:
+            return append_codepoint(buf, len, cap, ch_unicode_upcase(cp));
+        }
+    }
+    if (cp == 0x0130) {
+        return append_codepoint(buf, len, cap, 0x0069) && append_codepoint(buf, len, cap, 0x0307);
+    }
+    return append_codepoint(buf, len, cap, ch_unicode_downcase(cp));
+}
+
+static ChValue string_case_map(ChVM *vm, ChValue arg, const char *who, ChCaseMode mode) {
+    if (!ch_is_string(arg)) {
+        snprintf(vm->error, sizeof(vm->error), "%s: not a string", who);
+        return CH_UNDEFINED;
+    }
+    ChString *s = ch_as_string(arg);
+    char *buf = NULL;
+    size_t len = 0;
+    size_t cap = 0;
+    size_t pos = 0;
+    bool prev_cased = false;
+    while (pos < s->len) {
+        uint32_t cp = 0;
+        size_t next = 0;
+        if (!utf8_decode_next(s->data, s->len, pos, &cp, &next)) {
+            free(buf);
+            snprintf(vm->error, sizeof(vm->error), "%s: invalid UTF-8 sequence", who);
+            return CH_UNDEFINED;
+        }
+        if (mode == CH_CASE_DOWN && cp == 0x03A3) {
+            uint32_t next_cp = 0;
+            if (next < s->len) {
+                size_t nn = 0;
+                (void)utf8_decode_next(s->data, s->len, next, &next_cp, &nn);
+            }
+            bool next_is_cased = ch_unicode_is_cased(next_cp);
+            if (prev_cased && !next_is_cased) {
+                if (!append_codepoint(&buf, &len, &cap, 0x03C2)) {
+                    free(buf);
+                    abort();
+                }
+            } else if (!append_codepoint(&buf, &len, &cap, 0x03C3)) {
+                free(buf);
+                abort();
+            }
+        } else if (!append_case_codepoint(&buf, &len, &cap, cp, mode)) {
+            free(buf);
+            abort();
+        }
+        prev_cased = ch_unicode_is_cased(cp);
+        pos = next;
+    }
+    if (buf) {
+        buf[len] = '\0';
+    }
+    ChValue out = ch_gc_make_string(&vm->gc, buf ? buf : "", len);
+    free(buf);
+    return out;
+}
+
+static ChValue prim_string_upcase(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    return string_case_map(vm, args[0], "string-upcase", CH_CASE_UP);
+}
+
+static ChValue prim_string_downcase(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    return string_case_map(vm, args[0], "string-downcase", CH_CASE_DOWN);
+}
+
+static ChValue prim_string_copy(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 1 || !ch_is_string(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "string-copy: expected string [start [end]]");
+        return CH_UNDEFINED;
+    }
+    ChString *s = ch_as_string(args[0]);
+    size_t count = 0;
+    if (utf8_count_codepoints(vm, s, "string-copy", &count) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t start = 0;
+    size_t end = count;
+    if (parse_optional_range(vm, args, nargs, 1, count, "string-copy", &start, &end) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t start_byte = 0;
+    size_t end_byte = 0;
+    if (utf8_offset_for_index(vm, s, start, "string-copy", &start_byte) != 0 ||
+        utf8_offset_for_index(vm, s, end, "string-copy", &end_byte) != 0) {
+        return CH_UNDEFINED;
+    }
+    return ch_gc_make_string(&vm->gc, s->data + start_byte, end_byte - start_byte);
+}
+
+static ChValue prim_string_copy_bang(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 3 || !ch_is_string(args[0]) || !ch_is_string(args[2])) {
+        snprintf(vm->error, sizeof(vm->error), "string-copy!: bad arguments");
+        return CH_UNDEFINED;
+    }
+    ChString *to = ch_as_string(args[0]);
+    if (ch_object_is_immutable(&to->header)) {
+        snprintf(vm->error, sizeof(vm->error), "string-copy!: immutable string");
+        return CH_UNDEFINED;
+    }
+    size_t at = 0;
+    if (parse_nonnegative_index(vm, args[1], &at, "string-copy!") != 0) {
+        return CH_UNDEFINED;
+    }
+    ChString *from = ch_as_string(args[2]);
+    size_t from_count = 0;
+    if (utf8_count_codepoints(vm, from, "string-copy!", &from_count) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t start = 0;
+    size_t end = from_count;
+    if (parse_optional_range(vm, args, nargs, 3, from_count, "string-copy!", &start, &end) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t to_count = 0;
+    if (utf8_count_codepoints(vm, to, "string-copy!", &to_count) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t copy_cps = end - start;
+    if (at + copy_cps > to_count) {
+        snprintf(vm->error, sizeof(vm->error), "string-copy!: range out of bounds");
+        return CH_UNDEFINED;
+    }
+    size_t from_byte_start = 0;
+    size_t from_byte_end = 0;
+    size_t to_byte_start = 0;
+    size_t to_byte_end = 0;
+    if (utf8_offset_for_index(vm, from, start, "string-copy!", &from_byte_start) != 0 ||
+        utf8_offset_for_index(vm, from, end, "string-copy!", &from_byte_end) != 0 ||
+        utf8_offset_for_index(vm, to, at, "string-copy!", &to_byte_start) != 0 ||
+        utf8_offset_for_index(vm, to, at + copy_cps, "string-copy!", &to_byte_end) != 0) {
+        return CH_UNDEFINED;
+    }
+    const char *src = from->data + from_byte_start;
+    size_t src_len = from_byte_end - from_byte_start;
+    size_t dst_old_len = to_byte_end - to_byte_start;
+    if (src_len == dst_old_len) {
+        memmove(to->data + to_byte_start, src, src_len);
+    } else {
+        size_t new_total = to->len - dst_old_len + src_len;
+        char *nb = (char *)malloc(new_total + 1);
+        if (!nb) {
+            abort();
+        }
+        memcpy(nb, to->data, to_byte_start);
+        memcpy(nb + to_byte_start, src, src_len);
+        memcpy(nb + to_byte_start + src_len, to->data + to_byte_end, to->len - to_byte_end);
+        nb[new_total] = '\0';
+        ChString *ns = (ChString *)realloc(to, sizeof(ChString) + new_total + 1);
+        if (!ns) {
+            free(nb);
+            abort();
+        }
+        ns->len = new_total;
+        memcpy(ns->data, nb, new_total + 1);
+        free(nb);
+    }
+    return CH_VOID;
+}
+
+static ChValue prim_string_for_each(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 2) {
+        snprintf(vm->error, sizeof(vm->error), "string-for-each: expected procedure and at least one string");
+        return CH_UNDEFINED;
+    }
+    if (!ch_is_procedure(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "string-for-each: not a procedure");
+        return CH_UNDEFINED;
+    }
+    int string_count = nargs - 1;
+    if (string_count > 64) {
+        snprintf(vm->error, sizeof(vm->error), "string-for-each: too many string arguments");
+        return CH_UNDEFINED;
+    }
+    ChString *strings[64];
+    size_t len = 0;
+    for (int i = 0; i < string_count; i++) {
+        if (!ch_is_string(args[i + 1])) {
+            snprintf(vm->error, sizeof(vm->error), "string-for-each: not a string");
+            return CH_UNDEFINED;
+        }
+        strings[i] = ch_as_string(args[i + 1]);
+        size_t count = 0;
+        if (utf8_count_codepoints(vm, strings[i], "string-for-each", &count) != 0) {
+            return CH_UNDEFINED;
+        }
+        if (i == 0 || count < len) {
+            len = count;
+        }
+    }
+    ChValue call_args[64];
+    for (size_t i = 0; i < len; i++) {
+        for (int j = 0; j < string_count; j++) {
+            uint32_t cp = 0;
+            if (utf8_find_codepoint(vm, strings[j], i, "string-for-each", NULL, NULL, &cp) != 0) {
+                return CH_UNDEFINED;
+            }
+            call_args[j] = ch_make_char(cp);
+        }
+        ChValue r = CH_VOID;
+        ChVMStatus st = ch_vm_apply(vm, args[0], call_args, string_count, &r);
+        if (st == CH_VM_CONTINUATION_INVOKED) {
+            vm->continuation_invoked = true;
+            return CH_UNDEFINED;
+        }
+        if (st != CH_VM_OK) {
+            return CH_UNDEFINED;
+        }
+    }
+    return CH_VOID;
+}
+
 static ChValue prim_symbol_to_string(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
     if (!ch_is_symbol(args[0])) {
@@ -798,6 +1268,50 @@ static ChValue prim_vector_map(ChVM *vm, ChValue *args, int nargs) {
     return out;
 }
 
+static ChValue prim_vector_for_each(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 2) {
+        snprintf(vm->error, sizeof(vm->error), "vector-for-each: expected procedure and at least one vector");
+        return CH_UNDEFINED;
+    }
+    if (!ch_is_procedure(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "vector-for-each: not a procedure");
+        return CH_UNDEFINED;
+    }
+    int vec_count = nargs - 1;
+    if (vec_count > 64) {
+        snprintf(vm->error, sizeof(vm->error), "vector-for-each: too many vector arguments");
+        return CH_UNDEFINED;
+    }
+    ChVector *vecs[64];
+    size_t len = 0;
+    for (int i = 0; i < vec_count; i++) {
+        if (!ch_is_vector(args[i + 1])) {
+            snprintf(vm->error, sizeof(vm->error), "vector-for-each: not a vector");
+            return CH_UNDEFINED;
+        }
+        vecs[i] = ch_as_vector(args[i + 1]);
+        if (i == 0 || vecs[i]->len < len) {
+            len = vecs[i]->len;
+        }
+    }
+    ChValue call_args[64];
+    for (size_t i = 0; i < len; i++) {
+        for (int j = 0; j < vec_count; j++) {
+            call_args[j] = vecs[j]->items[i];
+        }
+        ChValue r = CH_VOID;
+        ChVMStatus st = ch_vm_apply(vm, args[0], call_args, vec_count, &r);
+        if (st == CH_VM_CONTINUATION_INVOKED) {
+            vm->continuation_invoked = true;
+            return CH_UNDEFINED;
+        }
+        if (st != CH_VM_OK) {
+            return CH_UNDEFINED;
+        }
+    }
+    return CH_VOID;
+}
+
 static ChValue prim_make_vector(ChVM *vm, ChValue *args, int nargs) {
     if (nargs < 1 || !ch_is_fixnum(args[0])) {
         snprintf(vm->error, sizeof(vm->error), "make-vector: bad length");
@@ -930,6 +1444,19 @@ void ch_register_data_primitives(ChVM *vm) {
     define_prim(vm, "char?", prim_char_p, 1, 1);
     define_prim(vm, "char=?", prim_char_eq, -1, 2);
     define_prim(vm, "char<?", prim_char_lt, -1, 2);
+    define_prim(vm, "char-ci=?", prim_char_ci_eq, -1, 2);
+    define_prim(vm, "char-ci<?", prim_char_ci_lt, -1, 2);
+    define_prim(vm, "char-ci<=?", prim_char_ci_le, -1, 2);
+    define_prim(vm, "char-ci>?", prim_char_ci_gt, -1, 2);
+    define_prim(vm, "char-ci>=?", prim_char_ci_ge, -1, 2);
+    define_prim(vm, "char-alphabetic?", prim_char_alphabetic_p, 1, 1);
+    define_prim(vm, "char-numeric?", prim_char_numeric_p, 1, 1);
+    define_prim(vm, "char-whitespace?", prim_char_whitespace_p, 1, 1);
+    define_prim(vm, "char-upper-case?", prim_char_upper_case_p, 1, 1);
+    define_prim(vm, "char-lower-case?", prim_char_lower_case_p, 1, 1);
+    define_prim(vm, "char-upcase", prim_char_upcase, 1, 1);
+    define_prim(vm, "char-downcase", prim_char_downcase, 1, 1);
+    define_prim(vm, "digit-value", prim_digit_value, 1, 1);
     define_prim(vm, "char->integer", prim_char_to_integer, 1, 1);
     define_prim(vm, "integer->char", prim_integer_to_char, 1, 1);
     define_prim(vm, "abs", prim_abs, 1, 1);
@@ -943,6 +1470,16 @@ void ch_register_data_primitives(ChVM *vm) {
     define_prim(vm, "substring", prim_substring, 3, 3);
     define_prim(vm, "string-map", prim_string_map, -1, 2);
     define_prim(vm, "string=?", prim_string_eq, -1, 2);
+    define_prim(vm, "string-ci=?", prim_string_ci_eq, -1, 2);
+    define_prim(vm, "string-ci<?", prim_string_ci_lt, -1, 2);
+    define_prim(vm, "string-ci<=?", prim_string_ci_le, -1, 2);
+    define_prim(vm, "string-ci>?", prim_string_ci_gt, -1, 2);
+    define_prim(vm, "string-ci>=?", prim_string_ci_ge, -1, 2);
+    define_prim(vm, "string-copy", prim_string_copy, -1, 1);
+    define_prim(vm, "string-copy!", prim_string_copy_bang, -1, 3);
+    define_prim(vm, "string-upcase", prim_string_upcase, 1, 1);
+    define_prim(vm, "string-downcase", prim_string_downcase, 1, 1);
+    define_prim(vm, "string-for-each", prim_string_for_each, -1, 2);
     define_prim(vm, "symbol->string", prim_symbol_to_string, 1, 1);
     define_prim(vm, "string->symbol", prim_string_to_symbol, 1, 1);
     define_prim(vm, "vector-length", prim_vector_length, 1, 1);
@@ -952,6 +1489,7 @@ void ch_register_data_primitives(ChVM *vm) {
     define_prim(vm, "vector-copy", prim_vector_copy, -1, 1);
     define_prim(vm, "vector-append", prim_vector_append, -1, 0);
     define_prim(vm, "vector-map", prim_vector_map, -1, 2);
+    define_prim(vm, "vector-for-each", prim_vector_for_each, -1, 2);
     define_prim(vm, "make-vector", prim_make_vector, -1, 1);
     define_prim(vm, "vector->list", prim_vector_to_list, 1, 1);
     define_prim(vm, "list->vector", prim_list_to_vector, 1, 1);

@@ -1,5 +1,6 @@
 #include "chaaya/bignum.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -131,6 +132,127 @@ static int cmp_mag(const uint64_t *a, size_t al, const uint64_t *b, size_t bl) {
         }
     }
     return 0;
+}
+
+static int cmp_mag_shifted(const uint64_t *rem, size_t rl, const uint64_t *den, size_t dl,
+                           size_t s) {
+    size_t need = dl + s;
+    if (rl < need) {
+        return -1;
+    }
+    if (rl > need) {
+        return 1;
+    }
+    return cmp_mag(rem + s, dl, den, dl);
+}
+
+static void mul_mag_scalar(const uint64_t *den, size_t dl, uint64_t k, uint64_t **prod_out,
+                           size_t *pl_out) {
+    uint64_t *prod = (uint64_t *)calloc(dl + 1, sizeof(uint64_t));
+    if (!prod) {
+        abort();
+    }
+    u128 carry = 0;
+    for (size_t i = 0; i < dl; i++) {
+        u128 p = (u128)den[i] * (u128)k + carry;
+        prod[i] = (uint64_t)p;
+        carry = p >> 64;
+    }
+    size_t pl = dl;
+    if (carry) {
+        prod[pl++] = (uint64_t)carry;
+    }
+    normalize_limbs(prod, &pl);
+    *prod_out = prod;
+    *pl_out = pl;
+}
+
+static int sub_scaled_shifted(uint64_t *rem, size_t *rl, const uint64_t *den, size_t dl,
+                              size_t s, uint64_t k) {
+    if (k == 0) {
+        return 0;
+    }
+    uint64_t *prod = (uint64_t *)calloc(dl + 1, sizeof(uint64_t));
+    if (!prod) {
+        abort();
+    }
+    u128 carry = 0;
+    for (size_t i = 0; i < dl; i++) {
+        u128 p = (u128)den[i] * (u128)k + carry;
+        prod[i] = (uint64_t)p;
+        carry = p >> 64;
+    }
+    size_t pl = dl;
+    if (carry) {
+        prod[pl++] = (uint64_t)carry;
+    }
+    normalize_limbs(prod, &pl);
+    if (cmp_mag_shifted(rem, *rl, prod, pl, s) < 0) {
+        free(prod);
+        return -1;
+    }
+    u128 borrow = 0;
+    for (size_t i = 0; i < pl; i++) {
+        u128 av = rem[i + s];
+        u128 bv = (u128)prod[i] + borrow;
+        if (av >= bv) {
+            rem[i + s] = (uint64_t)(av - bv);
+            borrow = 0;
+        } else {
+            rem[i + s] = (uint64_t)(((u128)1 << 64) + av - bv);
+            borrow = 1;
+        }
+    }
+    size_t j = pl + s;
+    while (borrow && j < *rl) {
+        if (rem[j] >= borrow) {
+            rem[j] -= (uint64_t)borrow;
+            borrow = 0;
+        } else {
+            rem[j] = (uint64_t)(((u128)1 << 64) + rem[j] - borrow);
+            borrow = 1;
+            j++;
+        }
+    }
+    free(prod);
+    if (borrow) {
+        return -1;
+    }
+    normalize_limbs(rem, rl);
+    return 0;
+}
+
+static uint64_t estimate_quotient_digit(const uint64_t *rem, size_t rl, const uint64_t *den,
+                                        size_t dl, size_t s) {
+    if (dl == 0 || rl <= s) {
+        return 1;
+    }
+    size_t ri = rl;
+    while (ri > 0 && rem[ri - 1] == 0) {
+        ri--;
+    }
+    if (ri <= s) {
+        return 1;
+    }
+    u128 rem_top = rem[ri - 1];
+    if (ri >= 2) {
+        rem_top = (rem_top << 64) | rem[ri - 2];
+    }
+    u128 den_top = den[dl - 1];
+    if (dl >= 2) {
+        den_top = (den_top << 64) | den[dl - 2];
+    }
+    if (den_top == 0) {
+        return 1;
+    }
+    u128 q = rem_top / den_top;
+    if (q == 0) {
+        return 1;
+    }
+    if (q > UINT64_MAX) {
+        return UINT64_MAX;
+    }
+    return (uint64_t)q;
 }
 
 int ch_bignum_compare(ChValue a, ChValue b) {
@@ -320,11 +442,112 @@ ChValue ch_bignum_abs(ChGC *gc, ChValue a) {
     return ch_gc_make_bignum_from_limbs(gc, bn->limbs, bn->len, 1);
 }
 
+static int mag_is_pow2(const uint64_t *den, size_t dl, uint32_t *exp) {
+    uint32_t e = 0;
+    int seen = 0;
+    for (size_t i = 0; i < dl; i++) {
+        uint64_t w = den[i];
+        if (w == 0) {
+            continue;
+        }
+        if (seen || (w & (w - 1)) != 0) {
+            return 0;
+        }
+        seen = 1;
+        e = (uint32_t)(i * 64 + (uint32_t)__builtin_ctzll(w));
+    }
+    if (!seen) {
+        return 0;
+    }
+    *exp = e;
+    return 1;
+}
+
+static void mag_shift_right_copy(const uint64_t *num, size_t nl, uint32_t bits, uint64_t **out,
+                                 size_t *ol) {
+    if (bits == 0 || nl == 0) {
+        if (nl == 0) {
+            *out = NULL;
+            *ol = 0;
+            return;
+        }
+        *out = (uint64_t *)malloc(sizeof(uint64_t) * nl);
+        if (!*out) {
+            abort();
+        }
+        memcpy(*out, num, sizeof(uint64_t) * nl);
+        *ol = nl;
+        normalize_limbs(*out, ol);
+        return;
+    }
+    size_t drop = (size_t)bits / 64;
+    size_t rbits = (size_t)bits % 64;
+    if (drop >= nl) {
+        *out = NULL;
+        *ol = 0;
+        return;
+    }
+    size_t new_len = nl - drop;
+    uint64_t *q = (uint64_t *)calloc(new_len, sizeof(uint64_t));
+    if (!q) {
+        abort();
+    }
+    for (size_t i = 0; i < new_len; i++) {
+        uint64_t lo = num[i + drop];
+        uint64_t hi = (i + drop + 1 < nl) ? num[i + drop + 1] : 0;
+        if (rbits == 0) {
+            q[i] = lo;
+        } else {
+            q[i] = (lo >> rbits) | (hi << (64 - rbits));
+        }
+    }
+    normalize_limbs(q, &new_len);
+    *out = q;
+    *ol = new_len;
+}
+
+static void mag_mod_pow2(const uint64_t *num, size_t nl, uint32_t bits, uint64_t **out,
+                         size_t *ol) {
+    if (bits == 0 || nl == 0) {
+        *out = NULL;
+        *ol = 0;
+        return;
+    }
+    size_t keep_limbs = ((size_t)bits + 63) / 64;
+    if (keep_limbs > nl) {
+        keep_limbs = nl;
+    }
+    uint64_t *r = (uint64_t *)calloc(keep_limbs, sizeof(uint64_t));
+    if (!r) {
+        abort();
+    }
+    memcpy(r, num, sizeof(uint64_t) * keep_limbs);
+    size_t rbits = (size_t)bits % 64;
+    if (rbits != 0 && keep_limbs > 0) {
+        r[keep_limbs - 1] &= ((uint64_t)1 << rbits) - 1;
+    }
+    normalize_limbs(r, &keep_limbs);
+    if (keep_limbs == 0) {
+        free(r);
+        *out = NULL;
+        *ol = 0;
+        return;
+    }
+    *out = r;
+    *ol = keep_limbs;
+}
+
 /* Division of magnitudes: Knuth-light for small cases; schoolbook long div. */
 static int div_mag(const uint64_t *num, size_t nl, const uint64_t *den, size_t dl, uint64_t **q_out,
                    size_t *ql_out, uint64_t **r_out, size_t *rl_out) {
     if (dl == 0) {
         return -1; /* div by zero */
+    }
+    uint32_t pow2_exp = 0;
+    if (mag_is_pow2(den, dl, &pow2_exp)) {
+        mag_shift_right_copy(num, nl, pow2_exp, q_out, ql_out);
+        mag_mod_pow2(num, nl, pow2_exp, r_out, rl_out);
+        return 0;
     }
     if (cmp_mag(num, nl, den, dl) < 0) {
         *q_out = NULL;
@@ -392,44 +615,29 @@ static int div_mag(const uint64_t *num, size_t nl, const uint64_t *den, size_t d
     for (size_t shift = max_q; shift > 0; shift--) {
         size_t s = shift - 1;
         /* While rem >= den << (s*64), subtract. Use bit binary search per limb. */
-        for (;;) {
-            /* Compare rem with den shifted by s limbs */
-            size_t need = dl + s;
-            if (rl < need) {
+        for (int guard = 0; guard < 256; guard++) {
+            if (cmp_mag_shifted(rem, rl, den, dl, s) < 0) {
                 break;
             }
-            if (rl == need) {
-                int c = cmp_mag(rem + s, rl - s, den, dl);
-                if (c < 0) {
-                    break;
-                }
-            }
-            /* rem -= den << s */
-            u128 borrow = 0;
-            for (size_t i = 0; i < dl; i++) {
-                u128 av = rem[i + s];
-                u128 bv = (u128)den[i] + borrow;
-                if (av >= bv) {
-                    rem[i + s] = (uint64_t)(av - bv);
-                    borrow = 0;
+            uint64_t lo = 0;
+            uint64_t hi = estimate_quotient_digit(rem, rl, den, dl, s);
+            while (lo < hi) {
+                uint64_t mid = lo + (hi - lo + 1) / 2;
+                uint64_t *prod = NULL;
+                size_t pl = 0;
+                mul_mag_scalar(den, dl, mid, &prod, &pl);
+                int ok = cmp_mag_shifted(rem, rl, prod, pl, s) >= 0;
+                free(prod);
+                if (ok) {
+                    lo = mid;
                 } else {
-                    rem[i + s] = (uint64_t)(((u128)1 << 64) + av - bv);
-                    borrow = 1;
+                    hi = mid - 1;
                 }
             }
-            size_t j = dl + s;
-            while (borrow && j < rl) {
-                if (rem[j] >= borrow) {
-                    rem[j] -= (uint64_t)borrow;
-                    borrow = 0;
-                } else {
-                    rem[j] = (uint64_t)(((u128)1 << 64) + rem[j] - borrow);
-                    borrow = 1;
-                    j++;
-                }
+            if (lo == 0 || sub_scaled_shifted(rem, &rl, den, dl, s, lo) != 0) {
+                break;
             }
-            normalize_limbs(rem, &rl);
-            q[s]++;
+            q[s] += lo;
         }
     }
     size_t ql = max_q;

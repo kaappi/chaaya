@@ -69,8 +69,24 @@ See [docs/dev/cli.md](docs/dev/cli.md) and [docs/dev/repl.md](docs/dev/repl.md).
 | 4 | `call/cc`, `dynamic-wind`, exceptions (**done**) |
 | 5 | Hygienic `syntax-rules` + derived forms (**done**) |
 | 6 | R7RS libraries + portable `.sld` reuse from Kaappi (**done**) |
-| 7 | Full R7RS-small surface (**in progress**: numeric tower + math libs; more surface next) |
-| 8+ | IR/opts, SRFIs, FFI, concurrency, tooling, LLVM, WASM, LSP, packages |
+| 7 | Full R7RS-small surface (**in progress**: numeric tower + math libs; R7RS suite ~85% green) |
+| 8 | IR/opts, generational GC, CLI tooling (`check`, `expand`, `fmt`, cache) (**MVP done**) |
+| 9 | Portable SRFI subset + import resolution (**partial**: ~192 vendored under `lib/srfi/`) |
+| 10 | Fibers + FFI + reactor (**MVP done**; SRFI-18 threads NYI) |
+| 11 | LLVM / WASM / LSP / thottam integration (**stubs + docs**; see backlog below) |
+
+### Phase 11+ backlog (not yet implemented)
+
+These items are tracked for future work; current tree ships honest stubs only.
+
+| Item | Current state | Next milestones |
+|------|---------------|-----------------|
+| **LLVM native** | `chaaya --native` → NYI in [`src/llvm_backend.c`](src/llvm_backend.c) | IR → LLVM IR lowering, C ABI runtime bridge, object link |
+| **WASM** | `CHAAYA_WASM` CMake target; host builds use [`src/wasm_stub.c`](src/wasm_stub.c) | wasm32-wasi CI matrix, WASI syscall shims, browser playground binary |
+| **LSP** | [`src/lsp.c`](src/lsp.c) MVP (initialize/shutdown) | diagnostics, go-to-def, document symbols |
+| **Compile cache** | [`include/chaaya/cache.h`](include/chaaya/cache.h) API stub | `.chaaya/cache` layout, invalidation, CLI `--cache` wiring |
+| **thottam** | [`docs/dev/thottam.md`](docs/dev/thottam.md); use Kaappi's Zig thottam, not a C reimplementation | Chaaya `--lib-path` consumer docs, optional `scripts/thottam-smoke.sh` in CI |
+| **R7RS CTest gate** | [`tests/scheme/run_r7rs.cmake`](tests/scheme/run_r7rs.cmake) | Drive suite to 0 failures; enable more [`tests/scheme/kaappi-deferred/`](tests/scheme/kaappi-deferred/) tiers |
 
 Language-parity target (≈99% Kaappi language surface): R7RS-small + portable
 SRFIs. Deferred for later: fibers, FFI, LLVM, WASM, LSP, thottam.

@@ -20,6 +20,7 @@ void ch_library_registry_init(ChLibraryRegistry *reg) {
 void ch_library_registry_deinit(ChLibraryRegistry *reg) {
     for (size_t i = 0; i < reg->count; i++) {
         free(reg->libs[i]->name);
+        free(reg->libs[i]->runtime_env);
         free(reg->libs[i]);
     }
     memset(reg, 0, sizeof(*reg));
@@ -41,6 +42,7 @@ int ch_library_register(ChLibraryRegistry *reg, ChLibrary *lib) {
         for (size_t i = 0; i < reg->count; i++) {
             if (reg->libs[i] == existing) {
                 free(existing->name);
+                free(existing->runtime_env);
                 free(existing);
                 reg->libs[i] = lib;
                 return 0;
@@ -205,21 +207,23 @@ int ch_register_scheme_base_library(ChVM *vm) {
 }
 
 static int register_scheme_r5rs_library(ChVM *vm) {
+    /* R5RS report environment: same surface as (scheme base) for Chaaya MVP. */
+    ChLibrary *base = ch_library_lookup(vm->libraries, "scheme.base");
+    if (!base) {
+        return -1;
+    }
     ChLibrary *lib = (ChLibrary *)calloc(1, sizeof(ChLibrary));
     if (!lib) {
         return -1;
     }
     lib->name = strdup("scheme.r5rs");
-    for (size_t i = 0; i < vm->global_count && lib->export_count < CH_LIB_MAX_EXPORTS; i++) {
-        if (!vm->globals[i].defined) {
-            continue;
-        }
-        const char *n = vm->globals[i].name->name;
-        if (n[0] == '%') {
-            continue;
-        }
-        lib->export_names[lib->export_count] = vm->globals[i].name;
-        lib->export_values[lib->export_count] = vm->globals[i].value;
+    if (!lib->name) {
+        free(lib);
+        return -1;
+    }
+    for (size_t i = 0; i < base->export_count && lib->export_count < CH_LIB_MAX_EXPORTS; i++) {
+        lib->export_names[lib->export_count] = base->export_names[i];
+        lib->export_values[lib->export_count] = base->export_values[i];
         lib->export_count++;
     }
     return ch_library_register(vm->libraries, lib);
@@ -236,9 +240,19 @@ int ch_register_builtin_libraries(ChVM *vm) {
                                                "read-bytevector!", "u8-ready?",     "eof-object",
                                                "eof-object?"};
     static const char *const cxr_exports[] = {"caar", "cadr", "cdar", "cddr"};
-    static const char *const char_exports[] = {"char?", "char=?", "char<?", "char->integer",
-                                               "integer->char"};
-    static const char *const process_exports[] = {"exit", "command-line", "features"};
+    static const char *const char_exports[] = {
+        "char?",           "char=?",          "char<?",          "char-ci=?",
+        "char-ci<?",       "char-ci<=?",      "char-ci>?",       "char-ci>=?",
+        "char-alphabetic?", "char-numeric?",  "char-whitespace?",
+        "char-upper-case?", "char-lower-case?",
+        "char-upcase",     "char-downcase",  "digit-value",
+        "char->integer",   "integer->char",
+        "string-ci=?",     "string-ci<?",     "string-ci<=?",    "string-ci>?",
+        "string-ci>=?",    "string-upcase",   "string-downcase",
+    };
+    static const char *const process_exports[] = {
+        "exit", "emergency-exit", "command-line", "features",
+        "get-environment-variable", "get-environment-variables"};
     static const char *const lazy_exports[] = {"delay", "force", "promise?", "make-promise"};
     static const char *const file_exports[] = {
         "call-with-input-file", "call-with-output-file", "with-input-from-file",
@@ -250,7 +264,8 @@ int ch_register_builtin_libraries(ChVM *vm) {
         "acos", "asin", "atan", "cos", "exp", "finite?", "infinite?", "log", "nan?", "sin", "sqrt",
         "tan"};
     static const char *const exact_exports[] = {"exact", "exact-integer-sqrt", "inexact"};
-    static const char *const eval_exports[] = {"eval", "environment"};
+    static const char *const eval_exports[] = {
+        "eval", "environment", "null-environment", "scheme-report-environment"};
     static const char *const load_exports[] = {"load"};
     static const char *const repl_exports[] = {"interaction-environment"};
     static const char *const time_exports[] = {"current-second", "current-jiffy", "jiffies-per-second",
@@ -264,6 +279,22 @@ int ch_register_builtin_libraries(ChVM *vm) {
                                                       "foreign-library?",
                                                       "foreign-procedure",
                                                       "foreign-procedure?"};
+    static const char *const chaaya_primitives_exports[] = {
+        "%default-random-source", "%rs-next-int", "%rs-next-real"};
+    static const char *const srfi170_exports[] = {
+        "directory-files",         "file-info",           "file-info?",
+        "file-info-directory?",    "file-info-regular?",  "file-info-symlink?",
+        "file-info:size",          "file-info:mtime",     "file-info:mode",
+        "create-directory",        "delete-directory",    "rename-file",
+        "real-path",               "current-directory",   "set-current-directory!",
+        "file-exists?",            "delete-file"};
+    static const char *const srfi18_exports[] = {
+        "make-thread",      "thread-start!",    "thread-join!",     "thread-sleep!",
+        "thread-yield!",    "current-thread",   "thread?",          "thread-name",
+        "make-mutex",       "mutex?"};
+    static const char *const srfi254_exports[] = {
+        "make-ephemeron",   "ephemeron?",       "ephemeron-key",    "ephemeron-value",
+        "ephemeron-broken?", "ephemeron-ref",   "reference-barrier"};
     if (register_exports_from_globals(vm, "scheme.write", write_exports,
                                       sizeof(write_exports) / sizeof(write_exports[0])) != 0) {
         return -1;
@@ -330,6 +361,23 @@ int ch_register_builtin_libraries(ChVM *vm) {
         0) {
         return -1;
     }
+    if (register_exports_from_globals(vm, "chaaya.primitives", chaaya_primitives_exports,
+                                      sizeof(chaaya_primitives_exports) /
+                                          sizeof(chaaya_primitives_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "srfi.170", srfi170_exports,
+                                      sizeof(srfi170_exports) / sizeof(srfi170_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "srfi.18", srfi18_exports,
+                                      sizeof(srfi18_exports) / sizeof(srfi18_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "srfi.254", srfi254_exports,
+                                      sizeof(srfi254_exports) / sizeof(srfi254_exports[0])) != 0) {
+        return -1;
+    }
     /* case-lambda is a compiler special form; library exists for R7RS import. */
     if (register_exports_from_globals(vm, "scheme.case-lambda", NULL, 0) != 0) {
         return -1;
@@ -351,7 +399,7 @@ static int library_into_env(ChLibEnv *env, ChLibrary *lib) {
     return 0;
 }
 
-static int merge_env_into_globals(ChVM *vm, const ChLibEnv *env) {
+static int merge_env_into_globals(ChVM *vm, const ChLibEnv *env, ChLibEnv *macro_home) {
     for (size_t i = 0; i < env->count; i++) {
         if (!env->bindings[i].defined) {
             continue;
@@ -363,6 +411,9 @@ static int merge_env_into_globals(ChVM *vm, const ChLibEnv *env) {
                                    ch_as_transformer(env->bindings[i].value)) != 0) {
                 snprintf(vm->error, sizeof(vm->error), "import: macro table full");
                 return -1;
+            }
+            if (macro_home && vm->macro_count > 0) {
+                vm->macros[vm->macro_count - 1].home_env = macro_home;
             }
         }
     }
@@ -938,16 +989,36 @@ static int resolve_import_set(ChVM *vm, ChValue set, ChLibEnv *out) {
     return library_into_env(out, lib);
 }
 
+static ChLibrary *import_set_library(ChVM *vm, ChValue set) {
+    if (!ch_is_pair(set)) {
+        return NULL;
+    }
+    ChValue head = ch_car(set);
+    if (ch_is_symbol(head)) {
+        const char *h = ch_symbol_basename(ch_as_symbol(head));
+        if (strcmp(h, "only") == 0 || strcmp(h, "except") == 0 || strcmp(h, "prefix") == 0 ||
+            strcmp(h, "rename") == 0) {
+            ChValue args = ch_cdr(set);
+            if (!ch_is_pair(args)) {
+                return NULL;
+            }
+            return import_set_library(vm, ch_car(args));
+        }
+    }
+    return ch_ensure_library(vm, set);
+}
+
 static int process_import_set(ChVM *vm, ChValue set, ChLibEnv *into_env) {
     ChLibEnv scratch;
     memset(&scratch, 0, sizeof(scratch));
+    ChLibrary *lib = import_set_library(vm, set);
     if (resolve_import_set(vm, set, &scratch) != 0) {
         return -1;
     }
     if (into_env) {
         return merge_env_into_env(into_env, &scratch);
     }
-    return merge_env_into_globals(vm, &scratch);
+    return merge_env_into_globals(vm, &scratch, lib ? lib->runtime_env : NULL);
 }
 
 int ch_handle_import(ChVM *vm, ChValue args) {
@@ -964,27 +1035,9 @@ int ch_handle_import(ChVM *vm, ChValue args) {
 }
 
 static int eval_library_begin(ChVM *vm, ChLibEnv *env, ChValue body) {
-    /* MVP: evaluate library bodies against real globals so closures keep
-     * working after the library is registered. Imports are merged into
-     * globals first; defines land in globals and are snapshotted into env. */
-    for (size_t i = 0; i < env->count; i++) {
-        if (env->bindings[i].defined) {
-            int g = ch_vm_intern_global(vm, env->bindings[i].name);
-            ch_vm_define_global(vm, g, env->bindings[i].value);
-            if (ch_is_transformer(env->bindings[i].value)) {
-                if (ch_vm_define_macro(vm, env->bindings[i].name,
-                                       ch_as_transformer(env->bindings[i].value)) != 0) {
-                    snprintf(vm->error, sizeof(vm->error), "define-library: macro table full");
-                    return -1;
-                }
-            }
-        }
-    }
-
-    size_t globals_before = vm->global_count;
-    /* Track which names existed so we can detect new defines — actually we
-     * re-scan exports from globals by name at the end. For env snapshot of
-     * all defines during begin, record global indices after each form. */
+    /* Evaluate library bodies in isolated env; do not pollute VM globals. */
+    ChLibEnv *saved = vm->active_lib_env;
+    vm->active_lib_env = env;
 
     for (ChValue b = body; ch_is_pair(b); b = ch_cdr(b)) {
         ChValue form = ch_car(b);
@@ -996,32 +1049,13 @@ static int eval_library_begin(ChVM *vm, ChLibEnv *env, ChValue body) {
 
         if (eval_toplevel_form(vm, form) != 0) {
             ch_gc_pop_n(&vm->gc, 1 + groots);
+            vm->active_lib_env = saved;
             return -1;
         }
         ch_gc_pop_n(&vm->gc, 1 + groots);
-
-        /* Sync any newly defined globals into env for export lookup. */
-        for (size_t i = 0; i < vm->global_count; i++) {
-            if (!vm->globals[i].defined) {
-                continue;
-            }
-            int idx = ch_lib_env_intern(env, vm->globals[i].name);
-            if (idx < 0) {
-                snprintf(vm->error, sizeof(vm->error), "define-library: environment full");
-                return -1;
-            }
-            ch_lib_env_define(env, idx, vm->globals[i].value);
-        }
-        for (size_t i = 0; i < vm->macro_count; i++) {
-            int idx = ch_lib_env_intern(env, vm->macros[i].name);
-            if (idx < 0) {
-                snprintf(vm->error, sizeof(vm->error), "define-library: environment full");
-                return -1;
-            }
-            ch_lib_env_define(env, idx, vm->macros[i].transformer);
-        }
     }
-    (void)globals_before;
+
+    vm->active_lib_env = saved;
     return 0;
 }
 
@@ -1248,15 +1282,19 @@ int ch_handle_define_library(ChVM *vm, ChValue args) {
         return -1;
     }
 
-    ChLibEnv env;
-    memset(&env, 0, sizeof(env));
+    ChLibEnv *env = (ChLibEnv *)calloc(1, sizeof(ChLibEnv));
+    if (!env) {
+        free(dotted);
+        return -1;
+    }
     ChSymbol *export_internal[CH_LIB_MAX_EXPORTS];
     ChSymbol *export_external[CH_LIB_MAX_EXPORTS];
     size_t export_count = 0;
 
     for (ChValue d = decls; ch_is_pair(d); d = ch_cdr(d)) {
-        if (process_lib_declaration(vm, &env, ch_car(d), export_internal, export_external,
+        if (process_lib_declaration(vm, env, ch_car(d), export_internal, export_external,
                                     &export_count) != 0) {
+            free(env);
             free(dotted);
             return -1;
         }
@@ -1264,27 +1302,31 @@ int ch_handle_define_library(ChVM *vm, ChValue args) {
 
     ChLibrary *lib = (ChLibrary *)calloc(1, sizeof(ChLibrary));
     if (!lib) {
+        free(env);
         free(dotted);
         return -1;
     }
     lib->name = dotted;
+    lib->runtime_env = env;
     for (size_t i = 0; i < export_count; i++) {
-        int idx = ch_lib_env_find(&env, export_internal[i]);
-        if (idx < 0 || !env.bindings[idx].defined) {
+        int idx = ch_lib_env_find(env, export_internal[i]);
+        if (idx < 0 || !env->bindings[idx].defined) {
             snprintf(vm->error, sizeof(vm->error),
                      "define-library: exported binding '%s' is undefined",
                      export_internal[i]->name);
             free(lib->name);
+            free(lib->runtime_env);
             free(lib);
             return -1;
         }
         lib->export_names[lib->export_count] = export_external[i];
-        lib->export_values[lib->export_count] = env.bindings[idx].value;
+        lib->export_values[lib->export_count] = env->bindings[idx].value;
         lib->export_count++;
     }
     if (ch_library_register(vm->libraries, lib) != 0) {
         snprintf(vm->error, sizeof(vm->error), "define-library: too many libraries");
         free(lib->name);
+        free(lib->runtime_env);
         free(lib);
         return -1;
     }
@@ -1327,11 +1369,12 @@ int ch_handle_include(ChVM *vm, ChValue args, int fold_case) {
     return 0;
 }
 
-int ch_handle_cond_expand(ChVM *vm, ChValue clauses) {
+int ch_cond_expand_select(ChVM *vm, ChValue clauses, ChValue *out_body, char *err, size_t err_len) {
+    *out_body = CH_NIL;
     for (ChValue c = clauses; ch_is_pair(c); c = ch_cdr(c)) {
         ChValue clause = ch_car(c);
         if (!ch_is_pair(clause)) {
-            snprintf(vm->error, sizeof(vm->error), "cond-expand: bad clause");
+            snprintf(err, err_len, "cond-expand: bad clause");
             return -1;
         }
         ChValue req = ch_car(clause);
@@ -1342,12 +1385,27 @@ int ch_handle_cond_expand(ChVM *vm, ChValue clauses) {
             match = ch_eval_feature_req(vm, req);
         }
         if (match) {
-            for (ChValue b = ch_cdr(clause); ch_is_pair(b); b = ch_cdr(b)) {
-                if (eval_toplevel_form(vm, ch_car(b)) != 0) {
-                    return -1;
-                }
-            }
+            *out_body = ch_cdr(clause);
             return 0;
+        }
+    }
+    return 1;
+}
+
+int ch_handle_cond_expand(ChVM *vm, ChValue clauses) {
+    ChValue body = CH_NIL;
+    char err[256];
+    int sel = ch_cond_expand_select(vm, clauses, &body, err, sizeof(err));
+    if (sel < 0) {
+        snprintf(vm->error, sizeof(vm->error), "%s", err);
+        return -1;
+    }
+    if (sel == 1) {
+        return 0;
+    }
+    for (ChValue b = body; ch_is_pair(b); b = ch_cdr(b)) {
+        if (eval_toplevel_form(vm, ch_car(b)) != 0) {
+            return -1;
         }
     }
     return 0;

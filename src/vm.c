@@ -18,6 +18,7 @@ void ch_vm_init(ChVM *vm) {
     memset(vm, 0, sizeof(*vm));
     ch_gc_init(&vm->gc);
     vm->result = CH_VOID;
+    vm->default_random_source = CH_UNDEFINED;
     vm->fiber_runtime = (ChFiberRuntime *)calloc(1, sizeof(ChFiberRuntime));
     if (vm->fiber_runtime) {
         ch_fiber_runtime_init(vm->fiber_runtime);
@@ -44,6 +45,9 @@ void ch_vm_deinit(ChVM *vm) {
         free(vm->loading_libs[i]);
     }
     free(vm->current_lib_dir);
+    for (size_t i = 0; i < vm->syntax_prop_count; i++) {
+        free(vm->syntax_props[i].key);
+    }
     if (vm->fiber_runtime) {
         ch_fiber_runtime_deinit(vm->fiber_runtime);
         free(vm->fiber_runtime);
@@ -93,9 +97,13 @@ void ch_vm_register_primitives(ChVM *vm) {
     ch_register_record_primitives(vm);
     ch_register_lazy_primitives(vm);
     ch_register_eval_primitives(vm);
+    ch_register_process_primitives(vm);
     ch_register_hashtable_primitives(vm);
     ch_register_fiber_primitives(vm);
     ch_register_ffi_primitives(vm);
+    ch_register_random_primitives(vm);
+    ch_register_filesystem_primitives(vm);
+    ch_register_weak_primitives(vm);
     ch_register_features_primitives(vm);
     if (vm->libraries) {
         (void)ch_register_builtin_libraries(vm);
@@ -221,6 +229,16 @@ static int16_t read_i16(ChCallFrame *frame) {
 
 static ChValue *frame_regs(ChVM *vm, ChCallFrame *frame) {
     return &vm->regs[frame->reg_base];
+}
+
+static ChLibEnv *resolve_lib_env(ChVM *vm, ChCallFrame *frame) {
+    if (vm->active_lib_env) {
+        return vm->active_lib_env;
+    }
+    if (frame && frame->closure && frame->closure->home_env) {
+        return frame->closure->home_env;
+    }
+    return NULL;
 }
 
 static ChValue frame_closure_roots[CH_VM_MAX_FRAMES];
@@ -554,7 +572,7 @@ static ChVMStatus run_until(ChVM *vm, size_t target_frames) {
             uint16_t idx = read_u16(frame);
             if (idx & CH_ENV_LIB_BIT) {
                 uint16_t li = (uint16_t)(idx & ~CH_ENV_LIB_BIT);
-                ChLibEnv *env = vm->active_lib_env;
+                ChLibEnv *env = resolve_lib_env(vm, frame);
                 if (!env || li >= env->count || !env->bindings[li].defined) {
                     snprintf(vm->error, sizeof(vm->error), "unbound variable: %s",
                              env && li < env->count ? env->bindings[li].name->name : "?");
@@ -576,7 +594,7 @@ static ChVMStatus run_until(ChVM *vm, size_t target_frames) {
             uint8_t src = read_u8(frame);
             if (idx & CH_ENV_LIB_BIT) {
                 uint16_t li = (uint16_t)(idx & ~CH_ENV_LIB_BIT);
-                ChLibEnv *env = vm->active_lib_env;
+                ChLibEnv *env = resolve_lib_env(vm, frame);
                 if (!env || li >= env->count || !env->bindings[li].defined) {
                     snprintf(vm->error, sizeof(vm->error), "unbound variable: %s",
                              env && li < env->count ? env->bindings[li].name->name : "?");
@@ -598,7 +616,7 @@ static ChVMStatus run_until(ChVM *vm, size_t target_frames) {
             uint8_t src = read_u8(frame);
             if (idx & CH_ENV_LIB_BIT) {
                 uint16_t li = (uint16_t)(idx & ~CH_ENV_LIB_BIT);
-                ChLibEnv *env = vm->active_lib_env;
+                ChLibEnv *env = resolve_lib_env(vm, frame);
                 if (!env || li >= env->count) {
                     return runtime_error(vm, "define: bad library binding");
                 }
@@ -678,6 +696,13 @@ static ChVMStatus run_until(ChVM *vm, size_t target_frames) {
             ChValue fn_root = fn_v;
             ch_gc_push(&vm->gc, &fn_root);
             regs[dst] = ch_gc_make_closure(&vm->gc, ch_as_function(fn_root), uvs);
+            {
+                ChLibEnv *home = vm->active_lib_env;
+                if (!home && frame->closure) {
+                    home = frame->closure->home_env;
+                }
+                ch_as_closure(regs[dst])->home_env = home;
+            }
             ch_gc_pop_n(&vm->gc, roots + 1);
             break;
         }
@@ -1046,4 +1071,41 @@ ChVMStatus ch_vm_call_closure(ChVM *vm, ChValue closure, ChValue *args, int narg
         *out = vm->result;
     }
     return st;
+}
+
+int ch_vm_syntax_property_set(ChVM *vm, const char *id, const char *key, ChValue val) {
+    char composite[512];
+    if (snprintf(composite, sizeof(composite), "%s\x1f%s", id, key) >= (int)sizeof(composite)) {
+        return -1;
+    }
+    for (size_t i = 0; i < vm->syntax_prop_count; i++) {
+        if (strcmp(vm->syntax_props[i].key, composite) == 0) {
+            vm->syntax_props[i].value = val;
+            return 0;
+        }
+    }
+    if (vm->syntax_prop_count >= CH_VM_MAX_SYNTAX_PROPS) {
+        return -1;
+    }
+    char *owned = strdup(composite);
+    if (!owned) {
+        return -1;
+    }
+    vm->syntax_props[vm->syntax_prop_count].key = owned;
+    vm->syntax_props[vm->syntax_prop_count].value = val;
+    vm->syntax_prop_count++;
+    return 0;
+}
+
+ChValue ch_vm_syntax_property_get(ChVM *vm, const char *id, const char *key) {
+    char composite[512];
+    if (snprintf(composite, sizeof(composite), "%s\x1f%s", id, key) >= (int)sizeof(composite)) {
+        return CH_FALSE;
+    }
+    for (size_t i = 0; i < vm->syntax_prop_count; i++) {
+        if (strcmp(vm->syntax_props[i].key, composite) == 0) {
+            return vm->syntax_props[i].value;
+        }
+    }
+    return CH_FALSE;
 }

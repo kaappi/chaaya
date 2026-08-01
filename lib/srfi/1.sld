@@ -1,8 +1,9 @@
 (define-library (srfi 1)
   (import (scheme base))
-  (export first second third iota fold filter)
+  (export first second third iota fold filter
+          any find lset= lset-intersection lset-difference)
   (begin
-    ;; Phase 9 partial shim: provide a small, commonly-used subset.
+    ;; Phase 9 partial shim: commonly-used SRFI-1 subset for portable libraries.
     (define (first xs) (car xs))
     (define (second xs) (car (cdr xs)))
     (define (third xs) (car (cdr (cdr xs))))
@@ -28,4 +29,44 @@
         (cond
           ((null? xs) (reverse acc))
           ((pred (car xs)) (loop (cdr xs) (cons (car xs) acc)))
-          (else (loop (cdr xs) acc)))))))
+          (else (loop (cdr xs) acc)))))
+
+    (define (any pred lis)
+      (if (null? lis)
+          #f
+          (or (pred (car lis)) (any pred (cdr lis)))))
+
+    (define (find pred lis)
+      (cond
+        ((null? lis) #f)
+        ((pred (car lis)) (car lis))
+        (else (find pred (cdr lis)))))
+
+    (define (lset-member? = elem lis)
+      (any (lambda (x) (= elem x)) lis))
+
+    (define (lset-intersection = lis1 . lists)
+      (if (null? lists)
+          lis1
+          (filter (lambda (x)
+                    (let loop ((ls lists))
+                      (if (null? ls)
+                          #t
+                          (and (lset-member? = x (car ls))
+                               (loop (cdr ls))))))
+                  lis1)))
+
+    (define (lset-difference = lis1 . lists)
+      (if (null? lists)
+          lis1
+          (filter (lambda (x)
+                    (not (any (lambda (l) (lset-member? = x l)) lists)))
+                  lis1)))
+
+    (define (lset= = lis1 . rest)
+      (let loop ((lists (cons lis1 rest)))
+        (cond
+          ((null? (cdr lists)) #t)
+          ((not (= (length (car lists)) (length (cadr lists)))) #f)
+          ((not (null? (lset-difference = (car lists) (cadr lists)))) #f)
+          (else (loop (cdr lists)))))))))

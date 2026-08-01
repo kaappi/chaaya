@@ -16,8 +16,9 @@ static bool is_derived_special_form(ChValue head) {
     static const char *derived[] = {
         "quasiquote",   "let",          "let*",         "letrec",      "letrec*",
         "cond",         "case",         "when",         "unless",      "do",
-        "guard",        "parameterize", "case-lambda",  "delay",       "let-values",
-        "let*-values",  "define-library", "include",    "include-ci",  "cond-expand",
+        "guard",        "parameterize", "case-lambda",  "delay",       "delay-force",
+        "let-values",   "let*-values",  "define-values", "define-library", "include",
+        "include-ci",   "cond-expand",  "let-syntax",   "letrec-syntax",  "define-property",
     };
     for (size_t i = 0; i < sizeof(derived) / sizeof(derived[0]); i++) {
         if (strcmp(name, derived[i]) == 0) {

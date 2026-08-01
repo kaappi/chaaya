@@ -31,6 +31,7 @@ typedef struct ChLibrary {
     ChSymbol *export_names[CH_LIB_MAX_EXPORTS];
     ChValue export_values[CH_LIB_MAX_EXPORTS];
     size_t export_count;
+    ChLibEnv *runtime_env; /* owned; persists library locals for exported closures */
 } ChLibrary;
 
 typedef struct ChLibraryRegistry {
@@ -80,6 +81,10 @@ int ch_environment_from_imports(ChVM *vm, ChValue *import_sets, int nsets, ChLib
 /* Top-level (include ...) / (include-ci ...) / (cond-expand ...). */
 int ch_handle_include(ChVM *vm, ChValue args, int fold_case);
 int ch_handle_cond_expand(ChVM *vm, ChValue clauses);
+
+/* Expression-position cond-expand: 0 = matched (*out_body = clause body),
+ * 1 = no match, -1 = error. */
+int ch_cond_expand_select(ChVM *vm, ChValue clauses, ChValue *out_body, char *err, size_t err_len);
 
 #ifdef __cplusplus
 }

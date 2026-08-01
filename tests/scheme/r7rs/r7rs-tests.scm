@@ -396,8 +396,109 @@
 
 (test-end)
 
-;; Chaaya Phase 7A: defer the full macro stress section for now.
+;; Chaaya Phase 7A: macro section (subset of Kaappi r7rs 4.3).
 (test-begin "4.3 Macros")
+
+(test 'now (let-syntax
+               ((when (syntax-rules ()
+                        ((when test stmt1 stmt2 ...)
+                         (if test
+                             (begin stmt1
+                                    stmt2 ...))))))
+             (let ((if #t))
+               (when if (set! if 'now))
+               if)))
+
+(test 'outer (let-syntax ((const (syntax-rules () ((const) 'outer))))
+  (const)))
+
+(test 7 (letrec-syntax
+  ((my-or (syntax-rules ()
+            ((my-or) #f)
+            ((my-or e) e)
+            ((my-or e1 e2 ...)
+             (let ((temp e1))
+               (if temp
+                   temp
+                   (my-or e2 ...)))))))
+  (my-or #f 7)))
+
+(define-syntax be-like-begin1
+  (syntax-rules ()
+    ((be-like-begin1 name)
+     (define-syntax name
+       (syntax-rules ()
+         ((name expr (... ...))
+          (begin expr (... ...))))))))
+(be-like-begin1 sequence1)
+(test 3 (sequence1 0 1 2 3))
+
+(define-syntax be-like-begin2
+  (syntax-rules ()
+    ((be-like-begin2 name)
+     (define-syntax name
+       (... (syntax-rules ()
+              ((name expr ...)
+               (begin expr ...))))))))
+(be-like-begin2 sequence2)
+(test 4 (sequence2 1 2 3 4))
+
+(define-syntax be-like-begin3
+  (syntax-rules ()
+    ((be-like-begin3 name)
+     (define-syntax name
+       (syntax-rules dots ()
+         ((name expr dots)
+          (begin expr dots)))))))
+(be-like-begin3 sequence3)
+(test 5 (sequence3 2 3 4 5))
+
+;; ellipsis escape
+(define-syntax elli-esc-1
+  (syntax-rules ()
+    ((_)
+     '(... ...))
+    ((_ x)
+     '(... (x ...)))
+    ((_ x y)
+     '(... (... x y)))))
+
+(test '... (elli-esc-1))
+(test '(100 ...) (elli-esc-1 100))
+(test '(... 100 200) (elli-esc-1 100 200))
+
+;; Syntax pattern with ellipsis in middle of proper list.
+(define-syntax part-2
+  (syntax-rules ()
+    ((_ a b (m n) ... x y)
+     (vector (list a b) (list m ...) (list n ...) (list x y)))
+    ((_ . rest) 'error)))
+(test '#((10 43) (31 41 51) (32 42 52) (63 77))
+    (part-2 10 (+ 21 22) (31 32) (41 42) (51 52) (+ 61 2) 77))
+
+;; underscore
+(define-syntax underscore
+  (syntax-rules ()
+    ((foo _) '_)))
+(test '_ (underscore foo))
+
+(let ()
+  (define-syntax underscore2
+    (syntax-rules ()
+      ((underscore2 (a _) ...) 42)))
+  (test 42 (underscore2 (1 2))))
+
+(define-syntax count-to-2
+  (syntax-rules ()
+    ((_) 0)
+    ((_ _) 1)
+    ((_ _ _) 2)
+    ((_ . _) 'many)))
+(test '(2 0 many)
+    (list (count-to-2 a b) (count-to-2) (count-to-2 a b c d)))
+
+(test 'ok (let ((=> #f)) (cond (#t => 'ok))))
+
 (test-end)
 
 (test-begin "5 Program structure")

@@ -46,6 +46,21 @@
 (check-equal "quasiquote splice" '(1 2 3 4)
   `(1 ,@(list 2 3) 4))
 
+(check-equal "quasiquote vector" '#(10 5 4 16 9 8)
+  (let ((square (lambda (x) (* x x))))
+    `#(10 5 ,(square 2) ,@(map square '(4 3)) 8)))
+
+(check-equal "case map and" '((other . z) (semivowel . y) (other . x)
+                              (semivowel . w) (vowel . u))
+  (map (lambda (x)
+         (case x
+           ((a e i o u) => (lambda (w) (cons 'vowel w)))
+           ((w y) (cons 'semivowel x))
+           (else => (lambda (w) (cons 'other w)))))
+       '(z y x w u)))
+
+(check-eqv "and short-circuit" #t (and (= 2 2) (> 2 1)))
+
 (check-eqv "named let" 6
   (let loop ((n 3) (acc 0))
     (if (= n 0)

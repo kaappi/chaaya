@@ -78,4 +78,22 @@
   (let ((x 1))
     (capture-test x)))
 
+(define-syntax be-like-begin1
+  (syntax-rules ()
+    ((be-like-begin1 name)
+     (define-syntax name
+       (syntax-rules ()
+         ((name expr (... ...))
+          (begin expr (... ...))))))))
+(be-like-begin1 sequence1)
+(check-eqv "ellipsis escape begin" 3 (sequence1 0 1 2 3))
+
+(define-syntax elli-esc-1
+  (syntax-rules ()
+    ((_) '...)
+    ((_ x) '(... (x ...)))
+    ((_ x y) '(... (... x y)))))
+(check-eqv "elli-esc zero" '... (elli-esc-1))
+(check-equal "elli-esc one" '(100 ...) (elli-esc-1 100))
+
 (check-finish)

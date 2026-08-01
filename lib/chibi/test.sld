@@ -1,6 +1,7 @@
 (define-library (chibi test)
   (import (scheme base) (scheme write) (scheme complex))
-  (export test test-assert test-error test-values test-begin test-end)
+  (export test test-assert test-error test-values test-begin test-end
+          test-pass test-fail test-equal? test-approx=?)
   (begin
 
     (define pass-count 0)
@@ -69,11 +70,10 @@
     (define-syntax test
       (syntax-rules ()
         ((test expected expr)
-         (guard (e (#t (test-fail expected (list 'error: e))))
-           (let ((res expr))
-             (if (test-equal? expected res)
-                 (test-pass)
-                 (test-fail expected res)))))
+         (let ((res expr))
+           (if (test-equal? expected res)
+               (test-pass)
+               (test-fail expected res))))
         ((test name expected expr)
          (test expected expr))))
 
@@ -96,66 +96,5 @@
         ((test-values expected expr)
          (test (call-with-values (lambda () expected) list)
                (call-with-values (lambda () expr) list)))))
-
-    ;; Bootstrap shim forms needed by the vendored R7RS suite.
-    (define-syntax let-values
-      (syntax-rules ()
-        ((let-values () body ...)
-         (let () body ...))
-        ((let-values ((formals expr) more ...) body ...)
-         (call-with-values (lambda () expr)
-           (lambda formals
-             (let-values (more ...) body ...))))))
-
-    (define-syntax let*-values
-      (syntax-rules ()
-        ((let*-values () body ...)
-         (let () body ...))
-        ((let*-values ((formals expr) more ...) body ...)
-         (call-with-values (lambda () expr)
-           (lambda formals
-             (let*-values (more ...) body ...))))))
-
-    (define-syntax delay-force
-      (syntax-rules ()
-        ((delay-force expr)
-         (delay (force expr)))))
-
-    (define-syntax define-values
-      (syntax-rules ()
-        ((define-values () expr)
-         (call-with-values (lambda () expr) (lambda ignored #t)))
-        ((define-values (a) expr)
-         (define a (call-with-values (lambda () expr) (lambda (x) x))))
-        ((define-values (a b) expr)
-         (begin
-           (define a #f)
-           (define b #f)
-           (call-with-values (lambda () expr)
-             (lambda (x y)
-               (set! a x)
-               (set! b y)))))
-        ((define-values (a b c) expr)
-         (begin
-           (define a #f)
-           (define b #f)
-           (define c #f)
-           (call-with-values (lambda () expr)
-             (lambda (x y z)
-               (set! a x)
-               (set! b y)
-               (set! c z)))))
-        ((define-values (a b . rest) expr)
-         (begin
-           (define a #f)
-           (define b #f)
-           (define rest '())
-           (call-with-values (lambda () expr)
-             (lambda (x y . zs)
-               (set! a x)
-               (set! b y)
-               (set! rest zs)))))
-        ((define-values vars expr)
-         (define vars (call-with-values (lambda () expr) list))))
 
     )))

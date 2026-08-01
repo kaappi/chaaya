@@ -110,6 +110,10 @@ static void free_object(ChObject *obj) {
     }
     case CH_TAG_FOREIGN_PROC:
         break;
+    case CH_TAG_RANDOM_SOURCE:
+    case CH_TAG_EPHEMERON:
+    case CH_TAG_FILE_INFO:
+        break;
     default:
         break;
     }
@@ -128,6 +132,7 @@ void ch_gc_deinit(ChGC *gc) {
     free_object_list(gc->young_objects);
     free_object_list(gc->old_objects);
     free(gc->symbols);
+    free(gc->pending_ephemerons);
     memset(gc, 0, sizeof(*gc));
 }
 
@@ -153,6 +158,63 @@ void ch_gc_pop_n(ChGC *gc, size_t n) {
 }
 
 static void mark_value(ChValue v);
+
+static ChGC *g_mark_gc;
+
+static void register_pending_ephemeron(ChValue eph) {
+    ChGC *gc = g_mark_gc;
+    if (!gc) {
+        return;
+    }
+    if (gc->pending_ephem_count >= gc->pending_ephem_cap) {
+        size_t ncap = gc->pending_ephem_cap ? gc->pending_ephem_cap * 2 : 32;
+        ChValue *next = (ChValue *)realloc(gc->pending_ephemerons, ncap * sizeof(ChValue));
+        if (!next) {
+            abort();
+        }
+        gc->pending_ephemerons = next;
+        gc->pending_ephem_cap = ncap;
+    }
+    gc->pending_ephemerons[gc->pending_ephem_count++] = eph;
+}
+
+static int weak_reachable(ChValue v) {
+    if (!ch_is_pointer(v)) {
+        return 1;
+    }
+    ChObject *obj = ch_to_object(v);
+    return obj && obj->marked;
+}
+
+static void process_weak_refs(ChGC *gc) {
+    for (;;) {
+        int progress = 0;
+        size_t i = 0;
+        while (i < gc->pending_ephem_count) {
+            ChEphemeron *eph = ch_as_ephemeron(gc->pending_ephemerons[i]);
+            if (weak_reachable(eph->key)) {
+                mark_value(eph->key);
+                mark_value(eph->value);
+                gc->pending_ephemerons[i] =
+                    gc->pending_ephemerons[gc->pending_ephem_count - 1];
+                gc->pending_ephem_count--;
+                progress = 1;
+            } else {
+                i++;
+            }
+        }
+        if (!progress) {
+            break;
+        }
+    }
+    for (size_t j = 0; j < gc->pending_ephem_count; j++) {
+        ChEphemeron *eph = ch_as_ephemeron(gc->pending_ephemerons[j]);
+        eph->broken = 1;
+        eph->key = CH_FALSE;
+        eph->value = CH_FALSE;
+    }
+    gc->pending_ephem_count = 0;
+}
 
 static void mark_object(ChObject *obj) {
     if (!obj || obj->marked) {
@@ -346,6 +408,13 @@ static void mark_object(ChObject *obj) {
         mark_value(proc->name);
         break;
     }
+    case CH_TAG_RANDOM_SOURCE:
+        break;
+    case CH_TAG_EPHEMERON:
+        register_pending_ephemeron(ch_make_pointer(obj));
+        break;
+    case CH_TAG_FILE_INFO:
+        break;
     }
 }
 
@@ -356,6 +425,8 @@ static void mark_value(ChValue v) {
 }
 
 static void mark_roots_and_symbols(ChGC *gc) {
+    gc->pending_ephem_count = 0;
+    g_mark_gc = gc;
     for (size_t i = 0; i < gc->root_count; i++) {
         mark_value(*gc->roots[i]);
     }
@@ -364,6 +435,8 @@ static void mark_roots_and_symbols(ChGC *gc) {
             mark_object(&gc->symbols[i]->header);
         }
     }
+    process_weak_refs(gc);
+    g_mark_gc = NULL;
 }
 
 static void sweep_list_major(ChGC *gc, ChObject **head, size_t *count) {
@@ -575,6 +648,7 @@ ChValue ch_gc_make_closure(ChGC *gc, ChFunction *fn, ChUpvalue **upvalues) {
     ChClosure *cl = (ChClosure *)ch_gc_alloc(gc, sizeof(ChClosure), CH_TAG_CLOSURE);
     cl->fn = (ChFunction *)ch_to_object(fn_v);
     cl->upvalues = upvalues;
+    cl->home_env = NULL;
     ch_gc_pop(gc);
     return ch_make_pointer(&cl->header);
 }
@@ -688,6 +762,7 @@ ChValue ch_gc_make_bytevector_output_port(ChGC *gc) {
 ChValue ch_gc_make_transformer(ChGC *gc) {
     ChTransformer *tr = (ChTransformer *)ch_gc_alloc(gc, sizeof(ChTransformer), CH_TAG_TRANSFORMER);
     tr->literal_count = 0;
+    tr->ellipsis_id = NULL;
     tr->rule_count = 0;
     return ch_make_pointer(&tr->header);
 }
@@ -796,4 +871,60 @@ ChValue ch_gc_make_time(ChGC *gc, int64_t seconds, int32_t nanoseconds, ChValue 
     time->nanoseconds = nanoseconds;
     time->type_sym = type_sym;
     return ch_make_pointer(&time->header);
+}
+
+static uint64_t splitmix64_next(uint64_t *state) {
+    uint64_t z = (*state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+static uint64_t rotl64(uint64_t x, int k) {
+    return (x << k) | (x >> (64 - k));
+}
+
+void ch_random_source_seed(ChRandomSource *rs, uint64_t seed) {
+    uint64_t sm = seed;
+    for (int i = 0; i < 4; i++) {
+        rs->s[i] = splitmix64_next(&sm);
+    }
+}
+
+ChValue ch_gc_make_random_source(ChGC *gc, uint64_t seed) {
+    ChRandomSource *rs =
+        (ChRandomSource *)ch_gc_alloc(gc, sizeof(ChRandomSource), CH_TAG_RANDOM_SOURCE);
+    ch_random_source_seed(rs, seed);
+    return ch_make_pointer(&rs->header);
+}
+
+uint64_t ch_random_source_next_u64(ChRandomSource *rs) {
+    const uint64_t result = rotl64(rs->s[1] * 5, 7) * 9;
+    const uint64_t t = rs->s[1] << 17;
+    rs->s[2] ^= rs->s[0];
+    rs->s[3] ^= rs->s[1];
+    rs->s[1] ^= rs->s[2];
+    rs->s[0] ^= rs->s[3];
+    rs->s[2] ^= t;
+    rs->s[3] = rotl64(rs->s[3], 45);
+    return result;
+}
+
+ChValue ch_gc_make_ephemeron(ChGC *gc, ChValue key, ChValue value) {
+    ChValue key_r = key;
+    ChValue val_r = value;
+    ch_gc_push(gc, &key_r);
+    ch_gc_push(gc, &val_r);
+    ChEphemeron *eph = (ChEphemeron *)ch_gc_alloc(gc, sizeof(ChEphemeron), CH_TAG_EPHEMERON);
+    eph->key = key_r;
+    eph->value = val_r;
+    eph->broken = 0;
+    ch_gc_pop_n(gc, 2);
+    return ch_make_pointer(&eph->header);
+}
+
+ChValue ch_gc_make_file_info(ChGC *gc, const ChFileInfo *info) {
+    ChFileInfo *fi = (ChFileInfo *)ch_gc_alloc(gc, sizeof(ChFileInfo), CH_TAG_FILE_INFO);
+    *fi = *info;
+    return ch_make_pointer(&fi->header);
 }

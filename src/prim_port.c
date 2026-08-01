@@ -247,6 +247,24 @@ static ChValue prim_output_port_p(ChVM *vm, ChValue *args, int nargs) {
     return (ch_is_port(args[0]) && ch_as_port(args[0])->output) ? CH_TRUE : CH_FALSE;
 }
 
+static ChValue prim_textual_port_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)nargs;
+    if (!ch_is_port(args[0])) {
+        return CH_FALSE;
+    }
+    return ch_as_port(args[0])->kind == CH_PORT_BYTEVECTOR ? CH_FALSE : CH_TRUE;
+}
+
+static ChValue prim_binary_port_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)nargs;
+    if (!ch_is_port(args[0])) {
+        return CH_FALSE;
+    }
+    return ch_as_port(args[0])->kind == CH_PORT_BYTEVECTOR ? CH_TRUE : CH_FALSE;
+}
+
 static ChValue prim_eof_object_p(ChVM *vm, ChValue *args, int nargs) {
     (void)vm;
     (void)nargs;
@@ -949,6 +967,8 @@ void ch_register_port_primitives(ChVM *vm) {
     define_prim(vm, "port?", prim_port_p, 1, 1);
     define_prim(vm, "input-port?", prim_input_port_p, 1, 1);
     define_prim(vm, "output-port?", prim_output_port_p, 1, 1);
+    define_prim(vm, "textual-port?", prim_textual_port_p, 1, 1);
+    define_prim(vm, "binary-port?", prim_binary_port_p, 1, 1);
     define_prim(vm, "eof-object?", prim_eof_object_p, 1, 1);
     define_prim(vm, "eof-object", prim_eof_object, 0, 0);
     define_prim(vm, "current-input-port", prim_current_input_port, 0, 0);
