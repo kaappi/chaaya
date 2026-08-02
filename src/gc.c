@@ -25,6 +25,8 @@ void ch_gc_init(ChGC *gc) {
     gc->owns_symbols = 1;
     gc->symbol_cap = 64;
     gc->symbols = (ChSymbol **)calloc(gc->symbol_cap, sizeof(ChSymbol *));
+    gc->roots = (ChValue **)calloc(CH_GC_ROOT_INITIAL, sizeof(ChValue *));
+    gc->root_cap = gc->roots ? CH_GC_ROOT_INITIAL : 0;
 }
 
 void ch_gc_init_for_thread(ChGC *gc, ChGC *parent) {
@@ -164,6 +166,7 @@ void ch_gc_deinit(ChGC *gc) {
     free(gc->pending_ephemerons);
     free(gc->remembered_set);
     free(gc->extra_roots);
+    free(gc->roots);
     memset(gc, 0, sizeof(*gc));
 }
 
@@ -185,8 +188,20 @@ int ch_gc_add_extra_root(ChGC *gc, ChValue value) {
 }
 
 void ch_gc_push(ChGC *gc, ChValue *slot) {
-    if (gc->root_count >= CH_GC_ROOT_MAX) {
-        abort();
+    if (gc->root_count >= gc->root_cap) {
+        size_t ncap = gc->root_cap ? gc->root_cap * 2 : CH_GC_ROOT_INITIAL;
+        if (ncap > CH_GC_ROOT_MAX) {
+            ncap = CH_GC_ROOT_MAX;
+        }
+        if (ncap <= gc->root_cap) {
+            abort(); /* hard ceiling — prefer a catchable re-entrancy error upstream */
+        }
+        ChValue **nroots = (ChValue **)realloc(gc->roots, ncap * sizeof(ChValue *));
+        if (!nroots) {
+            abort();
+        }
+        gc->roots = nroots;
+        gc->root_cap = ncap;
     }
     gc->roots[gc->root_count++] = slot;
 }

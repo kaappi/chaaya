@@ -1284,9 +1284,19 @@ ChVMStatus ch_vm_run_fiber_resume(ChVM *vm, size_t target_frames) {
 }
 
 ChVMStatus ch_vm_apply(ChVM *vm, ChValue proc, ChValue *args, int nargs, ChValue *out) {
+    /* Cap nested native re-entrancy before C-stack overflow / root exhaustion
+     * (#1191). Raise a catchable runtime error rather than abort/SIGSEGV. */
+    if (vm->native_reentry_depth >= CH_VM_MAX_NATIVE_REENTRY ||
+        vm->gc.root_count + 32 > CH_GC_ROOT_MAX) {
+        snprintf(vm->error, sizeof(vm->error), "native re-entrancy too deep");
+        return CH_VM_RUNTIME_ERROR;
+    }
+    vm->native_reentry_depth++;
+
     size_t saved_frames = vm->frame_count;
     size_t base = vm->reg_top;
     if (base + 1 + (size_t)nargs > CH_VM_MAX_REGS) {
+        vm->native_reentry_depth--;
         return CH_VM_STACK_OVERFLOW;
     }
     vm->regs[base] = proc;
@@ -1299,18 +1309,21 @@ ChVMStatus ch_vm_apply(ChVM *vm, ChValue proc, ChValue *args, int nargs, ChValue
     for (;;) {
         if (st == CH_VM_FIBER_PARKED) {
             vm->reg_top = compute_reg_top(vm);
+            vm->native_reentry_depth--;
             return CH_VM_FIBER_PARKED;
         }
         if (st == CH_VM_CONTINUATION_INVOKED) {
             if (vm->frame_count < saved_frames) {
                 /* Escaped past this apply. */
                 vm->reg_top = compute_reg_top(vm);
+                vm->native_reentry_depth--;
                 return CH_VM_CONTINUATION_INVOKED;
             }
             if (vm->frame_count == saved_frames) {
                 /* Landed at our barrier; invoke_continuation set vm->result. */
                 *out = vm->result;
                 vm->reg_top = compute_reg_top(vm);
+                vm->native_reentry_depth--;
                 return CH_VM_OK;
             }
             /* Re-entered above us — keep running until we settle. */
@@ -1319,6 +1332,7 @@ ChVMStatus ch_vm_apply(ChVM *vm, ChValue proc, ChValue *args, int nargs, ChValue
         }
         if (st != CH_VM_OK) {
             vm->reg_top = compute_reg_top(vm);
+            vm->native_reentry_depth--;
             return st;
         }
         if (vm->frame_count > saved_frames) {
@@ -1329,6 +1343,7 @@ ChVMStatus ch_vm_apply(ChVM *vm, ChValue proc, ChValue *args, int nargs, ChValue
     }
     *out = vm->regs[base];
     vm->reg_top = compute_reg_top(vm);
+    vm->native_reentry_depth--;
     return CH_VM_OK;
 }
 

@@ -126,22 +126,32 @@ static int port_decode_utf8_at(ChVM *vm, ChPort *p, size_t pos, uint32_t *cp_out
     unsigned char b0 = (unsigned char)p->buf[pos];
     int n = utf8_seq_len(b0);
     if (n < 0) {
-        return -1;
+        /* Invalid lead byte: expose it as a single Latin-1 code unit. */
+        *cp_out = b0;
+        *next_out = pos + 1;
+        return 0;
     }
     while (pos + (size_t)n > p->len) {
+        size_t old_len = p->len;
         int ready = ensure_port_input_byte(vm, p, 1);
         if (ready == -2) {
             return -2;
         }
-        if (ready < 0) {
-            return -1;
+        if (ready <= 0) {
+            break;
         }
-        if (ready == 0) {
+        /* Bytevector/string ports report a ready byte at `pos` even when the
+         * remaining sequence is truncated — stop if the buffer did not grow. */
+        if (p->len == old_len) {
             break;
         }
     }
     if (pos + (size_t)n > p->len) {
-        return -1;
+        /* Truncated multi-byte sequence (#518): return the lead byte so a
+         * subsequent read-u8 sees the original stream bytes, not EOF. */
+        *cp_out = b0;
+        *next_out = pos + 1;
+        return 0;
     }
     uint32_t cp = 0;
     if (n == 1) {

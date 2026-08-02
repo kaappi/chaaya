@@ -4,6 +4,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,13 +23,33 @@ static const char *require_path(ChVM *vm, ChValue v, const char *who) {
         snprintf(vm->error, sizeof(vm->error), "%s: expected string path", who);
         return NULL;
     }
-    const char *path = ch_as_string(v)->data;
+    ChString *s = ch_as_string(v);
+    /* Reject embedded NULs (#805) — C APIs would silently truncate. */
+    if (memchr(s->data, '\0', s->len) != NULL) {
+        snprintf(vm->error, sizeof(vm->error), "%s: path contains NUL byte", who);
+        return NULL;
+    }
+    const char *path = s->data;
     if (ch_sandbox_deny_fs(path)) {
         snprintf(vm->error, sizeof(vm->error),
                  "%s: denied by sandbox for path '%s'", who, path);
         return NULL;
     }
     return path;
+}
+
+/* POSIX permission modes use the low 12 bits (07777). */
+static int parse_mode_arg(ChVM *vm, ChValue v, mode_t *out, const char *who) {
+    if (!ch_is_fixnum(v)) {
+        snprintf(vm->error, sizeof(vm->error), "%s: expected integer mode", who);
+        return -1;
+    }
+    int64_t n = ch_to_fixnum(v);
+    if (n < 0 || n > 07777) {
+        return -2; /* caller raises file-error with irritant */
+    }
+    *out = (mode_t)n;
+    return 0;
 }
 
 static ChValue raise_file_error(ChVM *vm, const char *message, ChValue irritant) {
@@ -206,18 +227,84 @@ static ChValue prim_create_directory(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
     mode_t mode = 0755;
-    if (nargs > 1 && ch_is_fixnum(args[1])) {
-        int64_t m = ch_to_fixnum(args[1]);
-        if (m < 0 || m > 07777) {
-            snprintf(vm->error, sizeof(vm->error), "create-directory: mode out of range");
+    if (nargs > 1) {
+        int rc = parse_mode_arg(vm, args[1], &mode, "create-directory");
+        if (rc == -1) {
             return CH_UNDEFINED;
         }
-        mode = (mode_t)m;
+        if (rc == -2) {
+            return raise_file_error(vm, "create-directory: mode out of range", args[1]);
+        }
     }
     if (mkdir(path, mode) != 0 && errno != EEXIST) {
         return raise_file_error(vm, "create-directory: cannot create directory", args[0]);
     }
     return CH_VOID;
+}
+
+static ChValue prim_set_file_mode(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    const char *path = require_path(vm, args[0], "set-file-mode");
+    if (!path) {
+        return CH_UNDEFINED;
+    }
+    mode_t mode = 0;
+    int rc = parse_mode_arg(vm, args[1], &mode, "set-file-mode");
+    if (rc == -1) {
+        return CH_UNDEFINED;
+    }
+    if (rc == -2) {
+        return raise_file_error(vm, "set-file-mode: mode out of range", args[1]);
+    }
+    if (chmod(path, mode) != 0) {
+        return raise_file_error(vm, "set-file-mode: cannot set file mode", args[0]);
+    }
+    return CH_VOID;
+}
+
+static ChValue prim_umask(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)args;
+    (void)nargs;
+    mode_t cur = umask(0);
+    (void)umask(cur);
+    return ch_make_fixnum((int64_t)cur);
+}
+
+static ChValue prim_set_umask(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    mode_t mode = 0;
+    int rc = parse_mode_arg(vm, args[0], &mode, "set-umask!");
+    if (rc == -1) {
+        return CH_UNDEFINED;
+    }
+    if (rc == -2) {
+        return raise_file_error(vm, "set-umask!: mode out of range", args[0]);
+    }
+    (void)umask(mode);
+    return CH_VOID;
+}
+
+static ChValue prim_nice(ChVM *vm, ChValue *args, int nargs) {
+    int delta = 1;
+    if (nargs > 0) {
+        if (!ch_is_fixnum(args[0])) {
+            snprintf(vm->error, sizeof(vm->error), "nice: expected integer");
+            return CH_UNDEFINED;
+        }
+        int64_t n = ch_to_fixnum(args[0]);
+        if (n < (int64_t)INT32_MIN || n > (int64_t)INT32_MAX) {
+            return raise_file_error(vm, "nice: value out of range", args[0]);
+        }
+        delta = (int)n;
+    }
+    errno = 0;
+    int result = nice(delta);
+    if (result == -1 && errno != 0) {
+        ChValue irritant = nargs > 0 ? args[0] : ch_make_fixnum(1);
+        return raise_file_error(vm, "nice: cannot change nice value", irritant);
+    }
+    return ch_make_fixnum((int64_t)result);
 }
 
 static ChValue prim_delete_directory(ChVM *vm, ChValue *args, int nargs) {
@@ -390,4 +477,8 @@ void ch_register_filesystem_primitives(ChVM *vm) {
     define_prim(vm, "file-info-type", prim_file_info_type, 1, 1);
     define_prim(vm, "temp-file-prefix", prim_temp_file_prefix, 0, 0);
     define_prim(vm, "create-temp-file", prim_create_temp_file, -1, 0);
+    define_prim(vm, "set-file-mode", prim_set_file_mode, 2, 2);
+    define_prim(vm, "umask", prim_umask, 0, 0);
+    define_prim(vm, "set-umask!", prim_set_umask, 1, 1);
+    define_prim(vm, "nice", prim_nice, -1, 0);
 }

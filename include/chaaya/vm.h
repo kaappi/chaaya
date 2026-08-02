@@ -26,6 +26,13 @@ extern "C" {
 #define CH_VM_MAX_SYNTAX_PROPS 128
 #define CH_VM_MAX_BREAKPOINTS 32
 #define CH_VM_MAX_PENDING_ARGS 64
+/* Nested native→Scheme→native re-entrancy (map/for-each callbacks). Cap before
+ * the C stack overflows; Debug matches Kaappi's 200, Release allows deeper. */
+#if defined(NDEBUG)
+#define CH_VM_MAX_NATIVE_REENTRY 3000
+#else
+#define CH_VM_MAX_NATIVE_REENTRY 200
+#endif
 
 struct ChLibEnv;
 struct ChLibraryRegistry;
@@ -105,6 +112,7 @@ typedef struct ChVM {
 
     /* set by call_value before invoking a native; used by call/cc */
     size_t native_result_slot;
+    uint16_t native_reentry_depth; /* ch_vm_apply nesting from native callbacks */
     bool continuation_invoked; /* native saw a continuation restore */
     bool native_was_tail;      /* current native was entered via TAIL_CALL */
     /* Native requests a follow-up procedure call without nesting run_until

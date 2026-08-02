@@ -1,7 +1,8 @@
 # Chaaya — remaining work
 
-Tracked gaps after the expander bug campaign (2026-08-02). Detail and
-repro context live in the linked docs; this file is the checklist.
+Tracked gaps after the expander bug campaign (2026-08-02) and Batch 10
+smoke fixes (same day). Detail and repro context live in the linked docs;
+this file is the checklist.
 
 Sources: [scheme-tests.md](dev/scheme-tests.md),
 [srfi-import-audit.md](dev/srfi-import-audit.md),
@@ -9,9 +10,9 @@ Sources: [scheme-tests.md](dev/scheme-tests.md),
 
 ---
 
-## Unwired kaappi-deferred smokes (35)
+## Unwired kaappi-deferred smokes (29)
 
-Non-backend corpus is **222/257** wired (~86%). Wire only after local green +
+Non-backend corpus is **228/257** wired (~89%). Wire only after local green +
 `make test`. Permanently skipped: `jit-*.scm` / `llvm-*.scm` (no JIT/LLVM
 backend in Chaaya).
 
@@ -37,12 +38,12 @@ out under parallel `ctest -j`.
 - [ ] `thread-port-isolation`
 - [ ] `deep-copy-list-801`
 
-### SRFI-170 POSIX primitives (4)
+### SRFI-170 POSIX primitives (2)
 
-- [ ] `filesystem-intcast` — `set-file-mode` / `set-umask!` / `umask` unimplemented
+- [x] `filesystem-intcast` — `set-file-mode` / `set-umask!` / `umask` / `nice` (Batch 10)
+- [x] `filesystem-nul-path-805` — embedded NUL rejected in path args (Batch 10)
 - [ ] `group-info-by-name-1161` — `user-gid` / `group-info` unimplemented
 - [ ] `srfi170-time-objects` — `posix-time` / `monotonic-time` gaps
-- [ ] `filesystem-nul-path-805`
 
 ### Fixed compiler limits (`uint8_t` register file) (5)
 
@@ -73,24 +74,25 @@ register-file width change.
   as Scheme closures miss expected arity/type errors; `%push-wind` / `%pop-wind`
   unbound on one path
 
-### Numeric tower (1)
+### Numeric tower (0 remaining)
 
-- [ ] `exact-integer-sqrt-851` — hangs (not just slow) on ~2^3000-bit bignums
+- [x] `exact-integer-sqrt-851` — Newton used a capped binary-search quotient that
+  underestimated on kilobit inputs; switched to `ch_bignum_quotient` (Batch 10)
 
-### Reader / ports (1)
+### Reader / ports (0 remaining)
 
-- [ ] `peek-char-malformed-utf8` — hangs on truncated multi-byte UTF-8;
-  suspected stream-desync retry loop
+- [x] `peek-char-malformed-utf8` — truncated UTF-8 refill loop spun forever on
+  bytevector ports; incomplete sequences now expose the lead byte (Batch 10)
 
-### GC (1)
+### GC (0 remaining)
 
-- [ ] `gc-root-growth` — 2000-deep native re-entrancy aborts instead of growing
-  the root buffer or hitting the documented re-entrancy cap cleanly
+- [x] `gc-root-growth` — root buffer grows on demand; `ch_vm_apply` raises a
+  catchable "native re-entrancy too deep" before C-stack overflow (Batch 10)
 
-### FFI / platform (1)
+### FFI / platform (0 remaining)
 
-- [ ] `bignum-rational-ffi-793` — `dlopen("liblibm.so")` fails on macOS
-  (needs per-platform libm path probe)
+- [x] `bignum-rational-ffi-793` — `ffi-open "libm"` now probes `libm.dylib` /
+  `libm.so` (not `liblibm.so`) (Batch 10)
 
 ---
 

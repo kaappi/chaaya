@@ -9,8 +9,10 @@
 extern "C" {
 #endif
 
-/* Deep reader nesting (1023) and nested C helpers push many temporary roots. */
-#define CH_GC_ROOT_MAX 16384
+/* Deep reader nesting and nested native re-entrancy push many temporary roots.
+ * The root buffer starts small and grows on demand up to CH_GC_ROOT_MAX. */
+#define CH_GC_ROOT_INITIAL 256
+#define CH_GC_ROOT_MAX 65536
 #define CH_GC_DEFAULT_THRESHOLD 1024
 #define CH_GC_DEFAULT_PROMOTION_AGE 2
 #define CH_GC_DEFAULT_MAJOR_INTERVAL 8
@@ -32,8 +34,9 @@ typedef struct ChGC {
     uint8_t major_interval;
     uint16_t id;           /* unique heap id for owner checks */
     uint8_t owns_symbols;  /* 0 => symbol table shared with parent */
-    ChValue *roots[CH_GC_ROOT_MAX];
+    ChValue **roots;
     size_t root_count;
+    size_t root_cap;
     /* Ephemerons pending weak-key fixpoint during collection. */
     ChValue *pending_ephemerons;
     size_t pending_ephem_count;

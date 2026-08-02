@@ -1048,56 +1048,6 @@ typedef struct {
     ChValue rem;
 } IsqrtResult;
 
-/* Quotient via binary search using multiply/compare (for exact isqrt). */
-static ChValue bignum_quotient_bs(ChGC *gc, ChValue a, ChValue b) {
-    if (is_zero_int(b)) {
-        return CH_UNDEFINED;
-    }
-    ChValue lo = ch_make_fixnum(0);
-    ChValue hi = ch_make_fixnum(1);
-    ch_gc_push(gc, &a);
-    ch_gc_push(gc, &b);
-    ch_gc_push(gc, &lo);
-    ch_gc_push(gc, &hi);
-    ChValue two = ch_make_fixnum(2);
-
-    for (int guard = 0; guard < 256; guard++) {
-        ChValue prod = ch_bignum_mul(gc, b, hi);
-        ch_gc_push(gc, &prod);
-        if (ch_bignum_compare(prod, a) > 0) {
-            ch_gc_pop(gc);
-            break;
-        }
-        ch_gc_pop(gc);
-        lo = hi;
-        hi = ch_bignum_mul(gc, hi, two);
-    }
-
-    while (ch_bignum_compare(lo, hi) < 0) {
-        ChValue sum = ch_bignum_add(gc, lo, hi);
-        ch_gc_push(gc, &sum);
-        ChValue sum1 = ch_bignum_add(gc, sum, ch_make_fixnum(1));
-        ch_gc_pop(gc);
-        ch_gc_push(gc, &sum1);
-        ChValue mid = ch_bignum_quotient(gc, sum1, two);
-        ch_gc_pop(gc);
-        ch_gc_push(gc, &mid);
-        ChValue prod = ch_bignum_mul(gc, b, mid);
-        ch_gc_push(gc, &prod);
-        if (ch_bignum_compare(prod, a) <= 0) {
-            lo = mid;
-        } else {
-            hi = ch_bignum_sub(gc, mid, ch_make_fixnum(1));
-        }
-        ch_gc_pop(gc);
-        ch_gc_pop(gc);
-    }
-
-    ChValue out = lo;
-    ch_gc_pop_n(gc, 4);
-    return out;
-}
-
 static IsqrtResult isqrt_non_negative(ChVM *vm, ChValue n) {
     ChGC *gc = &vm->gc;
     if (ch_is_fixnum(n)) {
@@ -1113,84 +1063,47 @@ static IsqrtResult isqrt_non_negative(ChVM *vm, ChValue n) {
         return (IsqrtResult){ch_make_fixnum(s), ch_make_fixnum(ni - s * s)};
     }
 
+    /* Binary search for floor(sqrt(n)). Newton via ch_bignum_quotient is
+     * unsafe here: large-limb division is slightly inaccurate, so the
+     * iterate can oscillate and the ±1 polish never finishes (#851). */
     ch_gc_push(gc, &n);
-    ChValue s;
-    double f64_val = ch_bignum_to_f64(n);
-    if (!isfinite(f64_val)) {
-        uint32_t bit_len = exact_int_bit_length(n);
-        uint32_t shift = ((bit_len - 52) + 1u) & ~1u;
-        ChValue pow2 = ch_make_fixnum(1);
-        ch_gc_push(gc, &pow2);
-        for (uint32_t i = 0; i < shift; i++) {
-            pow2 = ch_bignum_mul(gc, pow2, ch_make_fixnum(2));
-        }
-        ChValue shifted = ch_bignum_quotient(gc, n, pow2);
-        ch_gc_pop(gc);
-        ch_gc_push(gc, &shifted);
-        double approx = sqrt(ch_bignum_to_f64(shifted));
-        int64_t approx_i = approx < 1.0 ? 1 : (int64_t)approx;
-        s = ch_make_integer(gc, approx_i);
-        ch_gc_pop(gc);
-        ch_gc_push(gc, &s);
-        for (uint32_t j = 0; j < shift / 2; j++) {
-            s = ch_bignum_mul(gc, s, ch_make_fixnum(2));
-        }
-    } else {
-        double approx = sqrt(f64_val);
-        int64_t approx_i;
-        if (approx < 1.0) {
-            approx_i = 1;
-        } else if (approx >= (double)INT64_MAX) {
-            approx_i = INT64_MAX;
-        } else {
-            approx_i = (int64_t)approx;
-        }
-        s = ch_make_integer(gc, approx_i);
-        ch_gc_push(gc, &s);
+    uint32_t bit_len = exact_int_bit_length(n);
+    uint32_t root_bits = (bit_len + 1) / 2 + 1; /* exclusive upper bound bits */
+    ChValue hi = ch_make_fixnum(1);
+    ch_gc_push(gc, &hi);
+    for (uint32_t i = 0; i < root_bits; i++) {
+        hi = ch_bignum_mul(gc, hi, ch_make_fixnum(2));
     }
-
+    ChValue lo = ch_make_fixnum(0);
+    ch_gc_push(gc, &lo);
     ChValue two = ch_make_fixnum(2);
-    for (int iters = 0; iters < 500; iters++) {
-        if (is_zero_int(s)) {
-            break;
+    /* bit_len ≤ ~few thousand in smoke tests; loop bound is generous. */
+    for (int guard = 0; guard < 8192 && ch_bignum_compare(lo, hi) < 0; guard++) {
+        ChValue sum = ch_bignum_add(gc, lo, hi);
+        ch_gc_push(gc, &sum);
+        ChValue sum1 = ch_bignum_add(gc, sum, ch_make_fixnum(1));
+        ch_gc_pop(gc); /* sum */
+        ch_gc_push(gc, &sum1);
+        ChValue mid = ch_bignum_quotient(gc, sum1, two);
+        ch_gc_pop(gc); /* sum1 */
+        ch_gc_push(gc, &mid);
+        ChValue mid2 = ch_bignum_mul(gc, mid, mid);
+        ch_gc_push(gc, &mid2);
+        if (ch_bignum_compare(mid2, n) <= 0) {
+            lo = mid;
+        } else {
+            hi = ch_bignum_sub(gc, mid, ch_make_fixnum(1));
         }
-        ChValue q = bignum_quotient_bs(gc, n, s);
-        ch_gc_push(gc, &q);
-        ChValue sum = ch_bignum_add(gc, s, q);
-        ch_gc_pop(gc);
-        ChValue next = ch_bignum_quotient(gc, sum, two);
-        if (ch_bignum_compare(next, s) == 0) {
-            s = next;
-            break;
-        }
-        s = next;
+        ch_gc_pop_n(gc, 2); /* mid2, mid */
     }
 
+    ChValue s = lo;
+    ch_gc_push(gc, &s);
     ChValue s2 = ch_bignum_mul(gc, s, s);
     ch_gc_push(gc, &s2);
-    while (ch_bignum_compare(s2, n) > 0) {
-        s = ch_bignum_sub(gc, s, ch_make_fixnum(1));
-        s2 = ch_bignum_mul(gc, s, s);
-    }
-
-    ChValue one = ch_make_fixnum(1);
-    ChValue s1 = ch_bignum_add(gc, s, one);
-    ch_gc_push(gc, &s1);
-    ChValue s1_sq = ch_bignum_mul(gc, s1, s1);
-    ch_gc_push(gc, &s1_sq);
-    while (ch_bignum_compare(s1_sq, n) <= 0) {
-        s = s1;
-        s2 = s1_sq;
-        s1 = ch_bignum_add(gc, s, one);
-        s1_sq = ch_bignum_mul(gc, s1, s1);
-    }
-    ch_gc_pop(gc);
-    ch_gc_pop(gc);
-    ch_gc_pop(gc);
-
     ChValue rem = ch_bignum_sub(gc, n, s2);
     IsqrtResult out = {ch_bignum_normalize(gc, s), ch_bignum_normalize(gc, rem)};
-    ch_gc_pop_n(gc, 2);
+    ch_gc_pop_n(gc, 5); /* s2, s, lo, hi, n */
     return out;
 }
 

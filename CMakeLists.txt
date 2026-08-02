@@ -638,6 +638,13 @@ chaaya_kaappi_deferred_test(smoke_560_record_body tests/scheme/kaappi-deferred/s
 # Batch 9 smoke (language/library parity phase 2/5)
 chaaya_kaappi_deferred_test(smoke_file_info_blocks tests/scheme/kaappi-deferred/smoke/file-info-blocks.scm)
 chaaya_kaappi_deferred_test(smoke_mutex_lock_false_owner tests/scheme/kaappi-deferred/smoke/mutex-lock-false-owner.scm)
+# Batch 10 smoke (hangs / POSIX / FFI / GC root growth — 2026-08-02)
+chaaya_kaappi_deferred_test(smoke_exact_integer_sqrt_851 tests/scheme/kaappi-deferred/smoke/exact-integer-sqrt-851.scm)
+chaaya_kaappi_deferred_test(smoke_peek_char_malformed_utf8 tests/scheme/kaappi-deferred/smoke/peek-char-malformed-utf8.scm)
+chaaya_kaappi_deferred_test(smoke_bignum_rational_ffi_793 tests/scheme/kaappi-deferred/smoke/bignum-rational-ffi-793.scm)
+chaaya_kaappi_deferred_test(smoke_gc_root_growth tests/scheme/kaappi-deferred/smoke/gc-root-growth.scm)
+chaaya_kaappi_deferred_test(smoke_filesystem_intcast tests/scheme/kaappi-deferred/smoke/filesystem-intcast.scm)
+chaaya_kaappi_deferred_test(smoke_filesystem_nul_path_805 tests/scheme/kaappi-deferred/smoke/filesystem-nul-path-805.scm)
 # nested-wait-under-sleep-dirty-snapshot-1490.scm: passes in isolation but
 # times out under parallel ctest load (contended scheduler timing) — a
 # cross-thread scheduler race, not a quick fix; left unwired (see

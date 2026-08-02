@@ -423,6 +423,7 @@ static int try_open_named_library(const char *name, void **out_handle, char *err
         return 0;
     }
 
+    /* Paths with separators or an explicit extension are not re-probed. */
     if (strchr(name, '/') || strchr(name, '\\') || strchr(name, '.')) {
         return -1;
     }
@@ -437,18 +438,30 @@ static int try_open_named_library(const char *name, void **out_handle, char *err
         }
     }
 #else
-    if (snprintf(candidate, sizeof(candidate), "lib%s.dylib", name) < (int)sizeof(candidate)) {
-        handle = platform_open(candidate, err, err_cap);
-        if (handle) {
-            *out_handle = handle;
-            return 0;
+    /* Match Kaappi: append platform suffixes to the bare name as given
+     * (ffi-open "libm" → libm.dylib / libm.so), not lib{name}.* which
+     * produced liblibm.so on macOS (#793). Also try a lib- prefix for
+     * short names like "m". */
+    static const char *const suffixes[] = {".dylib", ".so", ".so.6"};
+    for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+        if (snprintf(candidate, sizeof(candidate), "%s%s", name, suffixes[i]) < (int)sizeof(candidate)) {
+            handle = platform_open(candidate, err, err_cap);
+            if (handle) {
+                *out_handle = handle;
+                return 0;
+            }
         }
     }
-    if (snprintf(candidate, sizeof(candidate), "lib%s.so", name) < (int)sizeof(candidate)) {
-        handle = platform_open(candidate, err, err_cap);
-        if (handle) {
-            *out_handle = handle;
-            return 0;
+    if (strncmp(name, "lib", 3) != 0) {
+        for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+            if (snprintf(candidate, sizeof(candidate), "lib%s%s", name, suffixes[i]) <
+                (int)sizeof(candidate)) {
+                handle = platform_open(candidate, err, err_cap);
+                if (handle) {
+                    *out_handle = handle;
+                    return 0;
+                }
+            }
         }
     }
 #endif

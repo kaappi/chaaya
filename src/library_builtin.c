@@ -158,7 +158,9 @@ int ch_register_builtin_libraries(ChVM *vm) {
         "file-info:blocks",        "file-info-type",      "temp-file-prefix",    "create-temp-file",
         "create-directory",        "delete-directory",    "rename-file",
         "real-path",               "current-directory",   "set-current-directory!",
-        "file-exists?",            "delete-file"};
+        "file-exists?",            "delete-file",
+        "set-file-mode",           "umask",               "set-umask!",
+        "nice"};
     static const char *const srfi18_exports[] = {
         "make-thread",      "thread-start!",    "thread-join!",     "thread-sleep!",
         "thread-yield!",    "current-thread",   "thread?",          "thread-name",
