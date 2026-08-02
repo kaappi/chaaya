@@ -654,6 +654,9 @@ chaaya_kaappi_deferred_test(smoke_trampoline_polish_1375 tests/scheme/kaappi-def
 chaaya_kaappi_deferred_test(smoke_define_values_letrec_1719 tests/scheme/kaappi-deferred/smoke/define-values-letrec-1719.scm)
 chaaya_kaappi_deferred_test(smoke_library_redefine_closure_820 tests/scheme/kaappi-deferred/smoke/library-redefine-closure-820.scm)
 chaaya_kaappi_deferred_test(smoke_percent_name_user_library_1856 tests/scheme/kaappi-deferred/smoke/percent-name-user-library-1856.scm)
+# Batch 14 smoke (growable handler/wind stacks + escape-only call/ec)
+chaaya_kaappi_deferred_test(smoke_handler_wind_depth_1886 tests/scheme/kaappi-deferred/smoke/handler-wind-depth-1886.scm)
+chaaya_kaappi_deferred_test(smoke_gc_rooting_safety tests/scheme/kaappi-deferred/smoke/gc-rooting-safety.scm)
 # nested-wait-under-sleep-dirty-snapshot-1490.scm: passes in isolation but
 # times out under parallel ctest load (contended scheduler timing) — a
 # cross-thread scheduler race, not a quick fix; left unwired (see

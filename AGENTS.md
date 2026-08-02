@@ -13,7 +13,7 @@ Requires CMake 3.21+, a C23-capable compiler, and libc. POSIX REPL uses vendored
 
 ```bash
 make            # configure + build → build/chaaya
-make test       # build + ctest (347 tests)
+make test       # build + ctest (349 tests)
 make bootstrap-scheme   # Kaappi-shaped bootstrap suites (17 files)
 make run        # REPL
 ```
@@ -105,7 +105,7 @@ stop-the-world mark-and-sweep with no write barrier.
 
 | Suite | Command | Notes |
 |-------|---------|-------|
-| C + Scheme (CTest) | `make test` | 347 tests; CI runs this |
+| C + Scheme (CTest) | `make test` | 349 tests; CI runs this |
 | Bootstrap | `make bootstrap-scheme` | Uses `run-bootstrap.sh`; needs suite-dir cwd for `include` fixtures |
 | Single bootstrap file | See `tests/scheme/run_bootstrap.cmake` | CTest prepends `harness.scm` |
 

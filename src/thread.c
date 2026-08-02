@@ -147,6 +147,10 @@ static void child_vm_cleanup(ChVM *child_vm) {
     child_vm->regs = NULL;
     free(child_vm->frames);
     child_vm->frames = NULL;
+    free(child_vm->wind_stack);
+    child_vm->wind_stack = NULL;
+    free(child_vm->handler_stack);
+    child_vm->handler_stack = NULL;
     child_vm->libraries = NULL; /* shared with parent */
     ch_gc_deinit(&child_vm->gc);
     free(child_vm);
@@ -162,11 +166,16 @@ static ChVM *prepare_child_vm(ChVM *parent, ChValue thunk, ChValue *out_child_th
     child_vm->gc.vm = child_vm;
     child_vm->regs = (ChValue *)calloc(CH_VM_MAX_REGS, sizeof(ChValue));
     child_vm->frames = (ChCallFrame *)calloc(CH_VM_MAX_FRAMES, sizeof(ChCallFrame));
-    if (!child_vm->regs || !child_vm->frames) {
+    child_vm->wind_stack = (ChWindRecord *)calloc(CH_VM_INITIAL_WINDS, sizeof(ChWindRecord));
+    child_vm->handler_stack =
+        (ChExceptionHandler *)calloc(CH_VM_INITIAL_HANDLERS, sizeof(ChExceptionHandler));
+    if (!child_vm->regs || !child_vm->frames || !child_vm->wind_stack || !child_vm->handler_stack) {
         set_error(parent, "thread-start!: out of memory");
         child_vm_cleanup(child_vm);
         return NULL;
     }
+    child_vm->wind_capacity = CH_VM_INITIAL_WINDS;
+    child_vm->handler_capacity = CH_VM_INITIAL_HANDLERS;
     child_vm->owns_globals = false;
     child_vm->parent_vm = parent;
     memcpy(child_vm->globals, parent->globals, sizeof(parent->globals));

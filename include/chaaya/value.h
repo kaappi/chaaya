@@ -220,7 +220,17 @@ typedef struct ChContinuation {
     size_t parameter_binding_count;
     ChSavedUpvalue *open_uvs;
     size_t open_uv_count;
-    size_t result_slot; /* absolute register index for call/cc result */
+    size_t result_slot; /* call/cc: absolute; call/ec: see result_relative */
+    /* Escape continuations (call/ec): O(1) capture — no snapshot slices.
+     * valid is true only while call/ec's dynamic extent is live.
+     * When captured inside a fiber, target_frame_count and result_slot are
+     * relative to the fiber entry barrier (snapshot restore remaps abs indices). */
+    bool is_escape;
+    bool valid;
+    bool result_relative; /* result_slot / target_frame_count are fiber-relative */
+    size_t target_frame_count;
+    size_t target_wind_count;
+    size_t target_handler_count;
 } ChContinuation;
 
 typedef struct ChValues {

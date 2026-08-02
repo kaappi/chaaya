@@ -1,9 +1,8 @@
 # Chaaya — remaining work
 
-Tracked gaps after the expander bug campaign (2026-08-02), Batches 10–11
-(SRFI-170 POSIX), Batch 12 trampoline polish, and Batch 13 global/library
-rebinding (same day). Detail and repro context live in the linked docs; this
-file is the checklist.
+Tracked gaps after the expander bug campaign (2026-08-02), Batches 10–13,
+and Batch 14 (growable handler/wind stacks + escape-only `call/ec`, same day).
+Detail and repro context live in the linked docs; this file is the checklist.
 
 Sources: [scheme-tests.md](dev/scheme-tests.md),
 [srfi-import-audit.md](dev/srfi-import-audit.md),
@@ -11,9 +10,9 @@ Sources: [scheme-tests.md](dev/scheme-tests.md),
 
 ---
 
-## Unwired kaappi-deferred smokes (23)
+## Unwired kaappi-deferred smokes (21)
 
-Non-backend corpus is **234/257** wired (~91%). Wire only after local green +
+Non-backend corpus is **236/257** wired (~92%). Wire only after local green +
 `make test`. Permanently skipped: `jit-*.scm` / `llvm-*.scm` (no JIT/LLVM
 backend in Chaaya).
 
@@ -68,11 +67,14 @@ register-file width change.
   `__chaaya_base__` desugaring refs so user/library rebinds cannot redirect
   `define-record-type` / `case-lambda` / `delay` / `parameterize` (Batch 13)
 
-### Continuations / dynamic-wind / handlers (2)
+### Continuations / dynamic-wind / handlers (0 remaining)
 
-- [ ] `handler-wind-depth-1886` — deep nested wind/handler stacks
-- [ ] `gc-rooting-safety` — needs distinct escape-only `call/ec` (extent-checked);
-  aliasing to re-entrant `call/cc` was tried and reverted (segfault outside extent)
+- [x] `handler-wind-depth-1886` — handler/wind stacks grow (64 → 32768) like
+  Kaappi (Batch 14)
+- [x] `gc-rooting-safety` — distinct escape-only `call/ec` /
+  `call-with-escape-continuation`; invoke outside extent raises a catchable
+  error (Batch 14). `guard` still desugars via `call/cc` until call/ec
+  round-trips cleanly through fiber park/restore.
 
 ### Library primitive closures (0 remaining)
 

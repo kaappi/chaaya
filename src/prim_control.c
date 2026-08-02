@@ -48,10 +48,35 @@ static ChValue prim_call_cc(ChVM *vm, ChValue *args, int nargs) {
     return finish_apply(vm, ch_vm_apply(vm, receiver, call_args, 1, &result), result);
 }
 
+/* Escape-only continuation: valid only within call/ec's dynamic extent.
+ * Always nests apply (no pending TCO) so we can clear `valid` when the
+ * extent ends — whether the receiver returned or escaped through us. */
+static ChValue prim_call_ec(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChValue receiver = args[0];
+    if (!ch_is_procedure(receiver)) {
+        snprintf(vm->error, sizeof(vm->error), "call/ec: receiver not a procedure");
+        return CH_UNDEFINED;
+    }
+    ChValue cont = ch_vm_capture_escape(vm, vm->native_result_slot);
+    ch_gc_push(&vm->gc, &cont);
+    ChContinuation *c = ch_as_continuation(cont);
+    ChValue call_args[1] = {cont};
+    ChValue result = CH_VOID;
+    ChVMStatus st = ch_vm_apply(vm, receiver, call_args, 1, &result);
+    /* Fiber park unwinds this native while the Scheme extent is still live
+     * (snapshot + resume re-enters the parked primitive). Keep `valid` so a
+     * later guard escape after resume still works; invoke_escape clears it. */
+    if (st != CH_VM_FIBER_PARKED) {
+        c->valid = false;
+    }
+    ch_gc_pop(&vm->gc);
+    return finish_apply(vm, st, result);
+}
+
 static ChValue prim_push_wind(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    if (vm->wind_count >= CH_VM_MAX_WINDS) {
-        snprintf(vm->error, sizeof(vm->error), "%%push-wind: wind stack overflow");
+    if (ch_vm_ensure_wind_capacity(vm, vm->wind_count + 1) != 0) {
         return CH_UNDEFINED;
     }
     vm->wind_stack[vm->wind_count].before = args[0];
@@ -90,8 +115,7 @@ static ChValue prim_with_exception_handler(ChVM *vm, ChValue *args, int nargs) {
                  "with-exception-handler: arguments must be procedures");
         return CH_UNDEFINED;
     }
-    if (vm->handler_count >= CH_VM_MAX_HANDLERS) {
-        snprintf(vm->error, sizeof(vm->error), "with-exception-handler: handler stack overflow");
+    if (ch_vm_ensure_handler_capacity(vm, vm->handler_count + 1) != 0) {
         return CH_UNDEFINED;
     }
     vm->handler_stack[vm->handler_count].handler = handler;
@@ -105,7 +129,10 @@ static ChValue prim_with_exception_handler(ChVM *vm, ChValue *args, int nargs) {
         vm->continuation_invoked = true;
         return CH_UNDEFINED;
     }
-    if (vm->handler_count > 0) {
+    /* Same park discipline as call/ec: do not pop the handler when the
+     * thunk suspended — the fiber snapshot already captured it, and a
+     * pop here would race the live VM stack before restore. */
+    if (st != CH_VM_FIBER_PARKED && vm->handler_count > 0) {
         vm->handler_count--;
     }
     return finish_apply(vm, st, result);
@@ -171,6 +198,8 @@ void ch_install_control_bootstrap(ChVM *vm) {
 void ch_register_control_primitives(ChVM *vm) {
     define_prim(vm, "call/cc", prim_call_cc, 1, 1);
     define_prim(vm, "call-with-current-continuation", prim_call_cc, 1, 1);
+    define_prim(vm, "call/ec", prim_call_ec, 1, 1);
+    define_prim(vm, "call-with-escape-continuation", prim_call_ec, 1, 1);
     define_prim(vm, "%push-wind", prim_push_wind, 2, 2);
     define_prim(vm, "%pop-wind", prim_pop_wind, 0, 0);
     define_prim(vm, "%wind-top-after", prim_wind_top_after, 0, 0);

@@ -19,8 +19,12 @@ extern "C" {
 #define CH_VM_MAX_GLOBALS 4096
 #define CH_VM_MAX_LIB_PATHS 32
 #define CH_VM_MAX_SCRIPT_ARGS 64
-#define CH_VM_MAX_WINDS 64
-#define CH_VM_MAX_HANDLERS 64
+/* Exception-handler and dynamic-wind stacks start small and double on demand
+ * up to these hard caps (Kaappi parity; #1886). */
+#define CH_VM_INITIAL_WINDS 64
+#define CH_VM_INITIAL_HANDLERS 64
+#define CH_VM_MAX_WINDS 32768
+#define CH_VM_MAX_HANDLERS 32768
 #define CH_VM_MAX_PARAMETER_BINDINGS 256
 #define CH_VM_MAX_MACROS 256
 #define CH_VM_MAX_SYNTAX_PROPS 128
@@ -85,11 +89,13 @@ typedef struct ChVM {
     int error_line;
     int error_column;
 
-    /* dynamic-wind + exception handlers */
-    ChWindRecord wind_stack[CH_VM_MAX_WINDS];
+    /* dynamic-wind + exception handlers (heap; grow via ensure_*_capacity) */
+    ChWindRecord *wind_stack;
     size_t wind_count;
-    ChExceptionHandler handler_stack[CH_VM_MAX_HANDLERS];
+    size_t wind_capacity;
+    ChExceptionHandler *handler_stack;
     size_t handler_count;
+    size_t handler_capacity;
     ChParameterBinding parameter_stack[CH_VM_MAX_PARAMETER_BINDINGS];
     size_t parameter_count;
 
@@ -210,8 +216,14 @@ int ch_vm_parameter_pop(ChVM *vm, ChValue parameter);
 ChValue ch_vm_raise(ChVM *vm, ChValue obj, int continuable);
 void ch_vm_reclaim_regs(ChVM *vm);
 
+/* Grow wind/handler stacks; return 0 on success, -1 if past hard limit. */
+int ch_vm_ensure_wind_capacity(ChVM *vm, size_t needed);
+int ch_vm_ensure_handler_capacity(ChVM *vm, size_t needed);
+
 ChValue ch_vm_capture_continuation(ChVM *vm, size_t result_slot);
+ChValue ch_vm_capture_escape(ChVM *vm, size_t result_slot);
 ChVMStatus ch_vm_invoke_continuation(ChVM *vm, ChContinuation *cont, ChValue value);
+ChVMStatus ch_vm_invoke_escape(ChVM *vm, ChContinuation *cont, ChValue value);
 ChVMStatus ch_vm_wind_transition(ChVM *vm, const ChWindRecord *target, size_t target_count);
 
 const char *ch_vm_error(const ChVM *vm);

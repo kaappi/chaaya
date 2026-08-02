@@ -354,6 +354,10 @@ int ch_fiber_restore_snapshot(ChVM *vm, ChFiber *fiber, ChValue inject) {
     vm->frame_count = base_frames + snap->frame_count;
 
     /* Replace dynamic stacks with the fiber's saved view. */
+    if (ch_vm_ensure_handler_capacity(vm, snap->handler_count) != 0 ||
+        ch_vm_ensure_wind_capacity(vm, snap->wind_count) != 0) {
+        return -1;
+    }
     memcpy(vm->handler_stack, snap->handlers,
            snap->handler_count * sizeof(ChExceptionHandler));
     vm->handler_count = snap->handler_count;

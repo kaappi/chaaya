@@ -979,6 +979,11 @@ ChCompileStatus compile_guard(ChCompiler *c, ChFuncCompiler *fc, ChValue args, u
     ChValue cond_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "cond");
     ChValue lambda_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "lambda");
     ChValue weh_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "with-exception-handler");
+    /* Prefer call/cc over call/ec here: escape continuations do not yet
+     * round-trip cleanly through fiber park/restore (relative result slots
+     * still misfire on some guard clause shapes). Growable handler stacks
+     * make deep call/cc guards viable for #1886; call/ec remains available
+     * for explicit escape-only use (gc-rooting-safety). */
     ChValue callcc_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "call/cc");
     ChValue let_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "let");
 

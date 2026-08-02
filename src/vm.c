@@ -24,13 +24,22 @@ void ch_vm_init(ChVM *vm) {
     vm->gc.vm = vm;
     vm->regs = (ChValue *)calloc(CH_VM_MAX_REGS, sizeof(ChValue));
     vm->frames = (ChCallFrame *)calloc(CH_VM_MAX_FRAMES, sizeof(ChCallFrame));
-    if (!vm->regs || !vm->frames) {
+    vm->wind_stack = (ChWindRecord *)calloc(CH_VM_INITIAL_WINDS, sizeof(ChWindRecord));
+    vm->handler_stack =
+        (ChExceptionHandler *)calloc(CH_VM_INITIAL_HANDLERS, sizeof(ChExceptionHandler));
+    if (!vm->regs || !vm->frames || !vm->wind_stack || !vm->handler_stack) {
         free(vm->regs);
         free(vm->frames);
+        free(vm->wind_stack);
+        free(vm->handler_stack);
         vm->regs = NULL;
         vm->frames = NULL;
+        vm->wind_stack = NULL;
+        vm->handler_stack = NULL;
         abort();
     }
+    vm->wind_capacity = CH_VM_INITIAL_WINDS;
+    vm->handler_capacity = CH_VM_INITIAL_HANDLERS;
     vm->result = CH_VOID;
     vm->default_random_source = CH_UNDEFINED;
     vm->ffi_callback_deferred_value = CH_UNDEFINED;
@@ -77,7 +86,74 @@ void ch_vm_deinit(ChVM *vm) {
     vm->regs = NULL;
     free(vm->frames);
     vm->frames = NULL;
+    free(vm->wind_stack);
+    vm->wind_stack = NULL;
+    vm->wind_capacity = 0;
+    free(vm->handler_stack);
+    vm->handler_stack = NULL;
+    vm->handler_capacity = 0;
     ch_gc_deinit(&vm->gc);
+}
+
+int ch_vm_ensure_wind_capacity(ChVM *vm, size_t needed) {
+    if (needed <= vm->wind_capacity) {
+        return 0;
+    }
+    if (needed > CH_VM_MAX_WINDS) {
+        snprintf(vm->error, sizeof(vm->error),
+                 "too many nested dynamic-wind forms (limit %d)", CH_VM_MAX_WINDS);
+        return -1;
+    }
+    size_t new_cap = vm->wind_capacity ? vm->wind_capacity : CH_VM_INITIAL_WINDS;
+    while (new_cap < needed) {
+        new_cap *= 2;
+    }
+    if (new_cap > CH_VM_MAX_WINDS) {
+        new_cap = CH_VM_MAX_WINDS;
+    }
+    ChWindRecord *grown =
+        (ChWindRecord *)realloc(vm->wind_stack, new_cap * sizeof(ChWindRecord));
+    if (!grown) {
+        abort();
+    }
+    /* Zero only the new tail so stale thunks are not marked. */
+    if (new_cap > vm->wind_capacity) {
+        memset(grown + vm->wind_capacity, 0,
+               (new_cap - vm->wind_capacity) * sizeof(ChWindRecord));
+    }
+    vm->wind_stack = grown;
+    vm->wind_capacity = new_cap;
+    return 0;
+}
+
+int ch_vm_ensure_handler_capacity(ChVM *vm, size_t needed) {
+    if (needed <= vm->handler_capacity) {
+        return 0;
+    }
+    if (needed > CH_VM_MAX_HANDLERS) {
+        snprintf(vm->error, sizeof(vm->error),
+                 "too many nested exception handlers (limit %d)", CH_VM_MAX_HANDLERS);
+        return -1;
+    }
+    size_t new_cap = vm->handler_capacity ? vm->handler_capacity : CH_VM_INITIAL_HANDLERS;
+    while (new_cap < needed) {
+        new_cap *= 2;
+    }
+    if (new_cap > CH_VM_MAX_HANDLERS) {
+        new_cap = CH_VM_MAX_HANDLERS;
+    }
+    ChExceptionHandler *grown = (ChExceptionHandler *)realloc(
+        vm->handler_stack, new_cap * sizeof(ChExceptionHandler));
+    if (!grown) {
+        abort();
+    }
+    if (new_cap > vm->handler_capacity) {
+        memset(grown + vm->handler_capacity, 0,
+               (new_cap - vm->handler_capacity) * sizeof(ChExceptionHandler));
+    }
+    vm->handler_stack = grown;
+    vm->handler_capacity = new_cap;
+    return 0;
 }
 
 static int find_global(ChVM *vm, ChSymbol *sym) {
@@ -648,7 +724,7 @@ ChVMStatus ch_vm_wind_transition(ChVM *vm, const ChWindRecord *target, size_t ta
         if (st != CH_VM_OK) {
             return st;
         }
-        if (vm->wind_count >= CH_VM_MAX_WINDS) {
+        if (ch_vm_ensure_wind_capacity(vm, vm->wind_count + 1) != 0) {
             return CH_VM_STACK_OVERFLOW;
         }
         vm->wind_stack[vm->wind_count++] = target[j];
@@ -656,7 +732,85 @@ ChVMStatus ch_vm_wind_transition(ChVM *vm, const ChWindRecord *target, size_t ta
     return CH_VM_OK;
 }
 
+ChValue ch_vm_capture_escape(ChVM *vm, size_t result_slot) {
+    size_t roots = push_gc_roots(vm);
+    ChValue cont_v = ch_gc_make_continuation(&vm->gc);
+    ChContinuation *c = ch_as_continuation(cont_v);
+    c->is_escape = true;
+    c->valid = true;
+    c->target_wind_count = vm->wind_count;
+    c->target_handler_count = vm->handler_count;
+    /* Fiber snapshots remap frames/regs relative to the entry barrier.
+     * Store depths/slots relative to that barrier so invoke survives park. */
+    if (vm->fiber_runtime && ch_is_fiber(vm->fiber_runtime->current)) {
+        size_t entry_f = vm->fiber_runtime->entry_frames;
+        size_t entry_r = vm->fiber_runtime->entry_reg_top;
+        c->result_relative = true;
+        c->target_frame_count =
+            vm->frame_count >= entry_f ? vm->frame_count - entry_f : 0;
+        c->result_slot = result_slot >= entry_r ? result_slot - entry_r : 0;
+    } else {
+        c->result_relative = false;
+        c->target_frame_count = vm->frame_count;
+        c->result_slot = result_slot;
+    }
+    /* No register/frame/wind/handler snapshot — O(1) capture. */
+    pop_gc_roots_n(vm, roots);
+    return cont_v;
+}
+
+ChVMStatus ch_vm_invoke_escape(ChVM *vm, ChContinuation *cont, ChValue value) {
+    size_t entry_f = 0;
+    size_t entry_r = 0;
+    if (cont->result_relative && vm->fiber_runtime) {
+        entry_f = vm->fiber_runtime->entry_frames;
+        entry_r = vm->fiber_runtime->entry_reg_top;
+    }
+    size_t abs_frames = entry_f + cont->target_frame_count;
+    size_t abs_slot = entry_r + cont->result_slot;
+
+    if (!cont->is_escape || !cont->valid) {
+        /* Catchable: extent ended when call/ec returned. */
+        return raise_message_to_slot(vm, "escape continuation invoked outside its dynamic extent",
+                                     abs_slot < CH_VM_MAX_REGS ? abs_slot : 0);
+    }
+
+    while (vm->wind_count > cont->target_wind_count) {
+        vm->wind_count--;
+        ChVMStatus st = apply_thunk(vm, vm->wind_stack[vm->wind_count].after);
+        if (st != CH_VM_OK) {
+            return st;
+        }
+    }
+
+    if (cont->target_handler_count <= vm->handler_count) {
+        vm->handler_count = cont->target_handler_count;
+    }
+
+    /* Close upvalues belonging to frames we are about to discard. */
+    while (vm->frame_count > abs_frames) {
+        ChCallFrame *frame = &vm->frames[vm->frame_count - 1];
+        close_upvalues(vm, frame_regs(vm, frame));
+        vm->frame_count--;
+    }
+
+    if (abs_slot < CH_VM_MAX_REGS) {
+        if (vm->reg_top <= abs_slot) {
+            vm->reg_top = abs_slot + 1;
+        }
+        vm->regs[abs_slot] = value;
+    }
+    vm->result = value;
+    cont->valid = false; /* extent consumed by this escape */
+    vm->continuation_invoked = true;
+    return CH_VM_CONTINUATION_INVOKED;
+}
+
 ChVMStatus ch_vm_invoke_continuation(ChVM *vm, ChContinuation *cont, ChValue value) {
+    if (cont->is_escape) {
+        return ch_vm_invoke_escape(vm, cont, value);
+    }
+
     /* CONTINUATION_INVOKED: a wind thunk already restored another continuation. */
     ChVMStatus st = ch_vm_wind_transition(vm, cont->winds, cont->wind_count);
     if (st != CH_VM_OK) {
@@ -671,6 +825,10 @@ ChVMStatus ch_vm_invoke_continuation(ChVM *vm, ChContinuation *cont, ChValue val
         return CH_VM_STACK_OVERFLOW;
     }
     if (cont->result_slot >= CH_VM_MAX_REGS) {
+        return CH_VM_STACK_OVERFLOW;
+    }
+    if (ch_vm_ensure_handler_capacity(vm, cont->handler_count) != 0 ||
+        ch_vm_ensure_wind_capacity(vm, cont->wind_count) != 0) {
         return CH_VM_STACK_OVERFLOW;
     }
 
