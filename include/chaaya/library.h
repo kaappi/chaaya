@@ -13,7 +13,12 @@ extern "C" {
 #define CH_LIB_ENV_MAX 1024
 #define CH_LIB_MAX_LIBS 128
 #define CH_LIB_MAX_LOADING 32
+#define CH_LIB_MAX_INTERNALS 64
 #define CH_ENV_LIB_BIT 0x8000u
+/* Prefix on compiler/expander-synthesized symbols that must resolve to the
+ * pristine %-internal snapshot, not whatever the program rebound that name
+ * to (Kaappi #1856 / #1715). */
+#define CH_BASE_BINDING_PREFIX "__chaaya_base__"
 
 typedef struct ChLibBinding {
     ChSymbol *name;
@@ -34,9 +39,25 @@ typedef struct ChLibrary {
     ChLibEnv *runtime_env; /* owned; persists library locals for exported closures */
 } ChLibrary;
 
+typedef struct ChInternalBinding {
+    ChSymbol *name; /* bare name, e.g. "%record-ref" */
+    ChValue value;
+} ChInternalBinding;
+
 typedef struct ChLibraryRegistry {
     ChLibrary *libs[CH_LIB_MAX_LIBS];
     size_t count;
+    /* Environments of replaced libraries. Closures compiled in a library's
+     * begin block keep home_env pointers into its runtime_env and can outlive
+     * the library (escaping via import), so a replaced env must stay alive
+     * and GC-traced until the registry is torn down (Kaappi #820). */
+    ChLibEnv **retired_envs;
+    size_t retired_count;
+    size_t retired_cap;
+    /* Pristine %-prefixed internals captured at startup before any user code
+     * can redefine them. Compiler-synthesized refs resolve here (#1856). */
+    ChInternalBinding internals[CH_LIB_MAX_INTERNALS];
+    size_t internal_count;
 } ChLibraryRegistry;
 
 void ch_library_registry_init(ChLibraryRegistry *reg);
@@ -74,6 +95,13 @@ size_t ch_library_push_gc_roots(ChVM *vm);
 
 /* Mark registered library export values during collection. */
 void ch_library_mark_gc_roots(ChVM *vm);
+
+/* Snapshot defined %-prefixed globals into registry.internals (#1856). */
+int ch_snapshot_internal_bindings(ChVM *vm);
+/* Look up a pristine internal by bare name (e.g. "%length"). */
+bool ch_lookup_internal_binding(ChVM *vm, const char *name, ChValue *out);
+/* Intern CH_BASE_BINDING_PREFIX + name for desugared references. */
+ChValue ch_base_binding_symbol(ChGC *gc, const char *name);
 
 /* Resolve import-set into env (does not touch globals). */
 int ch_import_set_into_env(ChVM *vm, ChValue set, ChLibEnv *out);

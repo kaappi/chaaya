@@ -548,6 +548,27 @@ static ChCompileStatus compile_variable(ChCompiler *c, ChFuncCompiler *fc, ChSym
         emit_byte(fc, (uint8_t)up);
         return CH_COMPILE_OK;
     }
+    /* Compiler-synthesized pristine internal (#1856): load the snapshot value
+     * as a constant so library imports / top-level defines of the same bare
+     * name cannot redirect desugarings. */
+    {
+        const char *n = name->name;
+        size_t plen = strlen(CH_BASE_BINDING_PREFIX);
+        if (strncmp(n, CH_BASE_BINDING_PREFIX, plen) == 0) {
+            ChValue prim = CH_UNDEFINED;
+            if (!ch_lookup_internal_binding(c->vm, n + plen, &prim)) {
+                return fail(c, "unbound internal binding");
+            }
+            int idx = add_constant(c, fc, prim);
+            if (idx < 0) {
+                return CH_COMPILE_ERROR;
+            }
+            emit_byte(fc, CH_OP_LOAD_CONST);
+            emit_byte(fc, dst);
+            emit_u16(fc, (uint16_t)idx);
+            return CH_COMPILE_OK;
+        }
+    }
     const char *name_base = ch_symbol_basename(name);
     if (name_base != name->name) {
         int blocal = resolve_local_by_basename(fc, name_base);

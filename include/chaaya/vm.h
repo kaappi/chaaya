@@ -180,6 +180,8 @@ void ch_vm_deinit(ChVM *vm);
 
 int ch_vm_intern_global(ChVM *vm, ChSymbol *sym);
 void ch_vm_define_global(ChVM *vm, int idx, ChValue v);
+/* Mark a global unbound (keeps the symbol slot; used to hide bootstrap helpers). */
+void ch_vm_undefine_global(ChVM *vm, int idx);
 
 void ch_vm_register_primitives(ChVM *vm);
 

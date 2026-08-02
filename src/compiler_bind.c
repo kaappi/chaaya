@@ -269,8 +269,8 @@ ChCompileStatus compile_case_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue a
     ChValue cond_sym = ch_gc_intern_symbol_cstr(gc, "cond");
     ChValue eq_sym = ch_gc_intern_symbol_cstr(gc, "=");
     ChValue ge_sym = ch_gc_intern_symbol_cstr(gc, ">=");
-    /* %length is not a (scheme base) export — safe from user shadowing (#1714). */
-    ChValue length_sym = ch_gc_intern_symbol_cstr(gc, "%length");
+    /* Pristine %length — immune to user/library rebinding (#1714 / #1856). */
+    ChValue length_sym = ch_base_binding_symbol(gc, "%length");
     ChValue list_ref_sym = ch_gc_intern_symbol_cstr(gc, "list-ref");
     ChValue apply_sym = ch_gc_intern_symbol_cstr(gc, "apply");
     ChValue else_sym = ch_gc_intern_symbol_cstr(gc, "else");
@@ -401,7 +401,7 @@ ChCompileStatus compile_delay(ChCompiler *c, ChFuncCompiler *fc, ChValue args, u
     }
     ChGC *gc = &c->vm->gc;
     ChValue lambda_sym = ch_gc_intern_symbol_cstr(gc, "lambda");
-    ChValue make_sym = ch_gc_intern_symbol_cstr(gc, "%make-promise");
+    ChValue make_sym = ch_base_binding_symbol(gc, "%make-promise");
     /* (delay e1 e2 ...) → (%make-promise (lambda () e1 e2 ...)) */
     ChValue form = CH_NIL;
     ch_gc_push(gc, &form);
@@ -869,9 +869,30 @@ static bool is_define_form(ChValue expr) {
            strcmp(ch_symbol_basename(ch_as_symbol(ch_car(expr))), "define") == 0;
 }
 
+static bool is_define_values_form(ChValue expr) {
+    return ch_is_pair(expr) && ch_is_symbol(ch_car(expr)) &&
+           strcmp(ch_symbol_basename(ch_as_symbol(ch_car(expr))), "define-values") == 0;
+}
+
 static bool is_begin_form(ChValue expr) {
     return ch_is_pair(expr) && ch_is_symbol(ch_car(expr)) &&
            strcmp(ch_symbol_basename(ch_as_symbol(ch_car(expr))), "begin") == 0;
+}
+
+static ChValue build_void_expr(ChGC *gc) {
+    /* (if #f #f) — unspecified value used as a letrec* placeholder. */
+    ChValue if_sym = ch_gc_intern_symbol_cstr(gc, "if");
+    return ch_gc_cons(gc, if_sym, ch_gc_cons(gc, CH_FALSE, ch_gc_cons(gc, CH_FALSE, CH_NIL)));
+}
+
+static ChValue make_letrec_binding(ChGC *gc, ChSymbol *name, ChValue init) {
+    return ch_gc_cons(gc, ch_make_pointer(&name->header), ch_gc_cons(gc, init, CH_NIL));
+}
+
+static ChSymbol *make_dv_step_symbol(ChGC *gc) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "__dv_step_%zu", let_values_gensym_counter++);
+    return ch_as_symbol(ch_gc_intern_symbol_cstr(gc, buf));
 }
 
 static int parse_define_binding(ChCompiler *c, ChValue def, ChSymbol **name_out, ChValue *init_out) {
@@ -902,8 +923,85 @@ static int parse_define_binding(ChCompiler *c, ChValue def, ChSymbol **name_out,
     return -1;
 }
 
+/* Fold one leading define-values into letrec* bindings (Kaappi #1719).
+ * Single-name clauses become ordinary name→init pairs; multi-name / zero-name
+ * clauses pre-bind placeholders then run a side-effect step so evaluation
+ * order matches letrec* sequencing across interleaved define/define-values. */
+static int append_define_values_bindings(ChCompiler *c, ChValue form, ChValue *defs) {
+    ChGC *gc = &c->vm->gc;
+    ChValue args = ch_cdr(form);
+    if (!ch_is_pair(args) || !ch_is_pair(ch_cdr(args)) || !ch_is_nil(ch_cdr(ch_cdr(args)))) {
+        fail(c, "define-values: bad syntax");
+        return -1;
+    }
+    ChValue formals = ch_car(args);
+    ChValue expr = ch_car(ch_cdr(args));
+
+    ChSymbol *names[64];
+    ChSymbol *rest_name = NULL;
+    int name_count = parse_define_values_formals(formals, names, 64, &rest_name);
+    if (name_count < 0) {
+        fail(c, "define-values: bad formals");
+        return -1;
+    }
+
+    /* Rest-only: (define-values x expr) → bind x to the values list. */
+    if (name_count == 0 && rest_name != NULL) {
+        ChValue lambda_sym = ch_gc_intern_symbol_cstr(gc, "lambda");
+        ChValue cwv_sym = ch_gc_intern_symbol_cstr(gc, "call-with-values");
+        ChValue list_sym = ch_gc_intern_symbol_cstr(gc, "list");
+        ChValue producer = CH_NIL;
+        ChValue init = CH_NIL;
+        ch_gc_push(gc, &producer);
+        ch_gc_push(gc, &init);
+        producer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, expr, CH_NIL)));
+        init = ch_gc_cons(gc, cwv_sym, ch_gc_cons(gc, producer, ch_gc_cons(gc, list_sym, CH_NIL)));
+        *defs = ch_gc_cons(gc, make_letrec_binding(gc, rest_name, init), *defs);
+        ch_gc_pop_n(gc, 2);
+        return 0;
+    }
+
+    /* Single fixed name: same shape as plain define — full letrec* visibility. */
+    if (name_count == 1 && rest_name == NULL) {
+        *defs = ch_gc_cons(gc, make_letrec_binding(gc, names[0], expr), *defs);
+        return 0;
+    }
+
+    /* Zero-name: evaluate expr for effect at this point in the sequence. */
+    if (name_count == 0 && rest_name == NULL) {
+        ChSymbol *step = make_dv_step_symbol(gc);
+        *defs = ch_gc_cons(gc, make_letrec_binding(gc, step, expr), *defs);
+        return 0;
+    }
+
+    /* Multi-name / dotted: placeholder binds + ordered assignment step. */
+    ChValue void_expr = CH_NIL;
+    ch_gc_push(gc, &void_expr);
+    void_expr = build_void_expr(gc);
+    for (int i = 0; i < name_count; i++) {
+        *defs = ch_gc_cons(gc, make_letrec_binding(gc, names[i], void_expr), *defs);
+    }
+    if (rest_name != NULL) {
+        *defs = ch_gc_cons(gc, make_letrec_binding(gc, rest_name, void_expr), *defs);
+    }
+
+    ChValue assign = CH_NIL;
+    ch_gc_push(gc, &assign);
+    if (build_define_values_assign_form(c, names, name_count, rest_name, expr, &assign) !=
+        CH_COMPILE_OK) {
+        ch_gc_pop_n(gc, 2);
+        return -1;
+    }
+    ChSymbol *step = make_dv_step_symbol(gc);
+    *defs = ch_gc_cons(gc, make_letrec_binding(gc, step, assign), *defs);
+    ch_gc_pop_n(gc, 2);
+    return 0;
+}
+
 /* Rewrite leading internal defines (splicing begin) to letrec*. Returns 1 and
- * sets *out when rewritten, 0 when there are no leading defines, -1 on error. */
+ * sets *out when rewritten, 0 when there are no leading defines, -1 on error.
+ * Leading define-values participates in the same letrec* region as define
+ * (R7RS 5.3.2/5.3.3; Kaappi #1719). */
 static int body_to_letrec_star(ChCompiler *c, ChValue body, ChValue *out) {
     ChValue work = body;
     ChValue defs = CH_NIL;
@@ -933,21 +1031,32 @@ static int body_to_letrec_star(ChCompiler *c, ChValue body, ChValue *out) {
             work = spliced;
             ch_gc_pop_n(&c->vm->gc, 2);
         }
-        if (!ch_is_pair(work) || !is_define_form(ch_car(work))) {
+        if (!ch_is_pair(work)) {
             break;
         }
-        ChSymbol *name = NULL;
-        ChValue init = CH_NIL;
-        ch_gc_push(&c->vm->gc, &init);
-        if (parse_define_binding(c, ch_car(work), &name, &init) != 0) {
-            ch_gc_pop_n(&c->vm->gc, 3);
-            return -1;
+        ChValue form = ch_car(work);
+        if (is_define_form(form)) {
+            ChSymbol *name = NULL;
+            ChValue init = CH_NIL;
+            ch_gc_push(&c->vm->gc, &init);
+            if (parse_define_binding(c, form, &name, &init) != 0) {
+                ch_gc_pop_n(&c->vm->gc, 3);
+                return -1;
+            }
+            defs = ch_gc_cons(&c->vm->gc, make_letrec_binding(&c->vm->gc, name, init), defs);
+            ch_gc_pop(&c->vm->gc);
+            work = ch_cdr(work);
+            continue;
         }
-        ChValue bind = ch_gc_cons(&c->vm->gc, ch_make_pointer(&name->header),
-                                  ch_gc_cons(&c->vm->gc, init, CH_NIL));
-        defs = ch_gc_cons(&c->vm->gc, bind, defs);
-        ch_gc_pop(&c->vm->gc);
-        work = ch_cdr(work);
+        if (is_define_values_form(form)) {
+            if (append_define_values_bindings(c, form, &defs) != 0) {
+                ch_gc_pop_n(&c->vm->gc, 2);
+                return -1;
+            }
+            work = ch_cdr(work);
+            continue;
+        }
+        break;
     }
 
     if (ch_is_nil(defs)) {

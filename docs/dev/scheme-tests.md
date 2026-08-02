@@ -94,9 +94,9 @@ Wired in CTest as `kaappi_deferred_smoke_*`. Enable with:
 ctest --output-on-failure -R kaappi_deferred_smoke
 ```
 
-**Status as of 2026-08-02 (Batch 11):** 230 of 257 non-backend smoke
-files wired (**230/257**, ~89%). "Non-backend" excludes the 8 permanently
-skipped `jit-*.scm`/`llvm-*.scm` files (see below); 27 remain unwired.
+**Status as of 2026-08-02 (Batch 13):** 234 of 257 non-backend smoke
+files wired (**234/257**, ~91%). "Non-backend" excludes the 8 permanently
+skipped `jit-*.scm`/`llvm-*.scm` files (see below); 23 remain unwired.
 
 **Wired:** language-surface fixes (`case-lambda-fixes`, `expt-negative-base-1725`,
 `equal-dag`, `circular-list-terminate`) plus a large batch of locally green
@@ -123,6 +123,20 @@ Batch 11 wired the remaining SRFI-170 POSIX gaps: `group-info-by-name-1161`
 and `srfi170-time-objects` (`posix-time` / `monotonic-time` as SRFI-19
 `time-utc` / `time-monotonic` objects).
 
+Batch 12 wired `trampoline-polish-1375`: Scheme-bootstrapped `vector-map` /
+`vector-for-each` / `string-map` / `string-for-each` (Kaappi-shaped closures
+with captured dependencies), validated `dynamic-wind` (type-check before
+`before`), and hiding of `%push-wind` / `%pop-wind` / `%wind-top-after` after
+upvalue capture. Closure arity errors now use Kaappi wording
+(`expected at least N arguments`).
+
+Batch 13 wired the global/library rebinding cluster: `define-values-letrec-1719`
+(leading `define-values` participates in the body's letrec* rewrite),
+`library-redefine-closure-820` (replaced library `runtime_env`s are retired and
+GC-traced), and `percent-name-user-library-1856` (pristine `%-`internal snapshot
+plus `__chaaya_base__`-prefixed desugaring refs for record/case-lambda/delay/
+parameterize helpers).
+
 `lib/kaappi/parallel.sld` loads cleanly under `--lib-path`; all three of its
 smoke covers are wired and green: `kaappi-parallel-map`,
 `kaappi-parallel-pool`, `kaappi-parallel-shutdown`.
@@ -133,15 +147,13 @@ smoke covers are wired and green: `kaappi-parallel-map`,
 |------|--------|
 | `jit-*.scm`, `llvm-*.scm` | JIT/LLVM backend not in Chaaya |
 
-**Remaining unwired (27), grouped by blocker:**
+**Remaining unwired (23), grouped by blocker:**
 
 | Blocker | Files | Notes |
 |---------|------:|-------|
 | Fiber/thread scheduler races & cross-thread capacity limits | 15 | `fiber-blocked-exit`, `fiber-channel-receive-waits-out-peer-sleep`, `fiber-channel-rendezvous`, `fiber-dispatch-blocked-siblings`, `fiber-error-handling`, `fiber-many-waiters-one-object-1530`, `fiber-pipeline`, `fiber-thread-join-deadline-cleared-after-resolve`, `fiber-timed-mutex-lock-not-starved-by-busy-sibling`, `mutex-nested-dispatch-dirty-snapshot-1487`, `mutex-timeout`, `nested-wait-under-sleep-dirty-snapshot-1490`, `thread-foreign-owner-1484`, `thread-port-isolation`, `deep-copy-list-801`. Deep scheduler/dispatch work, not quick fixes; `nested-wait-under-sleep-dirty-snapshot-1490` in particular passes in isolation but times out under parallel `ctest -j` load — a genuine contention-sensitive race, left unwired rather than wired flaky. |
 | Fixed compiler limits (register file is `uint8_t`-indexed) | 5 | `apply-large-arglist`, `call-arg-limit`, `case-large-clauses`, `large-form-body-791`, `vector-large-arglist` — all hit an intentional ~200–256 argument/clause/register ceiling; raising it is a register-file width change, not a quick fix. |
-| Global/library rebinding internals | 3 | `percent-name-user-library-1856`, `library-redefine-closure-820`, `define-values-letrec-1719`. |
 | Continuation / dynamic-wind / exception-handler depth | 2 | `handler-wind-depth-1886` (deep nested wind/handler stacks), `gc-rooting-safety` (needs `call/ec` as a distinct escape-only, extent-checked continuation — aliasing it to the existing re-entrant `call/cc` primitive was tried and segfaults on invocation outside its extent instead of raising a catchable error, so the alias was reverted). |
-| Library primitive closures (SRFI-133 etc.) | 1 | `trampoline-polish-1375` — `vector-map`/`string-map`/`string-for-each` as Scheme closures don't raise the expected arity/type errors, and `%push-wind`/`%pop-wind` are unexpectedly unbound in one path. |
 | GC / heap-layout sensitivity (latent) | — | Batch 11: registering the new SRFI-170 natives shifted heap layout enough to break `bootstrap_macros`, `r7rs-thin-forms-gaps`, and `exact-prefix-856` depending on exact native count. Expanding the same SRFI-170 user/group cluster (`user-uid` / `user-effective-*` / `user-supplementary-gids`) stabilized the suite; root cause still looks like a GC/expander marking bug worth a dedicated investigation. |
 
 See `docs/dev/srfi-import-audit.md` for the separate, lower-level audit of

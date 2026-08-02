@@ -1,5 +1,6 @@
 #include "chaaya/prim.h"
 
+#include "chaaya/eval.h"
 #include "prim_utf8.h"
 
 #include <stdio.h>
@@ -394,6 +395,7 @@ void ch_register_vector_primitives(ChVM *vm) {
     define_prim(vm, "vector-copy", prim_vector_copy, -1, 1);
     define_prim(vm, "vector-copy!", prim_vector_copy_bang, -1, 3);
     define_prim(vm, "vector-append", prim_vector_append, -1, 0);
+    /* Temporary natives; ch_install_vector_bootstrap replaces with Scheme. */
     define_prim(vm, "vector-map", prim_vector_map, -1, 2);
     define_prim(vm, "vector-for-each", prim_vector_for_each, -1, 2);
     define_prim(vm, "make-vector", prim_make_vector, -1, 1);
@@ -401,4 +403,73 @@ void ch_register_vector_primitives(ChVM *vm) {
     define_prim(vm, "list->vector", prim_list_to_vector, 1, 1);
     define_prim(vm, "string->vector", prim_string_to_vector, -1, 1);
     define_prim(vm, "vector->string", prim_vector_to_string, -1, 1);
+}
+
+/* Kaappi-style Scheme vector-map / vector-for-each: callbacks run in the
+ * bytecode loop; dependencies are captured as upvalues for redefinition immunity. */
+static const char *vector_for_each_src =
+    "(define vector-for-each\n"
+    "  (let ((null? null?) (car car) (cdr cdr) (cons cons) (apply apply)\n"
+    "        (vector-length vector-length) (vector-ref vector-ref)\n"
+    "        (procedure? procedure?) (not not) (error error)\n"
+    "        (< <) (>= >=) (+ +))\n"
+    "    (lambda (proc vec1 . vecs)\n"
+    "      (if (not (procedure? proc))\n"
+    "          (error \"type error in 'vector-for-each': expected procedure\" proc))\n"
+    "      (if (null? vecs)\n"
+    "          (let ((len (vector-length vec1)))\n"
+    "            (do ((i 0 (+ i 1))) ((>= i len))\n"
+    "              (proc (vector-ref vec1 i))))\n"
+    "          (let ((len (let min-len ((v vecs) (m (vector-length vec1)))\n"
+    "                       (if (null? v) m\n"
+    "                           (let ((n (vector-length (car v))))\n"
+    "                             (min-len (cdr v) (if (< n m) n m))))))\n"
+    "                (all (cons vec1 vecs)))\n"
+    "            (do ((i 0 (+ i 1))) ((>= i len))\n"
+    "              (apply proc\n"
+    "                (let refs ((v all))\n"
+    "                  (if (null? v) '()\n"
+    "                      (cons (vector-ref (car v) i)\n"
+    "                            (refs (cdr v))))))))))))\n";
+
+static const char *vector_map_src =
+    "(define vector-map\n"
+    "  (let ((null? null?) (car car) (cdr cdr) (cons cons) (apply apply)\n"
+    "        (vector-length vector-length) (vector-ref vector-ref)\n"
+    "        (vector-set! vector-set!) (make-vector make-vector)\n"
+    "        (procedure? procedure?) (not not) (error error)\n"
+    "        (< <) (>= >=) (+ +))\n"
+    "    (lambda (proc vec1 . vecs)\n"
+    "      (if (not (procedure? proc))\n"
+    "          (error \"type error in 'vector-map': expected procedure\" proc))\n"
+    "      (if (null? vecs)\n"
+    "          (let* ((len (vector-length vec1))\n"
+    "                 (result (make-vector len)))\n"
+    "            (do ((i 0 (+ i 1))) ((>= i len))\n"
+    "              (vector-set! result i (proc (vector-ref vec1 i))))\n"
+    "            result)\n"
+    "          (let* ((len (let min-len ((v vecs) (m (vector-length vec1)))\n"
+    "                        (if (null? v) m\n"
+    "                            (let ((n (vector-length (car v))))\n"
+    "                              (min-len (cdr v) (if (< n m) n m))))))\n"
+    "                 (all (cons vec1 vecs))\n"
+    "                 (result (make-vector len)))\n"
+    "            (do ((i 0 (+ i 1))) ((>= i len))\n"
+    "              (vector-set! result i\n"
+    "                (apply proc\n"
+    "                  (let refs ((v all))\n"
+    "                    (if (null? v) '()\n"
+    "                        (cons (vector-ref (car v) i)\n"
+    "                              (refs (cdr v))))))))\n"
+    "            result)))))\n";
+
+void ch_install_vector_bootstrap(ChVM *vm) {
+    if (ch_eval_source(vm, vector_for_each_src, strlen(vector_for_each_src), 0) != 0) {
+        fprintf(stderr, "chaaya: failed to install vector-for-each bootstrap\n");
+        abort();
+    }
+    if (ch_eval_source(vm, vector_map_src, strlen(vector_map_src), 0) != 0) {
+        fprintf(stderr, "chaaya: failed to install vector-map bootstrap\n");
+        abort();
+    }
 }

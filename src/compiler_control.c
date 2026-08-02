@@ -1092,7 +1092,7 @@ ChCompileStatus compile_parameterize(ChCompiler *c, ChFuncCompiler *fc, ChValue 
         outer_bindings = ch_gc_cons(&c->vm->gc, pp_pair, outer_bindings);
     }
 
-    ChValue pconvert_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "%parameter-convert");
+    ChValue pconvert_sym = ch_base_binding_symbol(&c->vm->gc, "%parameter-convert");
     for (size_t i = nbindings; i > 0; i--) {
         size_t idx = i - 1;
         ChValue convert_call =
@@ -1104,7 +1104,7 @@ ChCompileStatus compile_parameterize(ChCompiler *c, ChFuncCompiler *fc, ChValue 
         inner_bindings = ch_gc_cons(&c->vm->gc, new_pair, inner_bindings);
     }
 
-    ChValue ppush_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "%parameter-push!");
+    ChValue ppush_sym = ch_base_binding_symbol(&c->vm->gc, "%parameter-push!");
     for (size_t i = nbindings; i > 0; i--) {
         size_t idx = i - 1;
         ChValue push_call =
@@ -1114,7 +1114,7 @@ ChCompileStatus compile_parameterize(ChCompiler *c, ChFuncCompiler *fc, ChValue 
         before_body = ch_gc_cons(&c->vm->gc, push_call, before_body);
     }
 
-    ChValue ppop_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "%parameter-pop!");
+    ChValue ppop_sym = ch_base_binding_symbol(&c->vm->gc, "%parameter-pop!");
     for (size_t i = 0; i < nbindings; i++) {
         ChValue pop_call = ch_gc_cons(
             &c->vm->gc, ppop_sym, ch_gc_cons(&c->vm->gc, param_syms[i], CH_NIL));

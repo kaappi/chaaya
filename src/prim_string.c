@@ -1,8 +1,8 @@
 #include "chaaya/prim.h"
 
-#include "prim_utf8.h"
-
+#include "chaaya/eval.h"
 #include "chaaya/unicode.h"
+#include "prim_utf8.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -861,6 +861,7 @@ void ch_register_string_primitives(ChVM *vm) {
     define_prim(vm, "make-string", prim_make_string, -1, 1);
     define_prim(vm, "string-append", prim_string_append, -1, 0);
     define_prim(vm, "substring", prim_substring, 3, 3);
+    /* Temporary native; ch_install_string_bootstrap replaces with Scheme. */
     define_prim(vm, "string-map", prim_string_map, -1, 2);
     define_prim(vm, "string=?", prim_string_eq, -1, 2);
     define_prim(vm, "string<?", prim_string_lt, -1, 2);
@@ -878,9 +879,89 @@ void ch_register_string_primitives(ChVM *vm) {
     define_prim(vm, "string-upcase", prim_string_upcase, 1, 1);
     define_prim(vm, "string-downcase", prim_string_downcase, 1, 1);
     define_prim(vm, "string-foldcase", prim_string_foldcase, 1, 1);
+    /* Temporary native; ch_install_string_bootstrap replaces with Scheme. */
     define_prim(vm, "string-for-each", prim_string_for_each, -1, 2);
     define_prim(vm, "symbol->string", prim_symbol_to_string, 1, 1);
     define_prim(vm, "string->symbol", prim_string_to_symbol, 1, 1);
     define_prim(vm, "string->list", prim_string_to_list, -1, 1);
     define_prim(vm, "list->string", prim_list_to_string, 1, 1);
+}
+
+/* Kaappi-style Scheme string-map / string-for-each. Strings are UTF-8; walking
+ * via string->list keeps the multi-string path linear (index-driven string-ref
+ * would be O(n^2) because codepoint indexing rescans from byte 0). */
+static const char *string_for_each_src =
+    "(define string-for-each\n"
+    "  (let ((null? null?) (pair? pair?) (car car) (cdr cdr) (cons cons)\n"
+    "        (apply apply) (string->list string->list)\n"
+    "        (procedure? procedure?) (not not) (error error))\n"
+    "    (lambda (proc str1 . strs)\n"
+    "      (if (not (procedure? proc))\n"
+    "          (error \"type error in 'string-for-each': expected procedure\" proc))\n"
+    "      (if (null? strs)\n"
+    "          (let loop ((l (string->list str1)))\n"
+    "            (if (pair? l)\n"
+    "                (begin (proc (car l)) (loop (cdr l)))\n"
+    "                (if #f #f)))\n"
+    "          (let loop ((ls (let conv ((s (cons str1 strs)))\n"
+    "                           (if (null? s) '()\n"
+    "                               (cons (string->list (car s)) (conv (cdr s)))))))\n"
+    "            (let ((go (let check ((l ls))\n"
+    "                        (if (null? l) #t\n"
+    "                            (if (null? (car l)) #f (check (cdr l)))))))\n"
+    "              (if go\n"
+    "                  (begin\n"
+    "                    (apply proc\n"
+    "                      (let cars ((l ls))\n"
+    "                        (if (null? l) '()\n"
+    "                            (cons (car (car l)) (cars (cdr l))))))\n"
+    "                    (loop\n"
+    "                      (let cdrs ((l ls))\n"
+    "                        (if (null? l) '()\n"
+    "                            (cons (cdr (car l)) (cdrs (cdr l)))))))\n"
+    "                  (if #f #f))))))))\n";
+
+static const char *string_map_src =
+    "(define string-map\n"
+    "  (let ((null? null?) (pair? pair?) (car car) (cdr cdr) (cons cons)\n"
+    "        (apply apply) (string->list string->list)\n"
+    "        (list->string list->string) (reverse reverse)\n"
+    "        (procedure? procedure?) (not not) (error error))\n"
+    "    (lambda (proc str1 . strs)\n"
+    "      (if (not (procedure? proc))\n"
+    "          (error \"type error in 'string-map': expected procedure\" proc))\n"
+    "      (if (null? strs)\n"
+    "          (let loop ((l (string->list str1)) (acc '()))\n"
+    "            (if (pair? l)\n"
+    "                (loop (cdr l) (cons (proc (car l)) acc))\n"
+    "                (list->string (reverse acc))))\n"
+    "          (let loop ((ls (let conv ((s (cons str1 strs)))\n"
+    "                           (if (null? s) '()\n"
+    "                               (cons (string->list (car s)) (conv (cdr s))))))\n"
+    "                     (acc '()))\n"
+    "            (let ((go (let check ((l ls))\n"
+    "                        (if (null? l) #t\n"
+    "                            (if (null? (car l)) #f (check (cdr l)))))))\n"
+    "              (if go\n"
+    "                  (loop\n"
+    "                    (let cdrs ((l ls))\n"
+    "                      (if (null? l) '()\n"
+    "                          (cons (cdr (car l)) (cdrs (cdr l)))))\n"
+    "                    (cons\n"
+    "                      (apply proc\n"
+    "                        (let cars ((l ls))\n"
+    "                          (if (null? l) '()\n"
+    "                              (cons (car (car l)) (cars (cdr l))))))\n"
+    "                      acc))\n"
+    "                  (list->string (reverse acc)))))))))\n";
+
+void ch_install_string_bootstrap(ChVM *vm) {
+    if (ch_eval_source(vm, string_for_each_src, strlen(string_for_each_src), 0) != 0) {
+        fprintf(stderr, "chaaya: failed to install string-for-each bootstrap\n");
+        abort();
+    }
+    if (ch_eval_source(vm, string_map_src, strlen(string_map_src), 0) != 0) {
+        fprintf(stderr, "chaaya: failed to install string-map bootstrap\n");
+        abort();
+    }
 }

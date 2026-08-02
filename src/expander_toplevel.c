@@ -524,11 +524,12 @@ static ChExpandStatus expand_define_record_type_r6rs(ChVM *vm, ChValue args, ChV
     ChValue define_sym = ch_gc_intern_symbol_cstr(gc, "define");
     ChValue let_sym = ch_gc_intern_symbol_cstr(gc, "let");
     ChValue lambda_sym = ch_gc_intern_symbol_cstr(gc, "lambda");
-    ChValue mrt_sym = ch_gc_intern_symbol_cstr(gc, "%make-record-type");
-    ChValue mr_sym = ch_gc_intern_symbol_cstr(gc, "%make-record");
-    ChValue rp_sym = ch_gc_intern_symbol_cstr(gc, "%record?");
-    ChValue rr_sym = ch_gc_intern_symbol_cstr(gc, "%record-ref");
-    ChValue rs_sym = ch_gc_intern_symbol_cstr(gc, "%record-set!");
+    /* Pristine internals — immune to user/library %-rebinding (#1856). */
+    ChValue mrt_sym = ch_base_binding_symbol(gc, "%make-record-type");
+    ChValue mr_sym = ch_base_binding_symbol(gc, "%make-record");
+    ChValue rp_sym = ch_base_binding_symbol(gc, "%record?");
+    ChValue rr_sym = ch_base_binding_symbol(gc, "%record-ref");
+    ChValue rs_sym = ch_base_binding_symbol(gc, "%record-set!");
     ChValue rt_name = ch_gc_intern_symbol_cstr(gc, iname);
     ChValue rt_local = ch_gc_intern_symbol_cstr(gc, " __rt");
     ChValue name_str = ch_gc_make_string_cstr(gc, type_name);
@@ -690,11 +691,12 @@ static ChExpandStatus expand_define_record_type(ChVM *vm, ChValue args, ChValue 
     ChValue define_sym = ch_gc_intern_symbol_cstr(gc, "define");
     ChValue let_sym = ch_gc_intern_symbol_cstr(gc, "let");
     ChValue lambda_sym = ch_gc_intern_symbol_cstr(gc, "lambda");
-    ChValue mrt_sym = ch_gc_intern_symbol_cstr(gc, "%make-record-type");
-    ChValue mr_sym = ch_gc_intern_symbol_cstr(gc, "%make-record");
-    ChValue rp_sym = ch_gc_intern_symbol_cstr(gc, "%record?");
-    ChValue rr_sym = ch_gc_intern_symbol_cstr(gc, "%record-ref");
-    ChValue rs_sym = ch_gc_intern_symbol_cstr(gc, "%record-set!");
+    /* Pristine internals — immune to user/library %-rebinding (#1856). */
+    ChValue mrt_sym = ch_base_binding_symbol(gc, "%make-record-type");
+    ChValue mr_sym = ch_base_binding_symbol(gc, "%make-record");
+    ChValue rp_sym = ch_base_binding_symbol(gc, "%record?");
+    ChValue rr_sym = ch_base_binding_symbol(gc, "%record-ref");
+    ChValue rs_sym = ch_base_binding_symbol(gc, "%record-set!");
     ChValue rt_name = ch_gc_intern_symbol_cstr(gc, iname);
     ChValue rt_local = ch_gc_intern_symbol_cstr(gc, " __rt");
     ChValue name_str = ch_gc_make_string_cstr(gc, type_sym->name);

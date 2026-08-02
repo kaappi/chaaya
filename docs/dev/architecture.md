@@ -79,7 +79,8 @@ GC’s intrusive list. Bootstrap tags:
 
 Control stacks on the VM (not heap tags): dynamic-wind records and exception
 handlers. `dynamic-wind` is Scheme over `%push-wind` / `%pop-wind` (Kaappi
-pattern) so continuation restores re-enter `after` correctly.
+pattern: helpers are captured as upvalues then unbound globally) so
+continuation restores re-enter `after` correctly.
 
 ---
 

@@ -1,8 +1,9 @@
 # Chaaya — remaining work
 
-Tracked gaps after the expander bug campaign (2026-08-02), Batch 10, and
-Batch 11 SRFI-170 POSIX smokes (same day). Detail and repro context live in
-the linked docs; this file is the checklist.
+Tracked gaps after the expander bug campaign (2026-08-02), Batches 10–11
+(SRFI-170 POSIX), Batch 12 trampoline polish, and Batch 13 global/library
+rebinding (same day). Detail and repro context live in the linked docs; this
+file is the checklist.
 
 Sources: [scheme-tests.md](dev/scheme-tests.md),
 [srfi-import-audit.md](dev/srfi-import-audit.md),
@@ -10,9 +11,9 @@ Sources: [scheme-tests.md](dev/scheme-tests.md),
 
 ---
 
-## Unwired kaappi-deferred smokes (27)
+## Unwired kaappi-deferred smokes (23)
 
-Non-backend corpus is **230/257** wired (~89%). Wire only after local green +
+Non-backend corpus is **234/257** wired (~91%). Wire only after local green +
 `make test`. Permanently skipped: `jit-*.scm` / `llvm-*.scm` (no JIT/LLVM
 backend in Chaaya).
 
@@ -57,11 +58,15 @@ register-file width change.
 - [ ] `large-form-body-791`
 - [ ] `vector-large-arglist`
 
-### Global / library rebinding (3)
+### Global / library rebinding (0 remaining)
 
-- [ ] `percent-name-user-library-1856`
-- [ ] `library-redefine-closure-820`
-- [ ] `define-values-letrec-1719`
+- [x] `define-values-letrec-1719` — leading `define-values` joins the body's
+  letrec* rewrite (mutual/forward refs; Batch 13)
+- [x] `library-redefine-closure-820` — replaced `runtime_env`s are retired and
+  GC-traced so escaping closures keep their locals (Batch 13)
+- [x] `percent-name-user-library-1856` — pristine `%-`internal snapshot +
+  `__chaaya_base__` desugaring refs so user/library rebinds cannot redirect
+  `define-record-type` / `case-lambda` / `delay` / `parameterize` (Batch 13)
 
 ### Continuations / dynamic-wind / handlers (2)
 
@@ -69,11 +74,12 @@ register-file width change.
 - [ ] `gc-rooting-safety` — needs distinct escape-only `call/ec` (extent-checked);
   aliasing to re-entrant `call/cc` was tried and reverted (segfault outside extent)
 
-### Library primitive closures (1)
+### Library primitive closures (0 remaining)
 
-- [ ] `trampoline-polish-1375` — `vector-map` / `string-map` / `string-for-each`
-  as Scheme closures miss expected arity/type errors; `%push-wind` / `%pop-wind`
-  unbound on one path
+- [x] `trampoline-polish-1375` — Scheme-bootstrapped `vector-map` /
+  `vector-for-each` / `string-map` / `string-for-each` + validated
+  `dynamic-wind`; hide `%push-wind` / `%pop-wind` / `%wind-top-after` after
+  capture (Batch 12)
 
 ### Numeric tower (0 remaining)
 

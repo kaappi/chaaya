@@ -9,9 +9,17 @@ extern "C" {
 
 void ch_register_core_primitives(ChVM *vm);
 void ch_register_control_primitives(ChVM *vm);
+/* Install Scheme dynamic-wind (call after error primitives are registered). */
+void ch_install_control_bootstrap(ChVM *vm);
+/* Remove %push-wind / %pop-wind / %wind-top-after from the global namespace. */
+void ch_hide_control_internal_helpers(ChVM *vm);
 void ch_register_list_primitives(ChVM *vm);
 /* Overwrite map/for-each with Scheme implementations (call after error). */
 void ch_install_list_bootstrap(ChVM *vm);
+/* Overwrite vector-map / vector-for-each with Scheme (trampoline polish). */
+void ch_install_vector_bootstrap(ChVM *vm);
+/* Overwrite string-map / string-for-each with Scheme (trampoline polish). */
+void ch_install_string_bootstrap(ChVM *vm);
 void ch_register_data_primitives(ChVM *vm);
 void ch_register_char_primitives(ChVM *vm);
 void ch_register_string_primitives(ChVM *vm);

@@ -18,12 +18,34 @@ void ch_library_registry_init(ChLibraryRegistry *reg) {
     memset(reg, 0, sizeof(*reg));
 }
 
+static int retire_lib_env(ChLibraryRegistry *reg, ChLibEnv *env) {
+    if (!env) {
+        return 0;
+    }
+    if (reg->retired_count >= reg->retired_cap) {
+        size_t ncap = reg->retired_cap == 0 ? 8 : reg->retired_cap * 2;
+        ChLibEnv **n =
+            (ChLibEnv **)realloc(reg->retired_envs, ncap * sizeof(ChLibEnv *));
+        if (!n) {
+            return -1;
+        }
+        reg->retired_envs = n;
+        reg->retired_cap = ncap;
+    }
+    reg->retired_envs[reg->retired_count++] = env;
+    return 0;
+}
+
 void ch_library_registry_deinit(ChLibraryRegistry *reg) {
     for (size_t i = 0; i < reg->count; i++) {
         free(reg->libs[i]->name);
         free(reg->libs[i]->runtime_env);
         free(reg->libs[i]);
     }
+    for (size_t i = 0; i < reg->retired_count; i++) {
+        free(reg->retired_envs[i]);
+    }
+    free(reg->retired_envs);
     memset(reg, 0, sizeof(*reg));
 }
 
@@ -39,11 +61,15 @@ ChLibrary *ch_library_lookup(ChLibraryRegistry *reg, const char *name) {
 int ch_library_register(ChLibraryRegistry *reg, ChLibrary *lib) {
     ChLibrary *existing = ch_library_lookup(reg, lib->name);
     if (existing) {
-        /* Replace in place */
+        /* Replace in place; keep the old runtime_env alive for escaping
+         * closures that still resolve library locals through it (#820). */
         for (size_t i = 0; i < reg->count; i++) {
             if (reg->libs[i] == existing) {
+                if (retire_lib_env(reg, existing->runtime_env) != 0) {
+                    return -1;
+                }
+                existing->runtime_env = NULL;
                 free(existing->name);
-                free(existing->runtime_env);
                 free(existing);
                 reg->libs[i] = lib;
                 break;
@@ -545,6 +571,17 @@ size_t ch_library_push_gc_roots(ChVM *vm) {
     return n;
 }
 
+static void mark_lib_env(ChLibEnv *env) {
+    if (!env) {
+        return;
+    }
+    for (size_t j = 0; j < env->count; j++) {
+        if (env->bindings[j].defined) {
+            ch_gc_mark_value(env->bindings[j].value);
+        }
+    }
+}
+
 void ch_library_mark_gc_roots(ChVM *vm) {
     if (!vm->libraries) {
         return;
@@ -554,14 +591,63 @@ void ch_library_mark_gc_roots(ChVM *vm) {
         for (size_t j = 0; j < lib->export_count; j++) {
             ch_gc_mark_value(lib->export_values[j]);
         }
-        if (lib->runtime_env) {
-            for (size_t j = 0; j < lib->runtime_env->count; j++) {
-                if (lib->runtime_env->bindings[j].defined) {
-                    ch_gc_mark_value(lib->runtime_env->bindings[j].value);
-                }
-            }
+        mark_lib_env(lib->runtime_env);
+    }
+    /* Envs of replaced libraries stay reachable through closures compiled
+     * against them (#820). */
+    for (size_t i = 0; i < vm->libraries->retired_count; i++) {
+        mark_lib_env(vm->libraries->retired_envs[i]);
+    }
+    for (size_t i = 0; i < vm->libraries->internal_count; i++) {
+        ch_gc_mark_value(vm->libraries->internals[i].value);
+    }
+}
+
+int ch_snapshot_internal_bindings(ChVM *vm) {
+    if (!vm->libraries) {
+        return -1;
+    }
+    ChLibraryRegistry *reg = vm->libraries;
+    reg->internal_count = 0;
+    for (size_t i = 0; i < vm->global_count; i++) {
+        if (!vm->globals[i].defined || !vm->globals[i].name) {
+            continue;
+        }
+        const char *n = vm->globals[i].name->name;
+        if (!n || n[0] != '%') {
+            continue;
+        }
+        if (reg->internal_count >= CH_LIB_MAX_INTERNALS) {
+            return -1;
+        }
+        reg->internals[reg->internal_count].name = vm->globals[i].name;
+        reg->internals[reg->internal_count].value = vm->globals[i].value;
+        reg->internal_count++;
+    }
+    return 0;
+}
+
+bool ch_lookup_internal_binding(ChVM *vm, const char *name, ChValue *out) {
+    if (!vm->libraries || !name) {
+        return false;
+    }
+    for (size_t i = 0; i < vm->libraries->internal_count; i++) {
+        ChSymbol *sym = vm->libraries->internals[i].name;
+        if (sym && strcmp(sym->name, name) == 0) {
+            *out = vm->libraries->internals[i].value;
+            return true;
         }
     }
+    return false;
+}
+
+ChValue ch_base_binding_symbol(ChGC *gc, const char *name) {
+    char buf[128];
+    if (snprintf(buf, sizeof(buf), "%s%s", CH_BASE_BINDING_PREFIX, name) >= (int)sizeof(buf)) {
+        /* Overflow: fall back to plain name (should never happen for fixed internals). */
+        return ch_gc_intern_symbol_cstr(gc, name);
+    }
+    return ch_gc_intern_symbol_cstr(gc, buf);
 }
 
 int ch_eval_toplevel_form(ChVM *vm, ChValue expr) {

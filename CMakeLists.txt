@@ -648,6 +648,12 @@ chaaya_kaappi_deferred_test(smoke_filesystem_nul_path_805 tests/scheme/kaappi-de
 # Batch 11 smoke (SRFI-170 group/time — 2026-08-02)
 chaaya_kaappi_deferred_test(smoke_group_info_by_name_1161 tests/scheme/kaappi-deferred/smoke/group-info-by-name-1161.scm)
 chaaya_kaappi_deferred_test(smoke_srfi170_time_objects tests/scheme/kaappi-deferred/smoke/srfi170-time-objects.scm)
+# Batch 12 smoke (trampoline polish — 2026-08-02)
+chaaya_kaappi_deferred_test(smoke_trampoline_polish_1375 tests/scheme/kaappi-deferred/smoke/trampoline-polish-1375.scm)
+# Batch 13 smoke (define-values letrec*, library redefine GC, %-name internals)
+chaaya_kaappi_deferred_test(smoke_define_values_letrec_1719 tests/scheme/kaappi-deferred/smoke/define-values-letrec-1719.scm)
+chaaya_kaappi_deferred_test(smoke_library_redefine_closure_820 tests/scheme/kaappi-deferred/smoke/library-redefine-closure-820.scm)
+chaaya_kaappi_deferred_test(smoke_percent_name_user_library_1856 tests/scheme/kaappi-deferred/smoke/percent-name-user-library-1856.scm)
 # nested-wait-under-sleep-dirty-snapshot-1490.scm: passes in isolation but
 # times out under parallel ctest load (contended scheduler timing) — a
 # cross-thread scheduler race, not a quick fix; left unwired (see

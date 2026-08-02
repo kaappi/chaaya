@@ -109,6 +109,14 @@ void ch_vm_define_global(ChVM *vm, int idx, ChValue v) {
     vm->globals[idx].defined = true;
 }
 
+void ch_vm_undefine_global(ChVM *vm, int idx) {
+    if (idx < 0 || (size_t)idx >= vm->global_count) {
+        return;
+    }
+    vm->globals[idx].value = CH_UNDEFINED;
+    vm->globals[idx].defined = false;
+}
+
 void ch_vm_register_primitives(ChVM *vm) {
     ch_register_core_primitives(vm);
     ch_register_list_primitives(vm);
@@ -139,8 +147,19 @@ void ch_vm_register_primitives(ChVM *vm) {
     ch_register_srfi133_primitives(vm);
     ch_register_srfi258_primitives(vm);
     ch_register_srfi260_primitives(vm);
-    /* Scheme map/for-each overwrite native stubs (no C re-entrancy). */
+    /* Capture pristine %-internals before bootstraps / user code can redefine
+     * them; desugarings resolve through this snapshot (#1856). */
+    if (vm->libraries) {
+        (void)ch_snapshot_internal_bindings(vm);
+    }
+    /* Scheme trampolines overwrite native stubs (callbacks stay off the C stack).
+     * dynamic-wind needs error/procedure?; map/vector/string need error too. */
+    ch_install_control_bootstrap(vm);
     ch_install_list_bootstrap(vm);
+    ch_install_vector_bootstrap(vm);
+    ch_install_string_bootstrap(vm);
+    /* dynamic-wind captured %push-wind / %pop-wind as upvalues. */
+    ch_hide_control_internal_helpers(vm);
     if (vm->libraries) {
         (void)ch_register_builtin_libraries(vm);
     }
@@ -1229,13 +1248,13 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
     if (fn->variadic) {
         if (nargs < fixed) {
             char buf[256];
-            snprintf(buf, sizeof(buf), "wrong number of arguments: expected at least %d, got %d",
-                     fixed, nargs);
+            /* Kaappi-shaped wording so smokes can match "expected at least N arguments". */
+            snprintf(buf, sizeof(buf), "expected at least %d arguments, got %d", fixed, nargs);
             return raise_message_to_slot(vm, buf, arg_base);
         }
     } else if (nargs != fixed) {
         char buf[256];
-        snprintf(buf, sizeof(buf), "wrong number of arguments: expected %d, got %d", fixed, nargs);
+        snprintf(buf, sizeof(buf), "expected %d arguments, got %d", fixed, nargs);
         return raise_message_to_slot(vm, buf, arg_base);
     }
 

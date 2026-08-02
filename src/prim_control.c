@@ -122,18 +122,51 @@ static ChValue prim_raise_continuable(ChVM *vm, ChValue *args, int nargs) {
 }
 
 /* Kaappi-style Scheme dynamic-wind over %push-wind / %pop-wind.
- * after is recovered from the wind stack so a register clobber during thunk
+ * Validates all three arguments before running `before` so a bad-argument call
+ * cannot leak before's side effects (#1375). Captures %-helpers as upvalues so
+ * they can later be removed from the global namespace. `after` is recovered from
+ * the wind stack via %wind-top-after so a register clobber during thunk
  * (continuation restore / call frame reuse) cannot lose the after thunk. */
 static const char *dynamic_wind_src =
     "(define dynamic-wind\n"
-    "  (lambda (before thunk after)\n"
-    "    (before)\n"
-    "    (%push-wind before after)\n"
-    "    (let ((result (thunk))\n"
-    "          (after-thunk (%wind-top-after)))\n"
-    "      (%pop-wind)\n"
-    "      (after-thunk)\n"
-    "      result)))\n";
+    "  (let ((%push-wind %push-wind) (%pop-wind %pop-wind)\n"
+    "        (%wind-top-after %wind-top-after)\n"
+    "        (procedure? procedure?) (not not) (error error))\n"
+    "    (lambda (before thunk after)\n"
+    "      (if (not (procedure? before))\n"
+    "          (error \"type error in 'dynamic-wind': expected procedure\" before))\n"
+    "      (if (not (procedure? thunk))\n"
+    "          (error \"type error in 'dynamic-wind': expected procedure\" thunk))\n"
+    "      (if (not (procedure? after))\n"
+    "          (error \"type error in 'dynamic-wind': expected procedure\" after))\n"
+    "      (before)\n"
+    "      (%push-wind before after)\n"
+    "      (let ((result (thunk))\n"
+    "            (after-thunk (%wind-top-after)))\n"
+    "        (%pop-wind)\n"
+    "        (after-thunk)\n"
+    "        result))))\n";
+
+static void undefine_global_cstr(ChVM *vm, const char *name) {
+    ChValue sym = ch_gc_intern_symbol_cstr(&vm->gc, name);
+    int idx = ch_vm_intern_global(vm, ch_as_symbol(sym));
+    ch_vm_undefine_global(vm, idx);
+}
+
+void ch_hide_control_internal_helpers(ChVM *vm) {
+    /* Captured by dynamic-wind's closure; must not remain globally callable. */
+    undefine_global_cstr(vm, "%push-wind");
+    undefine_global_cstr(vm, "%pop-wind");
+    undefine_global_cstr(vm, "%wind-top-after");
+}
+
+void ch_install_control_bootstrap(ChVM *vm) {
+    /* Needs error / procedure? already registered (after error primitives). */
+    if (ch_eval_source(vm, dynamic_wind_src, strlen(dynamic_wind_src), 0) != 0) {
+        fprintf(stderr, "chaaya: failed to install dynamic-wind bootstrap\n");
+        abort();
+    }
+}
 
 void ch_register_control_primitives(ChVM *vm) {
     define_prim(vm, "call/cc", prim_call_cc, 1, 1);
@@ -144,10 +177,4 @@ void ch_register_control_primitives(ChVM *vm) {
     define_prim(vm, "with-exception-handler", prim_with_exception_handler, 2, 2);
     define_prim(vm, "raise", prim_raise, 1, 1);
     define_prim(vm, "raise-continuable", prim_raise_continuable, 1, 1);
-
-    /* Install Scheme dynamic-wind (must run after %push-wind / %pop-wind). */
-    if (ch_eval_source(vm, dynamic_wind_src, strlen(dynamic_wind_src), 0) != 0) {
-        fprintf(stderr, "chaaya: failed to install dynamic-wind bootstrap\n");
-        abort();
-    }
 }
