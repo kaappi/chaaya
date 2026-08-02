@@ -436,6 +436,18 @@ static ChVMStatus push_frame(ChVM *vm, ChClosure *closure, size_t reg_base) {
 static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int nargs, bool tail);
 static ChVMStatus run_until(ChVM *vm, size_t target_frames);
 
+static size_t compute_reg_top(const ChVM *vm) {
+    size_t top = 0;
+    for (size_t i = 0; i < vm->frame_count; i++) {
+        const ChCallFrame *f = &vm->frames[i];
+        size_t end = f->reg_base + f->num_regs;
+        if (end > top) {
+            top = end;
+        }
+    }
+    return top;
+}
+
 /* calloc that never returns NULL; allocates at least one element. */
 static void *alloc_or_abort(size_t count, size_t size) {
     void *p = calloc(count == 0 ? 1 : count, size);
@@ -1096,11 +1108,13 @@ ChVMStatus ch_vm_apply(ChVM *vm, ChValue proc, ChValue *args, int nargs, ChValue
         if (st == CH_VM_CONTINUATION_INVOKED) {
             if (vm->frame_count < saved_frames) {
                 /* Escaped past this apply. */
+                vm->reg_top = compute_reg_top(vm);
                 return CH_VM_CONTINUATION_INVOKED;
             }
             if (vm->frame_count == saved_frames) {
                 /* Landed at our barrier; invoke_continuation set vm->result. */
                 *out = vm->result;
+                vm->reg_top = compute_reg_top(vm);
                 return CH_VM_OK;
             }
             /* Re-entered above us — keep running until we settle. */
@@ -1108,6 +1122,7 @@ ChVMStatus ch_vm_apply(ChVM *vm, ChValue proc, ChValue *args, int nargs, ChValue
             continue;
         }
         if (st != CH_VM_OK) {
+            vm->reg_top = compute_reg_top(vm);
             return st;
         }
         if (vm->frame_count > saved_frames) {
@@ -1117,6 +1132,7 @@ ChVMStatus ch_vm_apply(ChVM *vm, ChValue proc, ChValue *args, int nargs, ChValue
         break;
     }
     *out = vm->regs[base];
+    vm->reg_top = compute_reg_top(vm);
     return CH_VM_OK;
 }
 

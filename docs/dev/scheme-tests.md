@@ -12,7 +12,7 @@ an R7RS library MVP; fuller Kaappi/R7RS suites stay deferred.
 | `tests/scheme/bootstrap/` | Kaappi-shaped `check-*` suites (`libraries.scm` uses `import`) | yes |
 | `tests/scheme/probes/` | Adapted Kaappi differential probes (stdout golden) | yes |
 | `tests/scheme/r7rs/` | Canonical R7RS-small suite (vendored) | **in CTest** (`r7rs_suite`; full file green) |
-| `tests/scheme/kaappi-deferred/` | Full Kaappi smoke/compliance/probe copies | **partial** — 30 compliance + 16 smoke files in CTest (see below) |
+| `tests/scheme/kaappi-deferred/` | Full Kaappi smoke/compliance/probe copies | **partial** — 31 compliance + 43 smoke files in CTest (see below) |
 
 ## Bootstrap harness
 
@@ -49,7 +49,7 @@ See `tests/scheme/kaappi-deferred/README.md`. Rough gates:
 7. `(scheme inexact)` / `(scheme exact)` + math prims — **done** (MVP)
 8. SRFI-64 or `(chibi test)` — **done** for wired deferred suites (`bind_lib_ref` skips transformers; per-env hoist globals). `(chibi test)` drives `r7rs_suite`.
 9. Re-run Kaappi’s `tests/scheme/run-all.sh` corpus against `chaaya` — **in progress**
-   (compliance: 30 files; smoke batch 1: 16 files — see `CMakeLists.txt`)
+   (compliance: 31 files; smoke: 43 files — see `CMakeLists.txt`)
 
 ## kaappi-deferred compliance
 
@@ -62,40 +62,50 @@ ctest --output-on-failure -R kaappi_deferred -E smoke
 
 **Recently added (batch 1B–1E, green):** `r7rs-datatypes-gaps`, `time`,
 `process-context`, `scheme-repl`, `include-lib-decls`, `correctness-fixes`,
-`final-gaps`, `bugfixes`, `deferred-bugfixes`, `deferred-final`.
+`final-gaps`, `bugfixes`, `deferred-bugfixes`, `deferred-final`, `r7rs-thin-forms-gaps`.
 
 **Deferred (not wired — known blockers):**
 
 | File | Reason |
 |------|--------|
 | `reader-exactness-gaps.scm` | SIGABRT on section 10 round-trip matrix (sections 1–9 pass) |
-| `printer-gaps.scm` | hangs on cyclic `write-simple` (SRFI 258 import OK) |
+| `printer-gaps.scm` | slow/hangs on large write-shared scans (120s+ in CI) |
 | `reader-port-refill-gaps.scm` | port buffer refill at split boundaries (22 failures) |
 | `r7rs-expressions-gaps.scm` | literal identifier binding at use site (29/30) |
-| `r7rs-thin-forms-gaps.scm`, `r7rs-tail-position-gaps.scm`, `r7rs-tail-procedures-gaps.scm`, `r7rs-import-macro-gaps.scm`, `r7rs-libraries-gaps.scm` | SIGABRT during run |
+| `r7rs-tail-position-gaps.scm`, `r7rs-tail-procedures-gaps.scm`, `r7rs-import-macro-gaps.scm`, `r7rs-libraries-gaps.scm` | SIGABRT (investigating; TCO works in isolation) |
 | `r7rs-control-io-gaps.scm` | immutable environment / `eval` (4 failures) |
 | `r7rs-continuation-gaps.scm` | MV through continuations; `guard`/`raise` (2 failures) |
 | `r7rs-hygiene-gaps.scm` | ellipsis distribution in `syntax-rules` (2 failures) |
 | `record-ctor-clause-keyword-1882.scm` | R6RS clause-syntax records NYI |
-| `bugfixes.scm` | missing `hash-table-merge!` |
-| `deferred-bugfixes.scm` | missing `open-binary-input-file` |
-| `deferred-final.scm` | missing `open-binary-output-file` |
 | `srfi-completeness.scm` | multiple missing native SRFI libraries |
 
-## kaappi-deferred smoke (batch 1)
+## kaappi-deferred smoke
 
 Wired in CTest as `kaappi_deferred_smoke_*` (themes: core, macros, expander, GC,
-bignum). Enable with:
+bignum, fibers, ports). Enable with:
 
 ```bash
 ctest --output-on-failure -R kaappi_deferred_smoke
 ```
 
-**Green (16):** `basic`, `numeric`, `macros`, `expander-fixes`,
+**Green (43):** batch 1 — `basic`, `numeric`, `macros`, `expander-fixes`,
 `expander-many-patvars`, `gc-mark-contents-types`, `bignum-rational-arith`,
 `bignum-division-multi-arg`, `bignum-rational-normalization`, `not-not-non-boolean`,
 `zero-pred-type-error`, `literal-immutability`, `apply-shadowing`,
-`call-with-values-arity`, `binding-form-validation`, `memv-assv-numeric`.
+`call-with-values-arity`, `binding-form-validation`, `memv-assv-numeric`,
+`char-folding-fixes`, `expt-rational`, `tail-calls`; batch 2 —
+`bignum-expt-gc`, `closure-upvalue-gc`, `fiber-channel-gc`, `promise-gc`,
+`mutation-write-barrier`, `upvalue-write-barrier`, `ellipsis-mismatch`,
+`import-composed`, `bytevector-port-fixes`, `guard-continuable-845`,
+`arith-overflow`, `bare-lambda-self-tail-call`, `bignum-gc-alias-1414`,
+`callwithargs-bounds`, `case-arrow-register`, `continuation-wind-870`,
+`define-values-gc`, `dynamic-wind-double-875`, `exact-inexact-842-848`,
+`fiber-round-robin`, `hash-table-walk-rehash`, `inexact-to-exact`,
+`rational-rounding`, `string-trim-whitespace-826`.
+
+**Batch triage (239 unwired scanned):** ~123 pass locally with 15s timeout;
+116 fail/hang (SRFI-18 threads NYI, missing primitives, fixture libs, 3 hangs).
+See `/tmp/chaaya-smoke-final.txt` from batch run for per-file reasons.
 
 **Skipped in this batch (not green or Chaaya-deferred):**
 

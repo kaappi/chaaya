@@ -12,6 +12,41 @@
 #define CH_HYG_MAX 4096
 #define CH_EXPAND_DEPTH_MAX 256
 #define CH_ELLIPSIS_MAX 64
+#define CH_LITERAL_UNBOUND 0u
+#define CH_LITERAL_GLOBAL_BASE 0x80000000u
+
+static uint32_t global_binding_slot(ChVM *vm, ChSymbol *sym) {
+    const char *base = ch_symbol_basename(sym);
+    for (size_t i = 0; i < vm->global_count; i++) {
+        if (vm->globals[i].defined &&
+            strcmp(ch_symbol_basename(vm->globals[i].name), base) == 0) {
+            return CH_LITERAL_GLOBAL_BASE | (uint32_t)i;
+        }
+    }
+    if (vm->active_lib_env) {
+        for (size_t i = 0; i < vm->active_lib_env->count; i++) {
+            if (vm->active_lib_env->bindings[i].defined &&
+                strcmp(ch_symbol_basename(vm->active_lib_env->bindings[i].name), base) == 0) {
+                return CH_LITERAL_GLOBAL_BASE | (uint32_t)(vm->global_count + i);
+            }
+        }
+    }
+    return CH_LITERAL_UNBOUND;
+}
+
+static uint32_t resolve_expand_binding_slot(ChVM *vm, ChSymbol *sym) {
+    return global_binding_slot(vm, sym);
+}
+
+static int literal_index(ChTransformer *tr, ChSymbol *s) {
+    const char *base = ch_symbol_basename(s);
+    for (size_t i = 0; i < tr->literal_count; i++) {
+        if (tr->literals[i] == s || strcmp(ch_symbol_basename(tr->literals[i]), base) == 0) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
 
 typedef struct ChBinding {
     ChSymbol *var;
@@ -36,6 +71,23 @@ typedef struct ChExpandCtx {
     char *err;
     size_t err_len;
 } ChExpandCtx;
+
+static int literal_matches(ChExpandCtx *ctx, ChSymbol *pat_lit, ChValue use) {
+    if (!ch_is_symbol(use)) {
+        return 0;
+    }
+    ChSymbol *use_sym = ch_as_symbol(use);
+    int idx = literal_index(ctx->tr, pat_lit);
+    if (idx < 0) {
+        return 0;
+    }
+    uint32_t def_slot = ctx->tr->literal_bound[(size_t)idx];
+    uint32_t use_slot = resolve_expand_binding_slot(ctx->vm, use_sym);
+    if (def_slot == CH_LITERAL_UNBOUND && use_slot == CH_LITERAL_UNBOUND) {
+        return strcmp(ch_symbol_basename(pat_lit), ch_symbol_basename(use_sym)) == 0;
+    }
+    return def_slot != CH_LITERAL_UNBOUND && def_slot == use_slot;
+}
 
 static int is_ellipsis_id(ChExpandCtx *ctx, ChSymbol *s) {
     const char *base = ch_symbol_basename(s);
@@ -377,7 +429,7 @@ static int match_pattern(ChExpandCtx *ctx, ChValue pat, ChValue use, int under_e
     if (ch_is_symbol(pat)) {
         ChSymbol *s = ch_as_symbol(pat);
         if (is_literal(ctx, s)) {
-            return ch_is_symbol(use) && ch_as_symbol(use) == s;
+            return literal_matches(ctx, s, use);
         }
         return bind_var(ctx, s, use, under_ellipsis);
     }
@@ -797,7 +849,10 @@ ChExpandStatus ch_parse_syntax_rules(ChVM *vm, ChValue spec, ChTransformer **out
             snprintf(err, err_len, "syntax-rules: too many literals");
             return CH_EXPAND_ERROR;
         }
-        tr->literals[tr->literal_count++] = ch_as_symbol(ch_car(L));
+        tr->literals[tr->literal_count] = ch_as_symbol(ch_car(L));
+        tr->literal_bound[tr->literal_count] =
+            resolve_expand_binding_slot(vm, tr->literals[tr->literal_count]);
+        tr->literal_count++;
     }
     if (!ch_is_nil(lits_v) && !ch_is_pair(lits_v)) {
         ch_gc_pop(&vm->gc);

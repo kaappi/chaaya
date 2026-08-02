@@ -253,6 +253,7 @@ typedef struct ChPort {
 typedef struct ChTransformer {
     ChObject header;
     ChSymbol *literals[CH_TRANSFORMER_MAX_LITERALS];
+    uint32_t literal_bound[CH_TRANSFORMER_MAX_LITERALS];
     size_t literal_count;
     ChSymbol *ellipsis_id; /* NULL => "..." */
     ChValue patterns[CH_TRANSFORMER_MAX_RULES];
