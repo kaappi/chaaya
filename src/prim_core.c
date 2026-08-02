@@ -863,10 +863,17 @@ static ChValue prim_real_part(ChVM *vm, ChValue *args, int nargs) {
     if (!parts_or_error(vm, args[0], &re, &im, "real-part")) {
         return CH_UNDEFINED;
     }
-    if (ch_is_exact(args[0])) {
+    if (ch_is_exact(args[0]) && !ch_is_complex_obj(args[0])) {
         return args[0];
     }
     if (ch_is_complex_obj(args[0])) {
+        ChComplex *c = ch_as_complex(args[0]);
+        if (c->exact_real) {
+            ChValue ex = ch_exact_from_flonum(&vm->gc, re);
+            if (ex != CH_UNDEFINED) {
+                return ex;
+            }
+        }
         return maybe_integral_flonum(&vm->gc, re);
     }
     return ch_make_flonum(re);
@@ -878,10 +885,17 @@ static ChValue prim_imag_part(ChVM *vm, ChValue *args, int nargs) {
     if (!parts_or_error(vm, args[0], &re, &im, "imag-part")) {
         return CH_UNDEFINED;
     }
-    if (ch_is_exact(args[0])) {
+    if (ch_is_exact(args[0]) && !ch_is_complex_obj(args[0])) {
         return ch_make_fixnum(0);
     }
     if (ch_is_complex_obj(args[0])) {
+        ChComplex *c = ch_as_complex(args[0]);
+        if (c->exact_imag) {
+            ChValue ex = ch_exact_from_flonum(&vm->gc, im);
+            if (ex != CH_UNDEFINED) {
+                return ex;
+            }
+        }
         return maybe_integral_flonum(&vm->gc, im);
     }
     return ch_make_flonum(im);

@@ -231,10 +231,13 @@ ChValue ch_exact_from_flonum(ChGC *gc, double f) {
         if (f >= (double)CH_FIXNUM_MIN && f <= (double)CH_FIXNUM_MAX) {
             return ch_make_fixnum((int64_t)f);
         }
-        if (f >= (double)INT64_MIN && f <= (double)INT64_MAX) {
-            return ch_make_integer(gc, (int64_t)f);
+        if (f >= (double)INT64_MIN && f < (double)(INT64_MAX)) {
+            int64_t as_i64 = (int64_t)f;
+            if ((double)as_i64 == f) {
+                return ch_make_integer(gc, as_i64);
+            }
         }
-        /* Fall through to IEEE rational for huge integral floats. */
+        /* |f| exceeds int64 range — decompose via IEEE bits below. */
     }
 
     union {

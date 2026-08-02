@@ -1038,6 +1038,92 @@ static ChValue prim_truncate_div(ChVM *vm, ChValue *args, int nargs) {
     return exact_div_pair(vm, args[0], args[1], "truncate/", 0);
 }
 
+static ChValue exact_div_quotient(ChVM *vm, ChValue a, ChValue b, const char *who, int use_floor) {
+    if (ch_is_flonum(a) || ch_is_flonum(b)) {
+        double da, db;
+        if (!require_real(vm, a, who, &da) || !require_real(vm, b, who, &db)) {
+            return CH_UNDEFINED;
+        }
+        if (db == 0.0) {
+            snprintf(vm->error, sizeof(vm->error), "%s: division by zero", who);
+            return CH_UNDEFINED;
+        }
+        return ch_make_flonum(use_floor ? floor(da / db) : trunc(da / db));
+    }
+    if (!ch_is_exact_integer(a) || !ch_is_exact_integer(b)) {
+        snprintf(vm->error, sizeof(vm->error), "%s: expected exact integers", who);
+        return CH_UNDEFINED;
+    }
+    if (is_zero_int(b)) {
+        snprintf(vm->error, sizeof(vm->error), "%s: division by zero", who);
+        return CH_UNDEFINED;
+    }
+    ChGC *gc = &vm->gc;
+    ch_gc_push(gc, &a);
+    ch_gc_push(gc, &b);
+    ChValue q = ch_bignum_quotient(gc, a, b);
+    ChValue r = ch_bignum_remainder(gc, a, b);
+    if (use_floor && !is_zero_int(r) &&
+        ((ch_bignum_compare(a, ch_make_fixnum(0)) < 0) != (ch_bignum_compare(b, ch_make_fixnum(0)) < 0))) {
+        q = ch_bignum_sub(gc, q, ch_make_fixnum(1));
+    }
+    ch_gc_pop_n(gc, 2);
+    return q;
+}
+
+static ChValue exact_div_remainder(ChVM *vm, ChValue a, ChValue b, const char *who, int use_floor) {
+    if (ch_is_flonum(a) || ch_is_flonum(b)) {
+        double da, db;
+        if (!require_real(vm, a, who, &da) || !require_real(vm, b, who, &db)) {
+            return CH_UNDEFINED;
+        }
+        if (db == 0.0) {
+            snprintf(vm->error, sizeof(vm->error), "%s: division by zero", who);
+            return CH_UNDEFINED;
+        }
+        double q = use_floor ? floor(da / db) : trunc(da / db);
+        return ch_make_flonum(da - q * db);
+    }
+    if (!ch_is_exact_integer(a) || !ch_is_exact_integer(b)) {
+        snprintf(vm->error, sizeof(vm->error), "%s: expected exact integers", who);
+        return CH_UNDEFINED;
+    }
+    if (is_zero_int(b)) {
+        snprintf(vm->error, sizeof(vm->error), "%s: division by zero", who);
+        return CH_UNDEFINED;
+    }
+    ChGC *gc = &vm->gc;
+    ch_gc_push(gc, &a);
+    ch_gc_push(gc, &b);
+    ChValue r = ch_bignum_remainder(gc, a, b);
+    if (use_floor && !is_zero_int(r) &&
+        ((ch_bignum_compare(a, ch_make_fixnum(0)) < 0) != (ch_bignum_compare(b, ch_make_fixnum(0)) < 0))) {
+        r = ch_bignum_add(gc, r, b);
+    }
+    ch_gc_pop_n(gc, 2);
+    return r;
+}
+
+static ChValue prim_floor_quotient(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    return exact_div_quotient(vm, args[0], args[1], "floor-quotient", 1);
+}
+
+static ChValue prim_floor_remainder(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    return exact_div_remainder(vm, args[0], args[1], "floor-remainder", 1);
+}
+
+static ChValue prim_truncate_quotient(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    return exact_div_quotient(vm, args[0], args[1], "truncate-quotient", 0);
+}
+
+static ChValue prim_truncate_remainder(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    return exact_div_remainder(vm, args[0], args[1], "truncate-remainder", 0);
+}
+
 /* ---- string conversion ---- */
 
 static ChValue prim_number_to_string(ChVM *vm, ChValue *args, int nargs) {
@@ -1216,6 +1302,8 @@ void ch_register_math_primitives(ChVM *vm) {
     define_prim(vm, "rationalize", prim_rationalize, 2, 2);
     define_prim(vm, "exact", prim_exact, 1, 1);
     define_prim(vm, "inexact", prim_inexact, 1, 1);
+    define_prim(vm, "exact->inexact", prim_inexact, 1, 1);
+    define_prim(vm, "inexact->exact", prim_exact, 1, 1);
     define_prim(vm, "positive?", prim_positive_p, 1, 1);
     define_prim(vm, "negative?", prim_negative_p, 1, 1);
     define_prim(vm, "odd?", prim_odd_p, 1, 1);
@@ -1242,6 +1330,10 @@ void ch_register_math_primitives(ChVM *vm) {
     define_prim(vm, "exact-integer-sqrt", prim_exact_integer_sqrt, 1, 1);
     define_prim(vm, "floor/", prim_floor_div, 2, 2);
     define_prim(vm, "truncate/", prim_truncate_div, 2, 2);
+    define_prim(vm, "floor-quotient", prim_floor_quotient, 2, 2);
+    define_prim(vm, "floor-remainder", prim_floor_remainder, 2, 2);
+    define_prim(vm, "truncate-quotient", prim_truncate_quotient, 2, 2);
+    define_prim(vm, "truncate-remainder", prim_truncate_remainder, 2, 2);
     define_prim(vm, "number->string", prim_number_to_string, -1, 1);
     define_prim(vm, "string->number", prim_string_to_number, -1, 1);
 }

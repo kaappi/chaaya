@@ -182,6 +182,10 @@ bool ch_is_exact_integer(ChValue v) {
 }
 
 bool ch_is_exact(ChValue v) {
+    if (ch_is_complex_obj(v)) {
+        ChComplex *c = ch_as_complex(v);
+        return c->exact_real && c->exact_imag;
+    }
     return ch_is_exact_integer(v) || ch_is_rational_obj(v);
 }
 

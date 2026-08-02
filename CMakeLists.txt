@@ -238,6 +238,18 @@ chaaya_kaappi_deferred_test(chars tests/scheme/kaappi-deferred/compliance/chars.
 chaaya_kaappi_deferred_test(bytevectors tests/scheme/kaappi-deferred/compliance/bytevectors.scm)
 chaaya_kaappi_deferred_test(eval tests/scheme/kaappi-deferred/compliance/eval.scm)
 chaaya_kaappi_deferred_test(lazy tests/scheme/kaappi-deferred/compliance/lazy.scm)
+chaaya_kaappi_deferred_test(numeric_gaps tests/scheme/kaappi-deferred/compliance/numeric-gaps.scm)
+chaaya_kaappi_deferred_test(reader_numerics tests/scheme/kaappi-deferred/compliance/reader-numerics.scm)
+chaaya_kaappi_deferred_test(reader_surrogates tests/scheme/kaappi-deferred/compliance/reader-surrogates.scm)
+chaaya_kaappi_deferred_test(bignum_rational_gc tests/scheme/kaappi-deferred/compliance/bignum-rational-gc.scm)
+chaaya_kaappi_deferred_test(reader_delimiter_gaps tests/scheme/kaappi-deferred/compliance/reader-delimiter-gaps.scm)
+chaaya_kaappi_deferred_test(fold_case_unicode tests/scheme/kaappi-deferred/compliance/fold-case-unicode.scm)
+chaaya_kaappi_deferred_test(r7rs_chars_strings_gaps tests/scheme/kaappi-deferred/compliance/r7rs-chars-strings-gaps.scm)
+chaaya_kaappi_deferred_test(unicode tests/scheme/kaappi-deferred/compliance/unicode.scm)
+chaaya_kaappi_deferred_test(unicode_case tests/scheme/kaappi-deferred/compliance/unicode-case.scm)
+chaaya_kaappi_deferred_test(strings tests/scheme/kaappi-deferred/compliance/strings.scm)
+chaaya_kaappi_deferred_test(complex_strings tests/scheme/kaappi-deferred/compliance/complex-strings.scm)
+chaaya_kaappi_deferred_test(string_ports tests/scheme/kaappi-deferred/compliance/string-ports.scm)
 
 # Display probes adapted from Kaappi differential/probes
 function(chaaya_probe_test name)

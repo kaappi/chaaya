@@ -526,7 +526,8 @@ static void mag_mod_pow2(const uint64_t *num, size_t nl, uint32_t bits, uint64_t
     }
     memcpy(r, num, sizeof(uint64_t) * keep_limbs);
     size_t rbits = (size_t)bits % 64;
-    if (rbits != 0 && keep_limbs > 0) {
+    /* Mask the top limb only when the kept limbs span more bits than the modulus. */
+    if (rbits != 0 && keep_limbs > 0 && keep_limbs * 64 > (size_t)bits) {
         r[keep_limbs - 1] &= ((uint64_t)1 << rbits) - 1;
     }
     normalize_limbs(r, &keep_limbs);

@@ -62,6 +62,127 @@ static bool parse_slice(ChVM *vm, ChValue *args, int nargs, int start_arg, size_
     return true;
 }
 
+static bool utf8_decode_next(const char *bytes, size_t len, size_t pos, uint32_t *cp_out,
+                             size_t *next_out) {
+    if (pos >= len) {
+        return false;
+    }
+    const uint8_t b0 = (uint8_t)bytes[pos];
+    if (b0 < 0x80) {
+        *cp_out = b0;
+        *next_out = pos + 1;
+        return true;
+    }
+    if (b0 >= 0xC2 && b0 <= 0xDF) {
+        if (pos + 1 >= len) {
+            return false;
+        }
+        const uint8_t b1 = (uint8_t)bytes[pos + 1];
+        if ((b1 & 0xC0) != 0x80) {
+            return false;
+        }
+        *cp_out = ((uint32_t)(b0 & 0x1F) << 6) | (uint32_t)(b1 & 0x3F);
+        *next_out = pos + 2;
+        return true;
+    }
+    if (b0 >= 0xE0 && b0 <= 0xEF) {
+        if (pos + 2 >= len) {
+            return false;
+        }
+        const uint8_t b1 = (uint8_t)bytes[pos + 1];
+        const uint8_t b2 = (uint8_t)bytes[pos + 2];
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) {
+            return false;
+        }
+        *cp_out = ((uint32_t)(b0 & 0x0F) << 12) | ((uint32_t)(b1 & 0x3F) << 6) |
+                  (uint32_t)(b2 & 0x3F);
+        *next_out = pos + 3;
+        return true;
+    }
+    if (b0 >= 0xF0 && b0 <= 0xF4) {
+        if (pos + 3 >= len) {
+            return false;
+        }
+        const uint8_t b1 = (uint8_t)bytes[pos + 1];
+        const uint8_t b2 = (uint8_t)bytes[pos + 2];
+        const uint8_t b3 = (uint8_t)bytes[pos + 3];
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) {
+            return false;
+        }
+        *cp_out = ((uint32_t)(b0 & 0x07) << 18) | ((uint32_t)(b1 & 0x3F) << 12) |
+                  ((uint32_t)(b2 & 0x3F) << 6) | (uint32_t)(b3 & 0x3F);
+        *next_out = pos + 4;
+        return true;
+    }
+    return false;
+}
+
+static bool utf8_offset_for_codepoint_index(ChVM *vm, const ChString *s, size_t index,
+                                          const char *who, size_t *offset_out) {
+    size_t pos = 0;
+    size_t i = 0;
+    while (pos < s->len) {
+        if (i == index) {
+            *offset_out = pos;
+            return true;
+        }
+        uint32_t cp = 0;
+        size_t next = 0;
+        if (!utf8_decode_next(s->data, s->len, pos, &cp, &next)) {
+            snprintf(vm->error, sizeof(vm->error), "%s: invalid UTF-8 sequence", who);
+            return false;
+        }
+        (void)cp;
+        pos = next;
+        i++;
+    }
+    if (i == index) {
+        *offset_out = s->len;
+        return true;
+    }
+    snprintf(vm->error, sizeof(vm->error), "%s: slice out of range", who);
+    return false;
+}
+
+static bool parse_string_codepoint_slice(ChVM *vm, ChValue *args, int nargs, int start_arg,
+                                         const ChString *s, const char *who, size_t *start_out,
+                                         size_t *end_out) {
+    size_t cp_start = 0;
+    size_t cp_end = 0;
+    size_t cp_count = 0;
+    size_t pos = 0;
+    while (pos < s->len) {
+        uint32_t cp = 0;
+        size_t next = 0;
+        if (!utf8_decode_next(s->data, s->len, pos, &cp, &next)) {
+            snprintf(vm->error, sizeof(vm->error), "%s: invalid UTF-8 sequence", who);
+            return false;
+        }
+        (void)cp;
+        pos = next;
+        cp_count++;
+    }
+    cp_end = cp_count;
+    if (nargs > start_arg) {
+        if (!parse_nonnegative_index(vm, args[start_arg], &cp_start, who)) {
+            return false;
+        }
+    }
+    if (nargs > start_arg + 1) {
+        if (!parse_nonnegative_index(vm, args[start_arg + 1], &cp_end, who)) {
+            return false;
+        }
+    }
+    if (cp_start > cp_end || cp_end > cp_count) {
+        snprintf(vm->error, sizeof(vm->error), "%s: slice out of range", who);
+        return false;
+    }
+    if (!utf8_offset_for_codepoint_index(vm, s, cp_start, who, start_out)) {
+        return false;
+    }
+    return utf8_offset_for_codepoint_index(vm, s, cp_end, who, end_out);
+}
+
 static bool require_mutable_bytevector(ChVM *vm, ChBytevector *bv, const char *who) {
     if (ch_object_is_immutable(&bv->header)) {
         snprintf(vm->error, sizeof(vm->error), "%s: immutable bytevector", who);
@@ -324,8 +445,8 @@ static ChValue prim_string_to_utf8(ChVM *vm, ChValue *args, int nargs) {
     }
     ChString *s = ch_as_string(args[0]);
     size_t start = 0;
-    size_t end = s->len;
-    if (!parse_slice(vm, args, nargs, 1, s->len, "string->utf8", &start, &end)) {
+    size_t end = 0;
+    if (!parse_string_codepoint_slice(vm, args, nargs, 1, s, "string->utf8", &start, &end)) {
         return CH_UNDEFINED;
     }
     ChValue out = ch_gc_make_bytevector(&vm->gc, end - start, 0);
