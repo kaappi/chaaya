@@ -31,10 +31,16 @@ The variable `_` holds the last non-void result.
 | `,gc` | Object count / collections |
 | `,env [prefix]` | List defined globals |
 | `,time <expr>` | Eval and print elapsed ms |
-| `,type <expr>` | Eval and print type name |
+| `,expand <expr>` | Macro-expand and print |
+| `,import <lib>` | Import a library (e.g. `,import (srfi 64)`) |
+| `,dis <expr>` | Disassemble a procedure's bytecode |
+| `,break <name>` | Break when calling named procedure |
+| `,breakpoints` | List breakpoints |
+| `,delete <name>` | Remove breakpoint |
+| `,step <expr>` | Eval with one call trace |
 
-Other Kaappi comma-commands (`,break`, `,step`, `,expand`, `,import`, …) print
-a not-implemented message.
+Other Kaappi comma-commands (`,profile`, `,describe`, `,apropos`, …) print a
+not-implemented message.
 
 ## Key files
 

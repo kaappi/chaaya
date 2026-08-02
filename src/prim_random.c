@@ -261,7 +261,13 @@ static ChValue prim_random_source_state_ref(ChVM *vm, ChValue *args, int nargs) 
     ChValue result = CH_NIL;
     ch_gc_push(&vm->gc, &result);
     for (int i = 3; i >= 0; i--) {
-        ChValue word = ch_make_fixnum((int64_t)rs->s[i]);
+        uint64_t limb[1] = {rs->s[i]};
+        ChValue word;
+        if (rs->s[i] <= (uint64_t)CH_FIXNUM_MAX) {
+            word = ch_make_fixnum((int64_t)rs->s[i]);
+        } else {
+            word = ch_gc_make_bignum_from_limbs(&vm->gc, limb, 1, 1);
+        }
         ch_gc_push(&vm->gc, &word);
         result = ch_gc_cons(&vm->gc, word, result);
         ch_gc_pop(&vm->gc);

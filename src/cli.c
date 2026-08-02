@@ -4,6 +4,7 @@
 #include "chaaya/compiler.h"
 #include "chaaya/eval.h"
 #include "chaaya/expander.h"
+#include "chaaya/features.h"
 #include "chaaya/library.h"
 #include "chaaya/llvm_backend.h"
 #include "chaaya/lsp.h"
@@ -17,7 +18,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#include <libgen.h>
+
+static void apply_opts_to_vm(ChVM *vm, ChCliOptions *opts);
 
 static void usage_hint(const char *argv0) {
     fprintf(stderr, "Run '%s --help' for usage.\n", argv0);
@@ -327,6 +332,14 @@ int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
             out->file = a;
             continue;
         }
+        if (out->command == CH_CMD_TEST) {
+            if (out->script_arg_count >= CH_VM_MAX_SCRIPT_ARGS) {
+                fprintf(stderr, "too many test paths\n");
+                return CH_EXIT_USAGE;
+            }
+            out->script_args[out->script_arg_count++] = a;
+            continue;
+        }
         if (out->command == CH_CMD_RUN && out->file) {
             if (out->script_arg_count >= CH_VM_MAX_SCRIPT_ARGS) {
                 fprintf(stderr, "too many script arguments\n");
@@ -347,15 +360,124 @@ static int not_implemented(const char *what) {
     return CH_EXIT_ERROR;
 }
 
-static int cmd_test_stub(const char *argv0, const ChCliOptions *opts) {
-    fprintf(stderr, "chaaya: 'test' subcommand is bootstrap-only right now.\n");
-    fprintf(stderr, "Run bundled suites through CTest, e.g.:\n");
-    fprintf(stderr, "  ctest --output-on-failure -R r7rs_suite\n");
-    if (opts->file) {
-        fprintf(stderr, "For direct execution, run:\n");
-        fprintf(stderr, "  %s --lib-path ./lib %s\n", argv0, opts->file);
+static int run_test_subprocess(const char *argv0, ChCliOptions *opts, const char *path) {
+    char exe[1024];
+    if (realpath(argv0, exe) == NULL) {
+        if (snprintf(exe, sizeof(exe), "%s", argv0) >= (int)sizeof(exe)) {
+            fprintf(stderr, "test: argv0 path too long\n");
+            return -1;
+        }
     }
-    return CH_EXIT_ERROR;
+
+    char dir_copy[1024];
+    char file_copy[1024];
+    if (snprintf(dir_copy, sizeof(dir_copy), "%s", path) >= (int)sizeof(dir_copy) ||
+        snprintf(file_copy, sizeof(file_copy), "%s", path) >= (int)sizeof(file_copy)) {
+        fprintf(stderr, "test: path too long: %s\n", path);
+        return -1;
+    }
+    char *dir = dirname(dir_copy);
+    const char *file = basename(file_copy);
+
+    char lib_abs[CH_VM_MAX_LIB_PATHS][1024];
+    const char *resolved_libs[CH_VM_MAX_LIB_PATHS];
+    for (size_t i = 0; i < opts->lib_path_count; i++) {
+        if (realpath(opts->lib_paths[i], lib_abs[i]) != NULL) {
+            resolved_libs[i] = lib_abs[i];
+        } else {
+            resolved_libs[i] = opts->lib_paths[i];
+        }
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "test: fork failed for %s\n", path);
+        return -1;
+    }
+    if (pid == 0) {
+        if (chdir(dir) != 0) {
+            _exit(127);
+        }
+        char **child_argv = NULL;
+        size_t argc = 0;
+        size_t cap = 16;
+        child_argv = (char **)calloc(cap, sizeof(char *));
+        if (!child_argv) {
+            _exit(127);
+        }
+        child_argv[argc++] = exe;
+        for (size_t i = 0; i < opts->lib_path_count; i++) {
+            if (argc + 2 >= cap) {
+                cap *= 2;
+                char **n = (char **)realloc(child_argv, cap * sizeof(char *));
+                if (!n) {
+                    free(child_argv);
+                    _exit(127);
+                }
+                child_argv = n;
+            }
+            child_argv[argc++] = (char *)"--lib-path";
+            child_argv[argc++] = (char *)resolved_libs[i];
+        }
+        if (argc + 2 >= cap) {
+            cap += 2;
+            char **n = (char **)realloc(child_argv, cap * sizeof(char *));
+            if (!n) {
+                free(child_argv);
+                _exit(127);
+            }
+            child_argv = n;
+        }
+        child_argv[argc++] = (char *)file;
+        child_argv[argc] = NULL;
+        execv(exe, child_argv);
+        free(child_argv);
+        _exit(127);
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        fprintf(stderr, "test: waitpid failed for %s\n", path);
+        return -1;
+    }
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status) == 0 ? 0 : -1;
+    }
+    fprintf(stderr, "test: abnormal exit for %s\n", path);
+    return -1;
+}
+
+static int cmd_test(const char *argv0, ChCliOptions *opts) {
+    if (!opts->file) {
+        fprintf(stderr, "test: missing test file (pass one or more .scm paths)\n");
+        fprintf(stderr, "Usage: %s test [--lib-path ./lib] file.scm [more...]\n", argv0);
+        return CH_EXIT_USAGE;
+    }
+
+    size_t path_count = 1 + opts->script_arg_count;
+    const char *paths[1 + CH_VM_MAX_SCRIPT_ARGS];
+    paths[0] = opts->file;
+    for (size_t i = 0; i < opts->script_arg_count; i++) {
+        paths[i + 1] = opts->script_args[i];
+    }
+
+    int failed = 0;
+    for (size_t i = 0; i < path_count; i++) {
+        const char *path = paths[i];
+        if (run_test_subprocess(argv0, opts, path) == 0) {
+            printf("PASS %s\n", path);
+        } else {
+            fprintf(stderr, "FAIL %s\n", path);
+            failed++;
+        }
+    }
+
+    if (failed > 0) {
+        fprintf(stderr, "test: %d/%zu file(s) failed\n", failed, path_count);
+        return CH_EXIT_ERROR;
+    }
+    printf("test: %zu file(s) passed\n", path_count);
+    return CH_EXIT_OK;
 }
 
 static int cmd_wasm_stub(void) {
@@ -404,49 +526,11 @@ static void print_completions(const char *shell) {
     fprintf(stderr, "unknown shell for --completions: %s (want bash, zsh, or fish)\n", shell);
 }
 
-static int cmd_features(int json) {
-    if (json) {
-        printf("{\n");
-        printf("  \"implementation\": \"chaaya\",\n");
-        printf("  \"version\": \"%s\",\n", CHAAYA_VERSION);
-        printf("  \"language\": \"C23\",\n");
-#ifdef CHAAYA_HAS_LINENOISE
-        printf("  \"linenoise\": true,\n");
-#else
-        printf("  \"linenoise\": false,\n");
-#endif
-        printf("  \"opcodes\": %d,\n", (int)CH_OP_HALT + 1);
-        printf("  \"stage\": \"bootstrap\",\n");
-        printf("  \"call_cc\": true,\n");
-        printf("  \"dynamic_wind\": true,\n");
-        printf("  \"exceptions\": true,\n");
-        printf("  \"r7rs_small\": false,\n");
-        printf("  \"libraries\": true,\n");
-        printf("  \"macros\": true,\n");
-        printf("  \"native_backend\": \"stub\",\n");
-        printf("  \"wasm_backend\": \"stub\",\n");
-        printf("  \"lsp\": \"stub\"\n");
-        printf("}\n");
-    } else {
-        printf("%s\n", CHAAYA_VERSION_BANNER);
-        printf("language:     C23\n");
-#ifdef CHAAYA_HAS_LINENOISE
-        printf("linenoise:    yes\n");
-#else
-        printf("linenoise:    no\n");
-#endif
-        printf("opcodes:      %d\n", (int)CH_OP_HALT + 1);
-        printf("stage:        bootstrap\n");
-        printf("call/cc:      yes\n");
-        printf("dynamic-wind: yes\n");
-        printf("exceptions:   yes\n");
-        printf("r7rs-small:   partial\n");
-        printf("libraries:    yes\n");
-        printf("macros:       yes\n");
-        printf("native:       stub (--native)\n");
-        printf("wasm:         stub (chaaya wasm)\n");
-        printf("lsp:          stub (chaaya lsp)\n");
+static int cmd_features(ChCliOptions *opts) {
+    if (opts->json) {
+        return ch_features_print_json(stdout, opts->lib_paths, opts->lib_path_count);
     }
+    ch_features_print_text(stdout);
     return CH_EXIT_OK;
 }
 
@@ -911,7 +995,7 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
 
     switch (opts->command) {
     case CH_CMD_FEATURES:
-        return cmd_features(opts->json);
+        return cmd_features(opts);
     case CH_CMD_DOCTOR:
         return cmd_doctor(opts);
     case CH_CMD_LSP:
@@ -941,7 +1025,7 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
     case CH_CMD_EXPLAIN:
         return not_implemented("explain");
     case CH_CMD_TEST:
-        return cmd_test_stub(argv0, opts);
+        return cmd_test(argv0, opts);
     case CH_CMD_EXPAND:
         if (!opts->file) {
             fprintf(stderr, "expand: missing file\n");

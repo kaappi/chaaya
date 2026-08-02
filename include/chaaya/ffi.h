@@ -14,9 +14,21 @@ typedef enum ChFFIType {
     CH_FFI_TYPE_INT = 1,
     CH_FFI_TYPE_DOUBLE = 2,
     CH_FFI_TYPE_POINTER = 3,
+    CH_FFI_TYPE_FLOAT = 4,
+    CH_FFI_TYPE_BOOL = 5,
+    CH_FFI_TYPE_INT8 = 6,
+    CH_FFI_TYPE_UINT8 = 7,
+    CH_FFI_TYPE_INT16 = 8,
+    CH_FFI_TYPE_UINT16 = 9,
+    CH_FFI_TYPE_INT32 = 10,
+    CH_FFI_TYPE_UINT32 = 11,
+    CH_FFI_TYPE_INT64 = 12,
+    CH_FFI_TYPE_UINT64 = 13,
+    CH_FFI_TYPE_SIZE = 14,
+    CH_FFI_TYPE_LONG = 15,
 } ChFFIType;
 
-#define CH_FFI_MAX_ARGS 2
+#define CH_FFI_MAX_ARGS 8
 
 typedef struct ChForeignLibrary {
     ChObject header;

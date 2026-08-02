@@ -407,14 +407,63 @@ bool ch_eqv(ChValue a, ChValue b) {
     return false;
 }
 
-static bool equal_list(ChValue a, ChValue b);
+#define CH_EQUAL_VISITED_MAX 256
 
-bool ch_equal(ChValue a, ChValue b) {
+typedef struct ChEqualPair {
+    ChValue a;
+    ChValue b;
+} ChEqualPair;
+
+static bool equal_with_visited(ChValue a, ChValue b, ChEqualPair *visited, size_t *nvisited);
+
+static bool equal_pair_seen(ChValue a, ChValue b, ChEqualPair *visited, size_t nvisited);
+static bool equal_push_pair(ChValue a, ChValue b, ChEqualPair *visited, size_t *nvisited);
+
+static bool equal_list(ChValue a, ChValue b, ChEqualPair *visited, size_t *nvisited) {
+    while (true) {
+        if (!ch_is_pair(a) || !ch_is_pair(b)) {
+            return equal_with_visited(a, b, visited, nvisited);
+        }
+        if (equal_pair_seen(a, b, visited, *nvisited)) {
+            return true;
+        }
+        if (!equal_push_pair(a, b, visited, nvisited)) {
+            return false;
+        }
+        if (!equal_with_visited(ch_car(a), ch_car(b), visited, nvisited)) {
+            return false;
+        }
+        a = ch_cdr(a);
+        b = ch_cdr(b);
+    }
+}
+
+static bool equal_pair_seen(ChValue a, ChValue b, ChEqualPair *visited, size_t nvisited) {
+    for (size_t i = 0; i < nvisited; i++) {
+        if ((visited[i].a == a && visited[i].b == b) ||
+            (visited[i].a == b && visited[i].b == a)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool equal_push_pair(ChValue a, ChValue b, ChEqualPair *visited, size_t *nvisited) {
+    if (*nvisited >= CH_EQUAL_VISITED_MAX) {
+        return false;
+    }
+    visited[*nvisited].a = a;
+    visited[*nvisited].b = b;
+    (*nvisited)++;
+    return true;
+}
+
+static bool equal_with_visited(ChValue a, ChValue b, ChEqualPair *visited, size_t *nvisited) {
     if (ch_eqv(a, b)) {
         return true;
     }
     if (ch_is_pair(a) && ch_is_pair(b)) {
-        return equal_list(a, b);
+        return equal_list(a, b, visited, nvisited);
     }
     if (ch_is_string(a) && ch_is_string(b)) {
         ChString *sa = ch_as_string(a);
@@ -430,8 +479,14 @@ bool ch_equal(ChValue a, ChValue b) {
         if (va->len != vb->len) {
             return false;
         }
+        if (equal_pair_seen(a, b, visited, *nvisited)) {
+            return true;
+        }
+        if (!equal_push_pair(a, b, visited, nvisited)) {
+            return false;
+        }
         for (size_t i = 0; i < va->len; i++) {
-            if (!ch_equal(va->items[i], vb->items[i])) {
+            if (!equal_with_visited(va->items[i], vb->items[i], visited, nvisited)) {
                 return false;
             }
         }
@@ -451,13 +506,8 @@ bool ch_equal(ChValue a, ChValue b) {
     return false;
 }
 
-static bool equal_list(ChValue a, ChValue b) {
-    while (ch_is_pair(a) && ch_is_pair(b)) {
-        if (!ch_equal(ch_car(a), ch_car(b))) {
-            return false;
-        }
-        a = ch_cdr(a);
-        b = ch_cdr(b);
-    }
-    return ch_equal(a, b);
+bool ch_equal(ChValue a, ChValue b) {
+    ChEqualPair visited[CH_EQUAL_VISITED_MAX];
+    size_t nvisited = 0;
+    return equal_with_visited(a, b, visited, &nvisited);
 }

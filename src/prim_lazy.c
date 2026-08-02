@@ -85,14 +85,17 @@ static ChValue prim_force(ChVM *vm, ChValue *args, int nargs) {
                 pr->forcing = 0;
                 pr->forced = 1;
                 pr->value = res_pr->value;
+                ch_gc_write_barrier(&vm->gc, &pr->header, pr->value);
                 obj = res_pr->value;
                 ch_gc_pop_n(&vm->gc, 2);
                 continue;
             }
             /* delay-force merge: outer keeps forcing cleared; alias onto result. */
             pr->value = res_pr->value;
+            ch_gc_write_barrier(&vm->gc, &pr->header, pr->value);
             res_pr->forced = 1;
             res_pr->value = obj;
+            ch_gc_write_barrier(&vm->gc, &res_pr->header, res_pr->value);
             pr->forcing = 0;
             ch_gc_pop_n(&vm->gc, 2);
             continue;
@@ -101,6 +104,7 @@ static ChValue prim_force(ChVM *vm, ChValue *args, int nargs) {
         pr->forced = 1;
         pr->forcing = 0;
         pr->value = result;
+        ch_gc_write_barrier(&vm->gc, &pr->header, pr->value);
         ch_gc_pop_n(&vm->gc, 3);
         return result;
     }

@@ -56,7 +56,7 @@ static int parse_arg_types(ChVM *vm, ChValue list, ChFFIType *types, uint8_t *ar
     while (ch_is_pair(it)) {
         if (count >= CH_FFI_MAX_ARGS) {
             snprintf(vm->error, sizeof(vm->error),
-                     "foreign-procedure: MVP supports at most %d arguments", CH_FFI_MAX_ARGS);
+                     "foreign-procedure: supports at most %d arguments", CH_FFI_MAX_ARGS);
             return -1;
         }
         ChValue type_sym = ch_car(it);
@@ -121,6 +121,31 @@ static ChValue prim_foreign_procedure(ChVM *vm, ChValue *args, int nargs) {
     return proc;
 }
 
+static void retarget_error_prefix(ChVM *vm, const char *from, const char *to) {
+    size_t from_len = strlen(from);
+    if (strncmp(vm->error, from, from_len) == 0) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "%s%s", to, vm->error + from_len);
+        snprintf(vm->error, sizeof(vm->error), "%s", buf);
+    }
+}
+
+static ChValue prim_ffi_open(ChVM *vm, ChValue *args, int nargs) {
+    ChValue result = prim_open_foreign_library(vm, args, nargs);
+    if (result == CH_UNDEFINED && vm->error[0]) {
+        retarget_error_prefix(vm, "open-foreign-library:", "ffi-open:");
+    }
+    return result;
+}
+
+static ChValue prim_ffi_fn(ChVM *vm, ChValue *args, int nargs) {
+    ChValue result = prim_foreign_procedure(vm, args, nargs);
+    if (result == CH_UNDEFINED && vm->error[0]) {
+        retarget_error_prefix(vm, "foreign-procedure:", "ffi-fn:");
+    }
+    return result;
+}
+
 void ch_register_ffi_primitives(ChVM *vm) {
     define_prim(vm, "open-foreign-library", prim_open_foreign_library, 1, 1);
     define_prim(vm, "close-foreign-library!", prim_close_foreign_library, 1, 1);
@@ -129,7 +154,7 @@ void ch_register_ffi_primitives(ChVM *vm) {
     define_prim(vm, "foreign-procedure?", prim_foreign_procedure_p, 1, 1);
 
     /* Compatibility aliases used by Kaappi smoke tests. */
-    define_prim(vm, "ffi-open", prim_open_foreign_library, 1, 1);
+    define_prim(vm, "ffi-open", prim_ffi_open, 1, 1);
     define_prim(vm, "ffi-close", prim_close_foreign_library, 1, 1);
-    define_prim(vm, "ffi-fn", prim_foreign_procedure, 4, 4);
+    define_prim(vm, "ffi-fn", prim_ffi_fn, 4, 4);
 }

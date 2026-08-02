@@ -77,6 +77,7 @@ typedef struct ChObject {
 #define CH_OBJ_GEN_YOUNG 0u
 #define CH_OBJ_GEN_OLD 1u
 #define CH_OBJ_FLAG_IMMUTABLE 0x0001u
+#define CH_OBJ_FLAG_UNINTERNED 0x0002u
 
 static inline bool ch_object_is_immutable(const ChObject *obj) {
     return obj && (obj->reserved & CH_OBJ_FLAG_IMMUTABLE) != 0;
@@ -108,6 +109,10 @@ typedef struct ChSymbol {
     size_t len;
     char name[]; /* flexible array, null-terminated */
 } ChSymbol;
+
+static inline bool ch_symbol_is_interned(const ChSymbol *sym) {
+    return sym && (sym->header.reserved & CH_OBJ_FLAG_UNINTERNED) == 0;
+}
 
 typedef struct ChString {
     ChObject header;
@@ -234,6 +239,7 @@ typedef struct ChPort {
     uint8_t input;
     uint8_t output;
     uint8_t closed;
+    uint8_t binary; /* file ports: #t => binary-port?, #f => textual-port? */
     FILE *file; /* CH_PORT_STDIO */
     char *buf;  /* string/bytevector ports (owned) */
     size_t len;
@@ -317,6 +323,7 @@ typedef struct ChParameter {
 typedef enum ChHashtableMode {
     CH_HASHTABLE_EQ = 0,
     CH_HASHTABLE_EQV = 1,
+    CH_HASHTABLE_EQUAL = 2,
 } ChHashtableMode;
 
 typedef struct ChHashtable {

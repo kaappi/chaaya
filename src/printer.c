@@ -504,6 +504,8 @@ static void print_value_atom(FILE *out, ChValue v, bool display) {
         ChSymbol *sym = ch_as_symbol(v);
         if (display) {
             fputs(sym->name, out);
+        } else if (!ch_symbol_is_interned(sym)) {
+            fprintf(out, "#<uninterned-symbol %s>", sym->name);
         } else {
             print_symbol_write(out, sym->name, strlen(sym->name));
         }

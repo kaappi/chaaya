@@ -273,7 +273,14 @@ static ChValue prim_textual_port_p(ChVM *vm, ChValue *args, int nargs) {
     if (!ch_is_port(args[0])) {
         return CH_FALSE;
     }
-    return ch_as_port(args[0])->kind == CH_PORT_BYTEVECTOR ? CH_FALSE : CH_TRUE;
+    ChPort *p = ch_as_port(args[0]);
+    if (p->kind == CH_PORT_BYTEVECTOR) {
+        return CH_FALSE;
+    }
+    if (p->kind == CH_PORT_FILE) {
+        return p->binary ? CH_FALSE : CH_TRUE;
+    }
+    return CH_TRUE;
 }
 
 static ChValue prim_binary_port_p(ChVM *vm, ChValue *args, int nargs) {
@@ -282,7 +289,14 @@ static ChValue prim_binary_port_p(ChVM *vm, ChValue *args, int nargs) {
     if (!ch_is_port(args[0])) {
         return CH_FALSE;
     }
-    return ch_as_port(args[0])->kind == CH_PORT_BYTEVECTOR ? CH_TRUE : CH_FALSE;
+    ChPort *p = ch_as_port(args[0]);
+    if (p->kind == CH_PORT_BYTEVECTOR) {
+        return CH_TRUE;
+    }
+    if (p->kind == CH_PORT_FILE) {
+        return p->binary ? CH_TRUE : CH_FALSE;
+    }
+    return CH_FALSE;
 }
 
 static ChValue prim_eof_object_p(ChVM *vm, ChValue *args, int nargs) {
@@ -453,11 +467,11 @@ static ChValue prim_open_input_file(ChVM *vm, ChValue *args, int nargs) {
     if (!path) {
         return CH_UNDEFINED;
     }
-    FILE *f = fopen(path, "rb");
+    FILE *f = fopen(path, "r");
     if (!f) {
         return raise_file_error(vm, "open-input-file: cannot open file", args[0]);
     }
-    return ch_gc_make_file_port(&vm->gc, f, 1, 0);
+    return ch_gc_make_file_port(&vm->gc, f, 1, 0, 0);
 }
 
 static ChValue prim_open_output_file(ChVM *vm, ChValue *args, int nargs) {
@@ -466,11 +480,37 @@ static ChValue prim_open_output_file(ChVM *vm, ChValue *args, int nargs) {
     if (!path) {
         return CH_UNDEFINED;
     }
-    FILE *f = fopen(path, "wb");
+    FILE *f = fopen(path, "w");
     if (!f) {
         return raise_file_error(vm, "open-output-file: cannot open file", args[0]);
     }
-    return ch_gc_make_file_port(&vm->gc, f, 0, 1);
+    return ch_gc_make_file_port(&vm->gc, f, 0, 1, 0);
+}
+
+static ChValue prim_open_binary_input_file(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    const char *path = require_path(vm, args[0], "open-binary-input-file");
+    if (!path) {
+        return CH_UNDEFINED;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return raise_file_error(vm, "open-binary-input-file: cannot open file", args[0]);
+    }
+    return ch_gc_make_file_port(&vm->gc, f, 1, 0, 1);
+}
+
+static ChValue prim_open_binary_output_file(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    const char *path = require_path(vm, args[0], "open-binary-output-file");
+    if (!path) {
+        return CH_UNDEFINED;
+    }
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        return raise_file_error(vm, "open-binary-output-file: cannot open file", args[0]);
+    }
+    return ch_gc_make_file_port(&vm->gc, f, 0, 1, 1);
 }
 
 static ChValue prim_file_exists_p(ChVM *vm, ChValue *args, int nargs) {
@@ -1270,6 +1310,106 @@ static ChValue prim_read(ChVM *vm, ChValue *args, int nargs) {
     return out;
 }
 
+static bool port_can_position(ChPort *port) {
+    if (port->closed) {
+        return false;
+    }
+    switch (port->kind) {
+    case CH_PORT_STRING_IN:
+    case CH_PORT_STRING_OUT:
+    case CH_PORT_BYTEVECTOR:
+        return true;
+    case CH_PORT_FILE:
+        if (port->file) {
+            long cur = ftell(port->file);
+            return cur >= 0;
+        }
+        return false;
+    default:
+        return false;
+    }
+}
+
+static ChValue prim_port_position(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_port(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "port-position: expected port");
+        return CH_UNDEFINED;
+    }
+    ChPort *port = ch_as_port(args[0]);
+    if (port->closed) {
+        snprintf(vm->error, sizeof(vm->error), "port-position: port is closed");
+        return CH_UNDEFINED;
+    }
+    if (!port_can_position(port)) {
+        snprintf(vm->error, sizeof(vm->error), "port-position: port does not support positioning");
+        return CH_UNDEFINED;
+    }
+    if (port->kind == CH_PORT_FILE && port->file) {
+        long pos = ftell(port->file);
+        if (pos < 0) {
+            snprintf(vm->error, sizeof(vm->error), "port-position: port does not support positioning");
+            return CH_UNDEFINED;
+        }
+        return ch_make_fixnum(pos);
+    }
+    return ch_make_fixnum((int64_t)port->pos);
+}
+
+static ChValue prim_set_port_position_bang(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_port(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "set-port-position!: expected port");
+        return CH_UNDEFINED;
+    }
+    if (!ch_is_fixnum(args[1])) {
+        snprintf(vm->error, sizeof(vm->error), "set-port-position!: expected exact integer");
+        return CH_UNDEFINED;
+    }
+    int64_t pos = ch_to_fixnum(args[1]);
+    if (pos < 0) {
+        snprintf(vm->error, sizeof(vm->error), "set-port-position!: expected non-negative integer");
+        return CH_UNDEFINED;
+    }
+    ChPort *port = ch_as_port(args[0]);
+    if (port->closed) {
+        snprintf(vm->error, sizeof(vm->error), "set-port-position!: port is closed");
+        return CH_UNDEFINED;
+    }
+    if (port->output && port->kind == CH_PORT_FILE && port->file) {
+        fflush(port->file);
+    }
+    if (port->kind == CH_PORT_FILE && port->file) {
+        if (fseek(port->file, pos, SEEK_SET) != 0) {
+            snprintf(vm->error, sizeof(vm->error),
+                     "set-port-position!: invalid position or port does not support positioning");
+            return CH_UNDEFINED;
+        }
+        return CH_VOID;
+    }
+    if (port->kind == CH_PORT_STRING_IN || port->kind == CH_PORT_STRING_OUT ||
+        port->kind == CH_PORT_BYTEVECTOR) {
+        if ((size_t)pos > port->len) {
+            snprintf(vm->error, sizeof(vm->error), "set-port-position!: index out of range");
+            return CH_UNDEFINED;
+        }
+        port->pos = (size_t)pos;
+        return CH_VOID;
+    }
+    snprintf(vm->error, sizeof(vm->error),
+             "set-port-position!: invalid position or port does not support positioning");
+    return CH_UNDEFINED;
+}
+
+static ChValue prim_port_has_port_position_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_port(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "port-has-port-position?: expected port");
+        return CH_UNDEFINED;
+    }
+    return port_can_position(ch_as_port(args[0])) ? CH_TRUE : CH_FALSE;
+}
+
 void ch_register_port_primitives(ChVM *vm) {
     ChValue in = ch_gc_make_stdio_port(&vm->gc, stdin, 1, 0);
     ChValue out = ch_gc_make_stdio_port(&vm->gc, stdout, 0, 1);
@@ -1308,6 +1448,8 @@ void ch_register_port_primitives(ChVM *vm) {
     define_prim(vm, "flush-output-port", prim_flush_output_port, -1, 0);
     define_prim(vm, "open-input-file", prim_open_input_file, 1, 1);
     define_prim(vm, "open-output-file", prim_open_output_file, 1, 1);
+    define_prim(vm, "open-binary-input-file", prim_open_binary_input_file, 1, 1);
+    define_prim(vm, "open-binary-output-file", prim_open_binary_output_file, 1, 1);
     define_prim(vm, "file-exists?", prim_file_exists_p, 1, 1);
     define_prim(vm, "delete-file", prim_delete_file, 1, 1);
     define_prim(vm, "call-with-port", prim_call_with_port, 2, 2);
@@ -1337,6 +1479,10 @@ void ch_register_port_primitives(ChVM *vm) {
     define_prim(vm, "write-shared", prim_write_shared, -1, 1);
     define_prim(vm, "write-simple", prim_write_simple, -1, 1);
     define_prim(vm, "newline", prim_newline, -1, 0);
+    define_prim(vm, "port-position", prim_port_position, 1, 1);
+    define_prim(vm, "set-port-position!", prim_set_port_position_bang, 2, 2);
+    define_prim(vm, "port-has-port-position?", prim_port_has_port_position_p, 1, 1);
+    define_prim(vm, "port-has-set-port-position!?", prim_port_has_port_position_p, 1, 1);
 
     /* Current ports are parameter objects (R7RS dynamic binding). */
     set_global(vm, "current-input-port", in_param);

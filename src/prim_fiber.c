@@ -79,6 +79,15 @@ static ChValue prim_channel_p(ChVM *vm, ChValue *args, int nargs) {
     return ch_is_channel(args[0]) ? CH_TRUE : CH_FALSE;
 }
 
+static ChValue prim_fiber_join(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChValue result = CH_UNDEFINED;
+    if (ch_fiber_join(vm, args[0], &result) != 0) {
+        return CH_UNDEFINED;
+    }
+    return result;
+}
+
 static ChValue thread_nyi(ChVM *vm, const char *who) {
     snprintf(vm->error, sizeof(vm->error), "%s: SRFI-18 threads are NYI in this MVP", who);
     return CH_UNDEFINED;
@@ -148,12 +157,17 @@ static ChValue prim_mutex_p(ChVM *vm, ChValue *args, int nargs) {
 
 void ch_register_fiber_primitives(ChVM *vm) {
     define_prim(vm, "spawn-fiber", prim_spawn_fiber, 1, 1);
+    define_prim(vm, "spawn", prim_spawn_fiber, 1, 1);
     define_prim(vm, "fiber-yield", prim_fiber_yield, 0, 0);
+    define_prim(vm, "yield", prim_fiber_yield, 0, 0);
     define_prim(vm, "fiber?", prim_fiber_p, 1, 1);
+    define_prim(vm, "fiber-join", prim_fiber_join, 1, 1);
     define_prim(vm, "make-channel", prim_make_channel, -1, 0);
     define_prim(vm, "channel?", prim_channel_p, 1, 1);
     define_prim(vm, "channel-send!", prim_channel_send, 2, 2);
+    define_prim(vm, "channel-send", prim_channel_send, 2, 2);
     define_prim(vm, "channel-recv", prim_channel_recv, 1, 1);
+    define_prim(vm, "channel-receive", prim_channel_recv, 1, 1);
 
     /* SRFI-18 subset stubs with explicit NYI errors. */
     define_prim(vm, "make-thread", prim_make_thread, -1, 1);

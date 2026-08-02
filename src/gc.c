@@ -659,6 +659,20 @@ ChValue ch_gc_intern_symbol_cstr(ChGC *gc, const char *name) {
     return ch_gc_intern_symbol(gc, name, strlen(name));
 }
 
+ChValue ch_gc_alloc_uninterned_symbol(ChGC *gc, const char *name, size_t len) {
+    ChSymbol *sym = (ChSymbol *)ch_gc_alloc(gc, sizeof(ChSymbol) + len + 1, CH_TAG_SYMBOL);
+    sym->len = len;
+    memcpy(sym->name, name, len);
+    sym->name[len] = '\0';
+    ch_object_set_immutable(&sym->header, true);
+    sym->header.reserved = (uint16_t)(sym->header.reserved | CH_OBJ_FLAG_UNINTERNED);
+    return ch_make_pointer(&sym->header);
+}
+
+ChValue ch_gc_alloc_uninterned_symbol_cstr(ChGC *gc, const char *name) {
+    return ch_gc_alloc_uninterned_symbol(gc, name, strlen(name));
+}
+
 ChValue ch_gc_make_vector(ChGC *gc, size_t len, ChValue fill) {
     ChValue fill_r = fill;
     ch_gc_push(gc, &fill_r);
@@ -723,6 +737,7 @@ static void init_port_common(ChPort *p, ChPortKind kind, int input, int output) 
     p->input = (uint8_t)(input ? 1 : 0);
     p->output = (uint8_t)(output ? 1 : 0);
     p->closed = 0;
+    p->binary = 0;
     p->file = NULL;
     p->buf = NULL;
     p->len = 0;
@@ -841,9 +856,10 @@ ChValue ch_gc_make_promise(ChGC *gc, int forced, ChValue value) {
     return ch_make_pointer(&pr->header);
 }
 
-ChValue ch_gc_make_file_port(ChGC *gc, FILE *file, int input, int output) {
+ChValue ch_gc_make_file_port(ChGC *gc, FILE *file, int input, int output, int binary) {
     ChPort *p = (ChPort *)ch_gc_alloc(gc, sizeof(ChPort), CH_TAG_PORT);
     init_port_common(p, CH_PORT_FILE, input, output);
+    p->binary = (uint8_t)(binary ? 1 : 0);
     p->file = file;
     return ch_make_pointer(&p->header);
 }

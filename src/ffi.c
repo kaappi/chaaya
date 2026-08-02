@@ -36,6 +36,30 @@ const char *ch_ffi_type_name(ChFFIType type) {
         return "double";
     case CH_FFI_TYPE_POINTER:
         return "pointer";
+    case CH_FFI_TYPE_FLOAT:
+        return "float";
+    case CH_FFI_TYPE_BOOL:
+        return "bool";
+    case CH_FFI_TYPE_INT8:
+        return "int8";
+    case CH_FFI_TYPE_UINT8:
+        return "uint8";
+    case CH_FFI_TYPE_INT16:
+        return "int16";
+    case CH_FFI_TYPE_UINT16:
+        return "uint16";
+    case CH_FFI_TYPE_INT32:
+        return "int32";
+    case CH_FFI_TYPE_UINT32:
+        return "uint32";
+    case CH_FFI_TYPE_INT64:
+        return "int64";
+    case CH_FFI_TYPE_UINT64:
+        return "uint64";
+    case CH_FFI_TYPE_SIZE:
+        return "size_t";
+    case CH_FFI_TYPE_LONG:
+        return "long";
     }
     return "unknown";
 }
@@ -49,13 +73,60 @@ int ch_ffi_parse_type_symbol(ChValue sym, ChFFIType *out_type) {
         *out_type = CH_FFI_TYPE_VOID;
         return 1;
     }
-    if (strcmp(name, "int") == 0 || strcmp(name, "integer") == 0 || strcmp(name, "long") == 0 ||
-        strcmp(name, "long-long") == 0 || strcmp(name, "int64") == 0) {
+    if (strcmp(name, "int") == 0 || strcmp(name, "integer") == 0 || strcmp(name, "c-int") == 0) {
         *out_type = CH_FFI_TYPE_INT;
         return 1;
     }
-    if (strcmp(name, "double") == 0 || strcmp(name, "float") == 0) {
+    if (strcmp(name, "long") == 0) {
+        *out_type = CH_FFI_TYPE_LONG;
+        return 1;
+    }
+    if (strcmp(name, "long-long") == 0 || strcmp(name, "int64") == 0) {
+        *out_type = CH_FFI_TYPE_INT64;
+        return 1;
+    }
+    if (strcmp(name, "int8") == 0) {
+        *out_type = CH_FFI_TYPE_INT8;
+        return 1;
+    }
+    if (strcmp(name, "uint8") == 0 || strcmp(name, "char") == 0) {
+        *out_type = CH_FFI_TYPE_UINT8;
+        return 1;
+    }
+    if (strcmp(name, "int16") == 0) {
+        *out_type = CH_FFI_TYPE_INT16;
+        return 1;
+    }
+    if (strcmp(name, "uint16") == 0) {
+        *out_type = CH_FFI_TYPE_UINT16;
+        return 1;
+    }
+    if (strcmp(name, "int32") == 0) {
+        *out_type = CH_FFI_TYPE_INT32;
+        return 1;
+    }
+    if (strcmp(name, "uint32") == 0) {
+        *out_type = CH_FFI_TYPE_UINT32;
+        return 1;
+    }
+    if (strcmp(name, "uint64") == 0) {
+        *out_type = CH_FFI_TYPE_UINT64;
+        return 1;
+    }
+    if (strcmp(name, "size") == 0 || strcmp(name, "size_t") == 0) {
+        *out_type = CH_FFI_TYPE_SIZE;
+        return 1;
+    }
+    if (strcmp(name, "double") == 0) {
         *out_type = CH_FFI_TYPE_DOUBLE;
+        return 1;
+    }
+    if (strcmp(name, "float") == 0) {
+        *out_type = CH_FFI_TYPE_FLOAT;
+        return 1;
+    }
+    if (strcmp(name, "bool") == 0 || strcmp(name, "boolean") == 0) {
+        *out_type = CH_FFI_TYPE_BOOL;
         return 1;
     }
     if (strcmp(name, "pointer") == 0 || strcmp(name, "ptr") == 0 || strcmp(name, "string") == 0 ||
@@ -64,6 +135,69 @@ int ch_ffi_parse_type_symbol(ChValue sym, ChFFIType *out_type) {
         return 1;
     }
     return 0;
+}
+
+typedef enum ChFFICallClass {
+    CH_FFI_CLASS_INT = 0,
+    CH_FFI_CLASS_DOUBLE = 1,
+    CH_FFI_CLASS_POINTER = 2,
+} ChFFICallClass;
+
+static ChFFICallClass ffi_call_class(ChFFIType type) {
+    switch (type) {
+    case CH_FFI_TYPE_VOID:
+    case CH_FFI_TYPE_INT:
+    case CH_FFI_TYPE_BOOL:
+    case CH_FFI_TYPE_INT8:
+    case CH_FFI_TYPE_UINT8:
+    case CH_FFI_TYPE_INT16:
+    case CH_FFI_TYPE_UINT16:
+    case CH_FFI_TYPE_INT32:
+    case CH_FFI_TYPE_UINT32:
+    case CH_FFI_TYPE_INT64:
+    case CH_FFI_TYPE_UINT64:
+    case CH_FFI_TYPE_SIZE:
+    case CH_FFI_TYPE_LONG:
+        return CH_FFI_CLASS_INT;
+    case CH_FFI_TYPE_FLOAT:
+        return CH_FFI_CLASS_DOUBLE;
+    case CH_FFI_TYPE_DOUBLE:
+        return CH_FFI_CLASS_DOUBLE;
+    case CH_FFI_TYPE_POINTER:
+        return CH_FFI_CLASS_POINTER;
+    }
+    return CH_FFI_CLASS_INT;
+}
+
+static int store_int_result(ChFFIType result_type, int64_t raw, ChFFIWord *out_word) {
+    switch (result_type) {
+    case CH_FFI_TYPE_VOID:
+        return 0;
+    case CH_FFI_TYPE_POINTER:
+        out_word->p = (void *)(uintptr_t)raw;
+        return 0;
+    case CH_FFI_TYPE_BOOL:
+        out_word->i = raw ? 1 : 0;
+        return 0;
+    case CH_FFI_TYPE_INT:
+    case CH_FFI_TYPE_INT8:
+    case CH_FFI_TYPE_UINT8:
+    case CH_FFI_TYPE_INT16:
+    case CH_FFI_TYPE_UINT16:
+    case CH_FFI_TYPE_INT32:
+    case CH_FFI_TYPE_UINT32:
+    case CH_FFI_TYPE_INT64:
+    case CH_FFI_TYPE_UINT64:
+    case CH_FFI_TYPE_SIZE:
+    case CH_FFI_TYPE_LONG:
+        out_word->i = raw;
+        return 0;
+    case CH_FFI_TYPE_FLOAT:
+    case CH_FFI_TYPE_DOUBLE:
+        out_word->d = (double)raw;
+        return 0;
+    }
+    return -1;
 }
 
 static int exact_to_i64(ChValue value, int64_t *out) {
@@ -83,11 +217,32 @@ static int exact_to_i64(ChValue value, int64_t *out) {
 }
 
 static int marshal_int_arg(ChVM *vm, ChValue value, int64_t *out) {
+    if (value == CH_TRUE) {
+        *out = 1;
+        return 0;
+    }
+    if (value == CH_FALSE) {
+        *out = 0;
+        return 0;
+    }
     if (!exact_to_i64(value, out)) {
         set_error(vm, "ffi: expected exact integer argument");
         return -1;
     }
     return 0;
+}
+
+static int marshal_bool_arg(ChVM *vm, ChValue value, int64_t *out) {
+    if (value == CH_TRUE) {
+        *out = 1;
+        return 0;
+    }
+    if (value == CH_FALSE) {
+        *out = 0;
+        return 0;
+    }
+    set_error(vm, "ffi: expected boolean argument");
+    return -1;
 }
 
 static int marshal_double_arg(ChVM *vm, ChValue value, double *out) {
@@ -132,8 +287,21 @@ static int marshal_pointer_arg(ChVM *vm, ChValue value, void **out) {
 static int marshal_arg(ChVM *vm, ChFFIType type, ChValue value, ChFFIWord *out) {
     switch (type) {
     case CH_FFI_TYPE_INT:
+    case CH_FFI_TYPE_INT8:
+    case CH_FFI_TYPE_UINT8:
+    case CH_FFI_TYPE_INT16:
+    case CH_FFI_TYPE_UINT16:
+    case CH_FFI_TYPE_INT32:
+    case CH_FFI_TYPE_UINT32:
+    case CH_FFI_TYPE_INT64:
+    case CH_FFI_TYPE_UINT64:
+    case CH_FFI_TYPE_SIZE:
+    case CH_FFI_TYPE_LONG:
         return marshal_int_arg(vm, value, &out->i);
+    case CH_FFI_TYPE_BOOL:
+        return marshal_bool_arg(vm, value, &out->i);
     case CH_FFI_TYPE_DOUBLE:
+    case CH_FFI_TYPE_FLOAT:
         return marshal_double_arg(vm, value, &out->d);
     case CH_FFI_TYPE_POINTER:
         return marshal_pointer_arg(vm, value, &out->p);
@@ -150,8 +318,21 @@ static ChValue marshal_return_value(ChVM *vm, ChFFIType type, ChFFIWord word) {
     case CH_FFI_TYPE_VOID:
         return CH_VOID;
     case CH_FFI_TYPE_INT:
+    case CH_FFI_TYPE_INT8:
+    case CH_FFI_TYPE_UINT8:
+    case CH_FFI_TYPE_INT16:
+    case CH_FFI_TYPE_UINT16:
+    case CH_FFI_TYPE_INT32:
+    case CH_FFI_TYPE_UINT32:
+    case CH_FFI_TYPE_INT64:
+    case CH_FFI_TYPE_UINT64:
+    case CH_FFI_TYPE_SIZE:
+    case CH_FFI_TYPE_LONG:
         return ch_make_integer(&vm->gc, word.i);
+    case CH_FFI_TYPE_BOOL:
+        return word.i ? CH_TRUE : CH_FALSE;
     case CH_FFI_TYPE_DOUBLE:
+    case CH_FFI_TYPE_FLOAT:
         return ch_make_flonum(word.d);
     case CH_FFI_TYPE_POINTER:
         if (!word.p) {
@@ -351,7 +532,7 @@ int ch_ffi_lookup_procedure(ChVM *vm, ChValue library, const char *symbol_name,
     }
     if (arity > CH_FFI_MAX_ARGS) {
         snprintf(vm->error, sizeof(vm->error),
-                 "foreign-procedure: MVP supports at most %d arguments", CH_FFI_MAX_ARGS);
+                 "foreign-procedure: supports at most %d arguments", CH_FFI_MAX_ARGS);
         return -1;
     }
 
@@ -376,26 +557,37 @@ int ch_ffi_lookup_procedure(ChVM *vm, ChValue library, const char *symbol_name,
 }
 
 static int invoke_ffi0(void *symbol, ChFFIType result_type, ChFFIWord *out_word) {
-    switch (result_type) {
-    case CH_FFI_TYPE_VOID: {
-        void (*fn)(void) = NULL;
-        memcpy(&fn, &symbol, sizeof(fn));
-        fn();
-        return 0;
-    }
-    case CH_FFI_TYPE_INT: {
+    switch (ffi_call_class(result_type)) {
+    case CH_FFI_CLASS_INT: {
+        if (result_type == CH_FFI_TYPE_VOID) {
+            void (*fn)(void) = NULL;
+            memcpy(&fn, &symbol, sizeof(fn));
+            fn();
+            return 0;
+        }
         int64_t (*fn)(void) = NULL;
         memcpy(&fn, &symbol, sizeof(fn));
-        out_word->i = fn();
-        return 0;
+        return store_int_result(result_type, fn(), out_word);
     }
-    case CH_FFI_TYPE_DOUBLE: {
+    case CH_FFI_CLASS_DOUBLE: {
+        if (result_type == CH_FFI_TYPE_VOID) {
+            void (*fn)(void) = NULL;
+            memcpy(&fn, &symbol, sizeof(fn));
+            fn();
+            return 0;
+        }
         double (*fn)(void) = NULL;
         memcpy(&fn, &symbol, sizeof(fn));
         out_word->d = fn();
         return 0;
     }
-    case CH_FFI_TYPE_POINTER: {
+    case CH_FFI_CLASS_POINTER: {
+        if (result_type == CH_FFI_TYPE_VOID) {
+            void (*fn)(void) = NULL;
+            memcpy(&fn, &symbol, sizeof(fn));
+            fn();
+            return 0;
+        }
         void *(*fn)(void) = NULL;
         memcpy(&fn, &symbol, sizeof(fn));
         out_word->p = fn();
@@ -407,87 +599,124 @@ static int invoke_ffi0(void *symbol, ChFFIType result_type, ChFFIWord *out_word)
 
 static int invoke_ffi1(void *symbol, ChFFIType result_type, ChFFIType arg0_type, ChFFIWord arg0,
                        ChFFIWord *out_word) {
-    if (arg0_type == CH_FFI_TYPE_INT) {
-        switch (result_type) {
-        case CH_FFI_TYPE_VOID: {
-            void (*fn)(int64_t) = NULL;
-            memcpy(&fn, &symbol, sizeof(fn));
-            fn(arg0.i);
-            return 0;
-        }
-        case CH_FFI_TYPE_INT: {
+    switch (ffi_call_class(arg0_type)) {
+    case CH_FFI_CLASS_INT:
+        switch (ffi_call_class(result_type)) {
+        case CH_FFI_CLASS_INT: {
+            if (result_type == CH_FFI_TYPE_VOID) {
+                void (*fn)(int64_t) = NULL;
+                memcpy(&fn, &symbol, sizeof(fn));
+                fn(arg0.i);
+                return 0;
+            }
             int64_t (*fn)(int64_t) = NULL;
             memcpy(&fn, &symbol, sizeof(fn));
-            out_word->i = fn(arg0.i);
-            return 0;
+            return store_int_result(result_type, fn(arg0.i), out_word);
         }
-        case CH_FFI_TYPE_DOUBLE: {
+        case CH_FFI_CLASS_DOUBLE: {
+            if (result_type == CH_FFI_TYPE_VOID) {
+                void (*fn)(int64_t) = NULL;
+                memcpy(&fn, &symbol, sizeof(fn));
+                fn(arg0.i);
+                return 0;
+            }
             double (*fn)(int64_t) = NULL;
             memcpy(&fn, &symbol, sizeof(fn));
             out_word->d = fn(arg0.i);
             return 0;
         }
-        case CH_FFI_TYPE_POINTER: {
+        case CH_FFI_CLASS_POINTER: {
+            if (result_type == CH_FFI_TYPE_VOID) {
+                void (*fn)(int64_t) = NULL;
+                memcpy(&fn, &symbol, sizeof(fn));
+                fn(arg0.i);
+                return 0;
+            }
             void *(*fn)(int64_t) = NULL;
             memcpy(&fn, &symbol, sizeof(fn));
             out_word->p = fn(arg0.i);
             return 0;
         }
         }
-    } else if (arg0_type == CH_FFI_TYPE_DOUBLE) {
-        switch (result_type) {
-        case CH_FFI_TYPE_VOID: {
-            void (*fn)(double) = NULL;
-            memcpy(&fn, &symbol, sizeof(fn));
-            fn(arg0.d);
-            return 0;
-        }
-        case CH_FFI_TYPE_INT: {
+        break;
+    case CH_FFI_CLASS_DOUBLE:
+        switch (ffi_call_class(result_type)) {
+        case CH_FFI_CLASS_INT: {
+            if (result_type == CH_FFI_TYPE_VOID) {
+                void (*fn)(double) = NULL;
+                memcpy(&fn, &symbol, sizeof(fn));
+                fn(arg0.d);
+                return 0;
+            }
             int64_t (*fn)(double) = NULL;
             memcpy(&fn, &symbol, sizeof(fn));
-            out_word->i = fn(arg0.d);
-            return 0;
+            return store_int_result(result_type, fn(arg0.d), out_word);
         }
-        case CH_FFI_TYPE_DOUBLE: {
+        case CH_FFI_CLASS_DOUBLE: {
+            if (result_type == CH_FFI_TYPE_VOID) {
+                void (*fn)(double) = NULL;
+                memcpy(&fn, &symbol, sizeof(fn));
+                fn(arg0.d);
+                return 0;
+            }
             double (*fn)(double) = NULL;
             memcpy(&fn, &symbol, sizeof(fn));
             out_word->d = fn(arg0.d);
             return 0;
         }
-        case CH_FFI_TYPE_POINTER: {
+        case CH_FFI_CLASS_POINTER: {
+            if (result_type == CH_FFI_TYPE_VOID) {
+                void (*fn)(double) = NULL;
+                memcpy(&fn, &symbol, sizeof(fn));
+                fn(arg0.d);
+                return 0;
+            }
             void *(*fn)(double) = NULL;
             memcpy(&fn, &symbol, sizeof(fn));
             out_word->p = fn(arg0.d);
             return 0;
         }
         }
-    } else if (arg0_type == CH_FFI_TYPE_POINTER) {
-        switch (result_type) {
-        case CH_FFI_TYPE_VOID: {
-            void (*fn)(void *) = NULL;
-            memcpy(&fn, &symbol, sizeof(fn));
-            fn(arg0.p);
-            return 0;
-        }
-        case CH_FFI_TYPE_INT: {
+        break;
+    case CH_FFI_CLASS_POINTER:
+        switch (ffi_call_class(result_type)) {
+        case CH_FFI_CLASS_INT: {
+            if (result_type == CH_FFI_TYPE_VOID) {
+                void (*fn)(void *) = NULL;
+                memcpy(&fn, &symbol, sizeof(fn));
+                fn(arg0.p);
+                return 0;
+            }
             int64_t (*fn)(void *) = NULL;
             memcpy(&fn, &symbol, sizeof(fn));
-            out_word->i = fn(arg0.p);
-            return 0;
+            return store_int_result(result_type, fn(arg0.p), out_word);
         }
-        case CH_FFI_TYPE_DOUBLE: {
+        case CH_FFI_CLASS_DOUBLE: {
+            if (result_type == CH_FFI_TYPE_VOID) {
+                void (*fn)(void *) = NULL;
+                memcpy(&fn, &symbol, sizeof(fn));
+                fn(arg0.p);
+                return 0;
+            }
             double (*fn)(void *) = NULL;
             memcpy(&fn, &symbol, sizeof(fn));
             out_word->d = fn(arg0.p);
             return 0;
         }
-        case CH_FFI_TYPE_POINTER: {
+        case CH_FFI_CLASS_POINTER: {
+            if (result_type == CH_FFI_TYPE_VOID) {
+                void (*fn)(void *) = NULL;
+                memcpy(&fn, &symbol, sizeof(fn));
+                fn(arg0.p);
+                return 0;
+            }
             void *(*fn)(void *) = NULL;
             memcpy(&fn, &symbol, sizeof(fn));
             out_word->p = fn(arg0.p);
             return 0;
         }
         }
+        break;
     }
     return -1;
 }
@@ -496,26 +725,37 @@ static int invoke_ffi2(void *symbol, ChFFIType result_type, ChFFIType arg0_type,
                        ChFFIType arg1_type, ChFFIWord arg1, ChFFIWord *out_word) {
 #define CH_FFI_CALL2(ARG0_T, ARG0_F, ARG1_T, ARG1_F)                                                   \
     do {                                                                                               \
-        switch (result_type) {                                                                         \
-        case CH_FFI_TYPE_VOID: {                                                                       \
-            void (*fn)(ARG0_T, ARG1_T) = NULL;                                                         \
-            memcpy(&fn, &symbol, sizeof(fn));                                                          \
-            fn(arg0.ARG0_F, arg1.ARG1_F);                                                              \
-            return 0;                                                                                  \
-        }                                                                                              \
-        case CH_FFI_TYPE_INT: {                                                                        \
+        switch (ffi_call_class(result_type)) {                                                         \
+        case CH_FFI_CLASS_INT: {                                                                       \
+            if (result_type == CH_FFI_TYPE_VOID) {                                                     \
+                void (*fn)(ARG0_T, ARG1_T) = NULL;                                                     \
+                memcpy(&fn, &symbol, sizeof(fn));                                                      \
+                fn(arg0.ARG0_F, arg1.ARG1_F);                                                          \
+                return 0;                                                                              \
+            }                                                                                          \
             int64_t (*fn)(ARG0_T, ARG1_T) = NULL;                                                      \
             memcpy(&fn, &symbol, sizeof(fn));                                                          \
-            out_word->i = fn(arg0.ARG0_F, arg1.ARG1_F);                                                \
-            return 0;                                                                                  \
+            return store_int_result(result_type, fn(arg0.ARG0_F, arg1.ARG1_F), out_word);              \
         }                                                                                              \
-        case CH_FFI_TYPE_DOUBLE: {                                                                     \
+        case CH_FFI_CLASS_DOUBLE: {                                                                    \
+            if (result_type == CH_FFI_TYPE_VOID) {                                                     \
+                void (*fn)(ARG0_T, ARG1_T) = NULL;                                                     \
+                memcpy(&fn, &symbol, sizeof(fn));                                                      \
+                fn(arg0.ARG0_F, arg1.ARG1_F);                                                          \
+                return 0;                                                                              \
+            }                                                                                          \
             double (*fn)(ARG0_T, ARG1_T) = NULL;                                                       \
             memcpy(&fn, &symbol, sizeof(fn));                                                          \
             out_word->d = fn(arg0.ARG0_F, arg1.ARG1_F);                                                \
             return 0;                                                                                  \
         }                                                                                              \
-        case CH_FFI_TYPE_POINTER: {                                                                    \
+        case CH_FFI_CLASS_POINTER: {                                                                   \
+            if (result_type == CH_FFI_TYPE_VOID) {                                                     \
+                void (*fn)(ARG0_T, ARG1_T) = NULL;                                                     \
+                memcpy(&fn, &symbol, sizeof(fn));                                                      \
+                fn(arg0.ARG0_F, arg1.ARG1_F);                                                          \
+                return 0;                                                                              \
+            }                                                                                          \
             void *(*fn)(ARG0_T, ARG1_T) = NULL;                                                        \
             memcpy(&fn, &symbol, sizeof(fn));                                                          \
             out_word->p = fn(arg0.ARG0_F, arg1.ARG1_F);                                                \
@@ -524,36 +764,248 @@ static int invoke_ffi2(void *symbol, ChFFIType result_type, ChFFIType arg0_type,
         }                                                                                              \
     } while (0)
 
-    if (arg0_type == CH_FFI_TYPE_INT && arg1_type == CH_FFI_TYPE_INT) {
+    ChFFICallClass a0 = ffi_call_class(arg0_type);
+    ChFFICallClass a1 = ffi_call_class(arg1_type);
+    if (a0 == CH_FFI_CLASS_INT && a1 == CH_FFI_CLASS_INT) {
         CH_FFI_CALL2(int64_t, i, int64_t, i);
     }
-    if (arg0_type == CH_FFI_TYPE_INT && arg1_type == CH_FFI_TYPE_DOUBLE) {
+    if (a0 == CH_FFI_CLASS_INT && a1 == CH_FFI_CLASS_DOUBLE) {
         CH_FFI_CALL2(int64_t, i, double, d);
     }
-    if (arg0_type == CH_FFI_TYPE_INT && arg1_type == CH_FFI_TYPE_POINTER) {
+    if (a0 == CH_FFI_CLASS_INT && a1 == CH_FFI_CLASS_POINTER) {
         CH_FFI_CALL2(int64_t, i, void *, p);
     }
-    if (arg0_type == CH_FFI_TYPE_DOUBLE && arg1_type == CH_FFI_TYPE_INT) {
+    if (a0 == CH_FFI_CLASS_DOUBLE && a1 == CH_FFI_CLASS_INT) {
         CH_FFI_CALL2(double, d, int64_t, i);
     }
-    if (arg0_type == CH_FFI_TYPE_DOUBLE && arg1_type == CH_FFI_TYPE_DOUBLE) {
+    if (a0 == CH_FFI_CLASS_DOUBLE && a1 == CH_FFI_CLASS_DOUBLE) {
         CH_FFI_CALL2(double, d, double, d);
     }
-    if (arg0_type == CH_FFI_TYPE_DOUBLE && arg1_type == CH_FFI_TYPE_POINTER) {
+    if (a0 == CH_FFI_CLASS_DOUBLE && a1 == CH_FFI_CLASS_POINTER) {
         CH_FFI_CALL2(double, d, void *, p);
     }
-    if (arg0_type == CH_FFI_TYPE_POINTER && arg1_type == CH_FFI_TYPE_INT) {
+    if (a0 == CH_FFI_CLASS_POINTER && a1 == CH_FFI_CLASS_INT) {
         CH_FFI_CALL2(void *, p, int64_t, i);
     }
-    if (arg0_type == CH_FFI_TYPE_POINTER && arg1_type == CH_FFI_TYPE_DOUBLE) {
+    if (a0 == CH_FFI_CLASS_POINTER && a1 == CH_FFI_CLASS_DOUBLE) {
         CH_FFI_CALL2(void *, p, double, d);
     }
-    if (arg0_type == CH_FFI_TYPE_POINTER && arg1_type == CH_FFI_TYPE_POINTER) {
+    if (a0 == CH_FFI_CLASS_POINTER && a1 == CH_FFI_CLASS_POINTER) {
         CH_FFI_CALL2(void *, p, void *, p);
     }
 
 #undef CH_FFI_CALL2
     return -1;
+}
+
+static int invoke_int3(void *symbol, ChFFIType result_type, const int64_t *args, ChFFIWord *out_word) {
+    int64_t (*fn)(int64_t, int64_t, int64_t) = NULL;
+    memcpy(&fn, &symbol, sizeof(fn));
+    if (result_type == CH_FFI_TYPE_VOID) {
+        fn(args[0], args[1], args[2]);
+        return 0;
+    }
+    return store_int_result(result_type, fn(args[0], args[1], args[2]), out_word);
+}
+
+static int invoke_int4(void *symbol, ChFFIType result_type, const int64_t *args, ChFFIWord *out_word) {
+    int64_t (*fn)(int64_t, int64_t, int64_t, int64_t) = NULL;
+    memcpy(&fn, &symbol, sizeof(fn));
+    if (result_type == CH_FFI_TYPE_VOID) {
+        fn(args[0], args[1], args[2], args[3]);
+        return 0;
+    }
+    return store_int_result(result_type, fn(args[0], args[1], args[2], args[3]), out_word);
+}
+
+static int invoke_int5(void *symbol, ChFFIType result_type, const int64_t *args, ChFFIWord *out_word) {
+    int64_t (*fn)(int64_t, int64_t, int64_t, int64_t, int64_t) = NULL;
+    memcpy(&fn, &symbol, sizeof(fn));
+    if (result_type == CH_FFI_TYPE_VOID) {
+        fn(args[0], args[1], args[2], args[3], args[4]);
+        return 0;
+    }
+    return store_int_result(result_type, fn(args[0], args[1], args[2], args[3], args[4]), out_word);
+}
+
+static int invoke_int6(void *symbol, ChFFIType result_type, const int64_t *args, ChFFIWord *out_word) {
+    int64_t (*fn)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) = NULL;
+    memcpy(&fn, &symbol, sizeof(fn));
+    if (result_type == CH_FFI_TYPE_VOID) {
+        fn(args[0], args[1], args[2], args[3], args[4], args[5]);
+        return 0;
+    }
+    return store_int_result(result_type, fn(args[0], args[1], args[2], args[3], args[4], args[5]),
+                           out_word);
+}
+
+static int invoke_int7(void *symbol, ChFFIType result_type, const int64_t *args, ChFFIWord *out_word) {
+    int64_t (*fn)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) = NULL;
+    memcpy(&fn, &symbol, sizeof(fn));
+    if (result_type == CH_FFI_TYPE_VOID) {
+        fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
+        return 0;
+    }
+    return store_int_result(result_type,
+                           fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6]),
+                           out_word);
+}
+
+static int invoke_int8(void *symbol, ChFFIType result_type, const int64_t *args, ChFFIWord *out_word) {
+    int64_t (*fn)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) = NULL;
+    memcpy(&fn, &symbol, sizeof(fn));
+    if (result_type == CH_FFI_TYPE_VOID) {
+        fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
+        return 0;
+    }
+    return store_int_result(result_type,
+                           fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]),
+                           out_word);
+}
+
+static int invoke_double_n(void *symbol, int nargs, const double *args, ChFFIType result_type,
+                           ChFFIWord *out_word) {
+    switch (nargs) {
+    case 3: {
+        double (*fn)(double, double, double) = NULL;
+        memcpy(&fn, &symbol, sizeof(fn));
+        out_word->d = fn(args[0], args[1], args[2]);
+        return result_type == CH_FFI_TYPE_VOID ? 0 : 0;
+    }
+    case 4: {
+        double (*fn)(double, double, double, double) = NULL;
+        memcpy(&fn, &symbol, sizeof(fn));
+        out_word->d = fn(args[0], args[1], args[2], args[3]);
+        return 0;
+    }
+    case 5: {
+        double (*fn)(double, double, double, double, double) = NULL;
+        memcpy(&fn, &symbol, sizeof(fn));
+        out_word->d = fn(args[0], args[1], args[2], args[3], args[4]);
+        return 0;
+    }
+    case 6: {
+        double (*fn)(double, double, double, double, double, double) = NULL;
+        memcpy(&fn, &symbol, sizeof(fn));
+        out_word->d = fn(args[0], args[1], args[2], args[3], args[4], args[5]);
+        return 0;
+    }
+    case 7: {
+        double (*fn)(double, double, double, double, double, double, double) = NULL;
+        memcpy(&fn, &symbol, sizeof(fn));
+        out_word->d = fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
+        return 0;
+    }
+    case 8: {
+        double (*fn)(double, double, double, double, double, double, double, double) = NULL;
+        memcpy(&fn, &symbol, sizeof(fn));
+        out_word->d = fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
+        return 0;
+    }
+    default:
+        return -1;
+    }
+}
+
+static int invoke_pointer_n(void *symbol, int nargs, void *const *args, ChFFIType result_type,
+                            ChFFIWord *out_word) {
+    switch (nargs) {
+    case 3: {
+        void *(*fn)(void *, void *, void *) = NULL;
+        memcpy(&fn, &symbol, sizeof(fn));
+        out_word->p = fn(args[0], args[1], args[2]);
+        return result_type == CH_FFI_TYPE_VOID ? 0 : 0;
+    }
+    case 4: {
+        void *(*fn)(void *, void *, void *, void *) = NULL;
+        memcpy(&fn, &symbol, sizeof(fn));
+        out_word->p = fn(args[0], args[1], args[2], args[3]);
+        return 0;
+    }
+    case 5: {
+        void *(*fn)(void *, void *, void *, void *, void *) = NULL;
+        memcpy(&fn, &symbol, sizeof(fn));
+        out_word->p = fn(args[0], args[1], args[2], args[3], args[4]);
+        return 0;
+    }
+    case 6: {
+        void *(*fn)(void *, void *, void *, void *, void *, void *) = NULL;
+        memcpy(&fn, &symbol, sizeof(fn));
+        out_word->p = fn(args[0], args[1], args[2], args[3], args[4], args[5]);
+        return 0;
+    }
+    case 7: {
+        void *(*fn)(void *, void *, void *, void *, void *, void *, void *) = NULL;
+        memcpy(&fn, &symbol, sizeof(fn));
+        out_word->p = fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
+        return 0;
+    }
+    case 8: {
+        void *(*fn)(void *, void *, void *, void *, void *, void *, void *, void *) = NULL;
+        memcpy(&fn, &symbol, sizeof(fn));
+        out_word->p = fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
+        return 0;
+    }
+    default:
+        return -1;
+    }
+}
+
+static int invoke_ffi_many(void *symbol, ChFFIType result_type, const ChFFIType *arg_types,
+                           const ChFFIWord *marshaled, int nargs, ChFFIWord *out_word) {
+    if (nargs < 3 || nargs > CH_FFI_MAX_ARGS) {
+        return -1;
+    }
+    ChFFICallClass cls = ffi_call_class(arg_types[0]);
+    for (int i = 1; i < nargs; i++) {
+        ChFFICallClass other = ffi_call_class(arg_types[i]);
+        if (other != cls && !(cls == CH_FFI_CLASS_INT && other == CH_FFI_CLASS_POINTER) &&
+            !(cls == CH_FFI_CLASS_POINTER && other == CH_FFI_CLASS_INT)) {
+            return -1;
+        }
+    }
+
+    if (cls == CH_FFI_CLASS_DOUBLE) {
+        double dargs[CH_FFI_MAX_ARGS];
+        for (int i = 0; i < nargs; i++) {
+            dargs[i] = marshaled[i].d;
+        }
+        return invoke_double_n(symbol, nargs, dargs, result_type, out_word);
+    }
+
+    if (cls == CH_FFI_CLASS_POINTER ||
+        (cls == CH_FFI_CLASS_INT && ffi_call_class(arg_types[0]) == CH_FFI_CLASS_POINTER)) {
+        void *pargs[CH_FFI_MAX_ARGS];
+        for (int i = 0; i < nargs; i++) {
+            pargs[i] = marshaled[i].p;
+        }
+        return invoke_pointer_n(symbol, nargs, pargs, result_type, out_word);
+    }
+
+    int64_t iargs[CH_FFI_MAX_ARGS];
+    for (int i = 0; i < nargs; i++) {
+        if (ffi_call_class(arg_types[i]) == CH_FFI_CLASS_POINTER) {
+            iargs[i] = (int64_t)(uintptr_t)marshaled[i].p;
+        } else {
+            iargs[i] = marshaled[i].i;
+        }
+    }
+    switch (nargs) {
+    case 3:
+        return invoke_int3(symbol, result_type, iargs, out_word);
+    case 4:
+        return invoke_int4(symbol, result_type, iargs, out_word);
+    case 5:
+        return invoke_int5(symbol, result_type, iargs, out_word);
+    case 6:
+        return invoke_int6(symbol, result_type, iargs, out_word);
+    case 7:
+        return invoke_int7(symbol, result_type, iargs, out_word);
+    case 8:
+        return invoke_int8(symbol, result_type, iargs, out_word);
+    default:
+        return -1;
+    }
 }
 
 int ch_ffi_call(ChVM *vm, ChForeignProcedure *proc, ChValue *args, int nargs, ChValue *out) {
@@ -596,9 +1048,13 @@ int ch_ffi_call(ChVM *vm, ChForeignProcedure *proc, ChValue *args, int nargs, Ch
     } else if (nargs == 2) {
         rc = invoke_ffi2(proc->symbol, (ChFFIType)proc->result_type, (ChFFIType)proc->arg_types[0],
                          marshaled[0], (ChFFIType)proc->arg_types[1], marshaled[1], &raw_result);
+    } else {
+        rc = invoke_ffi_many(proc->symbol, (ChFFIType)proc->result_type,
+                             (const ChFFIType *)(const void *)proc->arg_types, marshaled, nargs,
+                             &raw_result);
     }
     if (rc != 0) {
-        set_error(vm, "foreign-procedure: unsupported signature in MVP");
+        set_error(vm, "foreign-procedure: unsupported signature");
         return -1;
     }
 

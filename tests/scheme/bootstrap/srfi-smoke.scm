@@ -27,4 +27,17 @@
              (hash-table-set! ht 'answer 42)
              (hash-table-ref ht 'answer)))
 
+(import (srfi 258))
+(import (srfi 260))
+(check-assert "srfi-258 uninterned symbol"
+              (and (symbol? (string->uninterned-symbol "x"))
+                   (not (symbol-interned? (string->uninterned-symbol "x")))))
+(check-assert "srfi-260 generate-symbol"
+              (symbol? (generate-symbol "test")))
+(check-equal "srfi-13 string-unfold" "ABCDE"
+             (string-unfold (lambda (x) (> x 4))
+                            (lambda (x) (integer->char (+ x 65)))
+                            (lambda (x) (+ x 1))
+                            0))
+
 (check-finish)

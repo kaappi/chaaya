@@ -377,8 +377,7 @@ static int match_pattern(ChExpandCtx *ctx, ChValue pat, ChValue use, int under_e
     if (ch_is_symbol(pat)) {
         ChSymbol *s = ch_as_symbol(pat);
         if (is_literal(ctx, s)) {
-            return ch_is_symbol(use) &&
-                   strcmp(ch_symbol_basename(ch_as_symbol(use)), ch_symbol_basename(s)) == 0;
+            return ch_is_symbol(use) && ch_as_symbol(use) == s;
         }
         return bind_var(ctx, s, use, under_ellipsis);
     }
@@ -752,6 +751,8 @@ static ChValue instantiate(ChExpandCtx *ctx, ChValue tmpl) {
     return tmpl;
 }
 
+static void capture_transformer_templates(ChVM *vm, ChTransformer *tr);
+
 ChExpandStatus ch_parse_syntax_rules(ChVM *vm, ChValue spec, ChTransformer **out, char *err,
                                      size_t err_len) {
     if (!ch_is_pair(spec) || !ch_is_symbol(ch_car(spec)) ||
@@ -932,6 +933,45 @@ static ChValue lookup_macro_value(ChVM *vm, ChSymbol *name) {
     return CH_NIL;
 }
 
+static ChValue capture_template_syms(ChVM *vm, ChValue tmpl) {
+    if (ch_is_symbol(tmpl)) {
+        ChSymbol *s = ch_as_symbol(tmpl);
+        if (is_well_known(ch_symbol_basename(s))) {
+            return tmpl;
+        }
+        ChValue macro = lookup_macro_value(vm, s);
+        if (macro != CH_NIL) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "__hyg_cap_%u_%s", vm->hyg_counter++,
+                     ch_symbol_basename(s));
+            ChSymbol *cap = ch_as_symbol(ch_gc_intern_symbol_cstr(&vm->gc, buf));
+            ch_vm_define_macro(vm, cap, ch_as_transformer(macro));
+            return ch_make_pointer(&cap->header);
+        }
+        return tmpl;
+    }
+    if (ch_is_pair(tmpl)) {
+        if (ch_is_symbol(ch_car(tmpl)) &&
+            strcmp(ch_symbol_basename(ch_as_symbol(ch_car(tmpl))), "quote") == 0) {
+            return tmpl;
+        }
+        ChValue car_v = capture_template_syms(vm, ch_car(tmpl));
+        ch_gc_push(&vm->gc, &car_v);
+        ChValue cdr_v = capture_template_syms(vm, ch_cdr(tmpl));
+        ch_gc_push(&vm->gc, &cdr_v);
+        ChValue out = ch_gc_cons(&vm->gc, car_v, cdr_v);
+        ch_gc_pop_n(&vm->gc, 2);
+        return out;
+    }
+    return tmpl;
+}
+
+static void capture_transformer_templates(ChVM *vm, ChTransformer *tr) {
+    for (size_t i = 0; i < tr->rule_count; i++) {
+        tr->templates[i] = capture_template_syms(vm, tr->templates[i]);
+    }
+}
+
 static void remove_macro_binding(ChVM *vm, ChSymbol *name) {
     const char *base = ch_symbol_basename(name);
     for (size_t i = 0; i < vm->macro_count; i++) {
@@ -1021,6 +1061,7 @@ static ChExpandStatus expand_let_syntax(ChVM *vm, ChValue bindings, ChValue body
                 }
                 return CH_EXPAND_ERROR;
             }
+            capture_transformer_templates(vm, tr);
             saves[nsaves].name = kw;
             saves[nsaves].old_transformer = lookup_macro_value(vm, kw);
             nsaves++;
@@ -1134,8 +1175,47 @@ static ChValue append_one(ChGC *gc, ChValue list, ChValue item) {
     return head;
 }
 
+static int is_r6rs_clause_keyword(const char *name) {
+    static const char *keywords[] = {"fields", "mutable", "immutable", "parent",
+                                     "protocol", "sealed", "opaque", "nongenerative",
+                                     "generative", "parent-rtd", NULL};
+    for (int i = 0; keywords[i]; i++) {
+        if (strcmp(name, keywords[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int looks_like_r6rs_clause_syntax(ChValue args) {
+    if (!ch_is_pair(args)) {
+        return 0;
+    }
+    ChValue rest = ch_cdr(args);
+    if (!ch_is_pair(rest)) {
+        return 0;
+    }
+    ChValue second = ch_car(rest);
+    if (!ch_is_pair(second) || !ch_is_symbol(ch_car(second))) {
+        return 0;
+    }
+    if (!is_r6rs_clause_keyword(ch_symbol_basename(ch_as_symbol(ch_car(second))))) {
+        return 0;
+    }
+    ChValue third_cell = ch_cdr(rest);
+    /* R7RS always has a bare-symbol predicate as the 3rd element. */
+    if (ch_is_pair(third_cell) && ch_is_symbol(ch_car(third_cell))) {
+        return 0;
+    }
+    return 1;
+}
+
 static ChExpandStatus expand_define_record_type(ChVM *vm, ChValue args, ChValue *out, char *err,
                                                size_t err_len) {
+    if (looks_like_r6rs_clause_syntax(args)) {
+        snprintf(err, err_len, "define-record-type: R6RS clause syntax not yet supported");
+        return CH_EXPAND_ERROR;
+    }
     /* (name (ctor f ...) pred (field acc [mut]) ...) */
     if (!ch_is_pair(args) || !ch_is_symbol(ch_car(args))) {
         snprintf(err, err_len, "define-record-type: bad type name");

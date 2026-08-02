@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define CH_LIB_MAX_EXPORTS 512
-#define CH_LIB_ENV_MAX 512
+#define CH_LIB_ENV_MAX 1024
 #define CH_LIB_MAX_LIBS 128
 #define CH_LIB_MAX_LOADING 32
 #define CH_ENV_LIB_BIT 0x8000u

@@ -601,11 +601,50 @@ static ChValue expt_nonneg_int(ChGC *gc, ChValue base, ChValue exp) {
     return result;
 }
 
+static ChValue expt_exact_rational(ChGC *gc, ChValue base, ChValue exp) {
+    if (!ch_is_exact_integer(exp)) {
+        return CH_UNDEFINED;
+    }
+    if (ch_bignum_compare(exp, ch_make_fixnum(0)) == 0) {
+        return ch_make_fixnum(1);
+    }
+
+    int negative_exp = ch_bignum_compare(exp, ch_make_fixnum(0)) < 0;
+    ChValue abs_exp = exp;
+    ch_gc_push(gc, &abs_exp);
+    if (negative_exp) {
+        abs_exp = ch_bignum_negate(gc, exp);
+        ch_gc_pop(gc);
+        ch_gc_push(gc, &abs_exp);
+    }
+
+    ChValue an, ad;
+    ch_exact_parts(base, &an, &ad);
+    ch_gc_push(gc, &an);
+    ch_gc_push(gc, &ad);
+    ChValue num_pow = expt_nonneg_int(gc, an, abs_exp);
+    ch_gc_push(gc, &num_pow);
+    ChValue den_pow = expt_nonneg_int(gc, ad, abs_exp);
+    ch_gc_pop_n(gc, 3); /* abs_exp, an, ad */
+
+    ChValue out;
+    if (negative_exp) {
+        out = ch_make_rational(gc, den_pow, num_pow);
+    } else {
+        out = ch_make_rational(gc, num_pow, den_pow);
+    }
+    ch_gc_pop(gc); /* num_pow */
+    return out;
+}
+
 static ChValue prim_expt(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
     ChValue z = args[0];
     ChValue w = args[1];
-    if (ch_is_exact_integer(z) && ch_is_exact_integer(w)) {
+    if ((ch_is_exact_integer(z) || ch_is_rational_obj(z)) && ch_is_exact_integer(w)) {
+        if (ch_is_rational_obj(z)) {
+            return expt_exact_rational(&vm->gc, z, w);
+        }
         if (ch_bignum_compare(w, ch_make_fixnum(0)) >= 0) {
             return expt_nonneg_int(&vm->gc, z, w);
         }

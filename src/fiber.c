@@ -196,6 +196,53 @@ int ch_fiber_yield(ChVM *vm) {
     return 0;
 }
 
+int ch_fiber_join(ChVM *vm, ChValue fiber_v, ChValue *out_result) {
+    if (!vm->fiber_runtime) {
+        snprintf(vm->error, sizeof(vm->error), "fiber-join: fiber runtime unavailable");
+        return -1;
+    }
+    if (!ch_is_fiber(fiber_v)) {
+        snprintf(vm->error, sizeof(vm->error), "fiber-join: expected fiber");
+        return -1;
+    }
+
+    ch_gc_push(&vm->gc, &fiber_v);
+    ChFiber *fiber = ch_as_fiber(fiber_v);
+    size_t spins = 0;
+    while (fiber->state != CH_FIBER_DONE && fiber->state != CH_FIBER_FAILED) {
+        (void)ch_reactor_poll(&vm->fiber_runtime->reactor, 0, NULL);
+        int ran = run_next_ready_fiber(vm);
+        if (ran < 0) {
+            ch_gc_pop(&vm->gc);
+            return -1;
+        }
+        if (ran == 0) {
+            spins++;
+            if (spins > CH_FIBER_READY_MAX * 16) {
+                snprintf(vm->error, sizeof(vm->error),
+                         "fiber-join: fiber did not complete (scheduler stalled)");
+                ch_gc_pop(&vm->gc);
+                return -1;
+            }
+        }
+    }
+
+    ch_gc_pop(&vm->gc);
+    if (fiber->state == CH_FIBER_DONE) {
+        if (out_result) {
+            *out_result = fiber->result;
+        }
+        return 0;
+    }
+
+    if (ch_is_string(fiber->error)) {
+        snprintf(vm->error, sizeof(vm->error), "%s", ch_as_string(fiber->error)->data);
+    } else {
+        snprintf(vm->error, sizeof(vm->error), "fiber-join: fiber failed");
+    }
+    return -1;
+}
+
 static int channel_grow(ChChannel *channel) {
     if (!channel) {
         return -1;
@@ -246,6 +293,7 @@ int ch_channel_send(ChVM *vm, ChValue channel_v, ChValue value) {
     ChChannel *channel = ch_as_channel(channel_v);
     size_t spins = 0;
     while (channel->capacity > 0 && channel->count >= channel->capacity) {
+        (void)ch_reactor_poll(&vm->fiber_runtime->reactor, 0, NULL);
         int ran = run_next_ready_fiber(vm);
         if (ran < 0) {
             return -1;
@@ -281,6 +329,7 @@ int ch_channel_recv(ChVM *vm, ChValue channel_v, ChValue *out_value) {
     ChChannel *channel = ch_as_channel(channel_v);
     size_t spins = 0;
     while (channel->count == 0) {
+        (void)ch_reactor_poll(&vm->fiber_runtime->reactor, 0, NULL);
         int ran = run_next_ready_fiber(vm);
         if (ran < 0) {
             return -1;

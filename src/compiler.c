@@ -2467,6 +2467,16 @@ static ChValue qq_expand_list(ChCompiler *c, ChValue xs, int level) {
         ch_gc_pop(&c->vm->gc);
         return out;
     }
+    /* Dotted unquote tail (#852): (unquote expr) as the final cdr is `. ,expr`. */
+    if (level == 0 && ch_is_symbol(ch_car(xs_root)) &&
+        is_symbol_named(ch_car(xs_root), "unquote")) {
+        ChValue uargs = ch_cdr(xs_root);
+        if (ch_is_pair(uargs) && ch_is_nil(ch_cdr(uargs))) {
+            ChValue out = ch_car(uargs);
+            ch_gc_pop(&c->vm->gc);
+            return out;
+        }
+    }
     ChValue head = ch_car(xs_root);
     ch_gc_push(&c->vm->gc, &head);
     if (level == 0 && ch_is_pair(head) && is_symbol_named(ch_car(head), "unquote-splicing")) {

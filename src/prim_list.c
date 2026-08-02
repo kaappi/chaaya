@@ -216,7 +216,9 @@ static ChValue prim_list_set(ChVM *vm, ChValue *args, int nargs) {
             return CH_UNDEFINED;
         }
         if (i == k) {
-            ch_set_car(lst, args[2]);
+            ChPair *pair = ch_as_pair(lst);
+            pair->car = args[2];
+            ch_gc_write_barrier(&vm->gc, &pair->header, args[2]);
             return CH_VOID;
         }
         i++;

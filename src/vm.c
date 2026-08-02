@@ -106,6 +106,11 @@ void ch_vm_register_primitives(ChVM *vm) {
     ch_register_filesystem_primitives(vm);
     ch_register_weak_primitives(vm);
     ch_register_features_primitives(vm);
+    ch_register_srfi1_primitives(vm);
+    ch_register_srfi13_primitives(vm);
+    ch_register_srfi133_primitives(vm);
+    ch_register_srfi258_primitives(vm);
+    ch_register_srfi260_primitives(vm);
     if (vm->libraries) {
         (void)ch_register_builtin_libraries(vm);
     }
@@ -726,6 +731,7 @@ static ChVMStatus run_until(ChVM *vm, size_t target_frames) {
             uint8_t idx = read_u8(frame);
             uint8_t src = read_u8(frame);
             *frame->closure->upvalues[idx]->location = regs[src];
+            ch_gc_write_barrier(&vm->gc, &frame->closure->header, regs[src]);
             break;
         }
         case CH_OP_CONS: {
@@ -808,8 +814,8 @@ static ChVMStatus run_until(ChVM *vm, size_t target_frames) {
             if (st != CH_VM_OK) {
                 return st;
             }
-            /* Discard extra values except in tail context (for call-with-values). */
-            if (op == CH_OP_CALL) {
+            /* Discard extra values except values objects and tail context. */
+            if (op == CH_OP_CALL && !ch_is_values(regs[base])) {
                 regs[base] = ch_coerce_single(regs[base]);
             }
             break;
@@ -819,7 +825,7 @@ static ChVMStatus run_until(ChVM *vm, size_t target_frames) {
             ChValue result = regs[src];
             close_upvalues(vm, regs);
             if (vm->frame_count == 1) {
-                vm->result = ch_coerce_single(result);
+                vm->result = ch_is_values(result) ? result : ch_coerce_single(result);
                 vm->frame_count = 0;
                 return CH_VM_OK;
             }

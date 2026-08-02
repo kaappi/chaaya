@@ -119,7 +119,16 @@ static ChValue prim_load(ChVM *vm, ChValue *args, int nargs) {
     ChValue env = (nargs == 2) ? args[1] : CH_VOID;
     ChValue result = CH_VOID;
     if (ch_eval_file(vm, ch_as_string(args[0])->data, env, &result) != 0) {
-        return CH_UNDEFINED;
+        ChValue msg = ch_gc_make_string_cstr(&vm->gc, vm->error);
+        ChValue irritants = CH_NIL;
+        ch_gc_push(&vm->gc, &msg);
+        ch_gc_push(&vm->gc, &irritants);
+        ch_gc_push(&vm->gc, &args[0]);
+        irritants = ch_gc_cons(&vm->gc, args[0], CH_NIL);
+        ch_gc_pop(&vm->gc);
+        ChValue err = ch_gc_make_error_object(&vm->gc, msg, irritants, 1);
+        ch_gc_pop_n(&vm->gc, 2);
+        return ch_vm_raise(vm, err, 0);
     }
     return result;
 }

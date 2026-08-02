@@ -25,6 +25,11 @@ void ch_register_ffi_primitives(ChVM *vm);
 void ch_register_random_primitives(ChVM *vm);
 void ch_register_filesystem_primitives(ChVM *vm);
 void ch_register_weak_primitives(ChVM *vm);
+void ch_register_srfi1_primitives(ChVM *vm);
+void ch_register_srfi13_primitives(ChVM *vm);
+void ch_register_srfi133_primitives(ChVM *vm);
+void ch_register_srfi258_primitives(ChVM *vm);
+void ch_register_srfi260_primitives(ChVM *vm);
 
 #ifdef __cplusplus
 }

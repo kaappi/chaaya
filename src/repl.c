@@ -1,5 +1,6 @@
 #include "chaaya/repl.h"
 
+#include "chaaya/disasm.h"
 #include "chaaya/eval.h"
 #include "chaaya/expander.h"
 #include "chaaya/library.h"
@@ -21,6 +22,9 @@
 #define CH_HISTORY_MAX 1000
 
 static ChVM *g_repl_vm = NULL; /* for completion callback */
+
+static size_t push_repl_vm_roots(ChVM *vm);
+static ChReadStatus read_repl_datum(ChVM *vm, ChReader *reader, ChValue *out);
 
 int ch_repl_paren_depth(const char *s) {
     int depth = 0;
@@ -111,6 +115,8 @@ static void print_comma_help(void) {
     puts("  ,version          Show Chaaya version");
     puts("  ,load <file>      Load and evaluate a Scheme file");
     puts("  ,expand <expr>    Expand expression and print transformed form");
+    puts("  ,import <lib>     Import a library (e.g. ,import (srfi 64))");
+    puts("  ,dis <expr>       Disassemble a procedure");
     puts("  ,break <name>     Break when calling the named procedure");
     puts("  ,breakpoints      List active breakpoints");
     puts("  ,delete <name>    Remove a breakpoint");
@@ -121,6 +127,92 @@ static void print_comma_help(void) {
     puts("  ,type <expr>      Evaluate and print result type");
     puts("");
     puts("Other Kaappi comma-commands are not implemented yet in the bootstrap.");
+}
+
+static int repl_import_spec(ChVM *vm, const char *spec_src) {
+    ChReader reader;
+    ch_reader_init(&reader, &vm->gc, spec_src, strlen(spec_src));
+
+    ChValue import_root = CH_NIL;
+    ChValue import_tail = CH_NIL;
+    ch_gc_push(&vm->gc, &import_root);
+    ch_gc_push(&vm->gc, &import_tail);
+
+    for (;;) {
+        ChValue datum = CH_NIL;
+        ch_gc_push(&vm->gc, &datum);
+        ChReadStatus st = read_repl_datum(vm, &reader, &datum);
+        if (st == CH_READ_EOF) {
+            ch_gc_pop(&vm->gc);
+            break;
+        }
+        if (st != CH_READ_OK) {
+            fprintf(stderr, "read error: %s\n", ch_reader_error(&reader));
+            ch_gc_pop_n(&vm->gc, 3);
+            return -1;
+        }
+        ChValue cell = ch_gc_cons(&vm->gc, datum, CH_NIL);
+        if (import_root == CH_NIL) {
+            import_root = cell;
+            import_tail = cell;
+        } else {
+            ch_as_pair(import_tail)->cdr = cell;
+            import_tail = cell;
+        }
+        ch_gc_pop(&vm->gc);
+    }
+
+    if (import_root == CH_NIL) {
+        fprintf(stderr, ",import: missing library spec\n");
+        ch_gc_pop_n(&vm->gc, 2);
+        return -1;
+    }
+
+    size_t sticky_roots = push_repl_vm_roots(vm);
+    if (ch_handle_import(vm, import_root) != 0) {
+        ch_gc_pop_n(&vm->gc, sticky_roots);
+        if (vm->error[0]) {
+            fprintf(stderr, "import error: %s\n", vm->error);
+        } else {
+            fprintf(stderr, "import error\n");
+        }
+        ch_gc_pop_n(&vm->gc, 2);
+        return -1;
+    }
+    ch_gc_pop_n(&vm->gc, sticky_roots + 2);
+    return 0;
+}
+
+static int repl_dis_expr(ChVM *vm, const char *expr_src) {
+    char wrap[8192];
+    int n = snprintf(wrap, sizeof(wrap), "(define __dis %s)", expr_src);
+    if (n < 0 || n >= (int)sizeof(wrap)) {
+        fprintf(stderr, ",dis: expression too long\n");
+        return -1;
+    }
+    if (ch_eval_source(vm, wrap, (size_t)n, 0) != 0) {
+        return -1;
+    }
+    for (size_t i = 0; i < vm->global_count; i++) {
+        if (!vm->globals[i].defined || strcmp(vm->globals[i].name->name, "__dis") != 0) {
+            continue;
+        }
+        ChValue v = vm->globals[i].value;
+        if (ch_is_closure(v)) {
+            ch_disassemble_function(stdout, ch_as_closure(v)->fn);
+            return 0;
+        }
+        if (ch_is_native(v)) {
+            ChNative *nat = ch_as_native(v);
+            fprintf(stderr, ",dis: native procedure %s (arity %d..%d)\n", nat->name, nat->min_arity,
+                    nat->arity);
+            return 0;
+        }
+        fprintf(stderr, ",dis: not a procedure\n");
+        return -1;
+    }
+    fprintf(stderr, ",dis: no result\n");
+    return -1;
 }
 
 static size_t push_repl_vm_roots(ChVM *vm) {
@@ -246,6 +338,24 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
         (void)repl_expand_expr(vm, expr);
         return 0;
     }
+    if (strncmp(cmd, ",import ", 8) == 0) {
+        const char *spec = trim_left(cmd + 8);
+        if (!spec[0]) {
+            fprintf(stderr, ",import: missing library spec\n");
+            return 0;
+        }
+        (void)repl_import_spec(vm, spec);
+        return 0;
+    }
+    if (strncmp(cmd, ",dis ", 5) == 0) {
+        const char *expr = trim_left(cmd + 5);
+        if (!expr[0]) {
+            fprintf(stderr, ",dis: missing expression\n");
+            return 0;
+        }
+        (void)repl_dis_expr(vm, expr);
+        return 0;
+    }
     if (strncmp(cmd, ",break ", 7) == 0) {
         const char *name = trim_left(cmd + 7);
         if (!name[0]) {
@@ -343,9 +453,7 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
     }
 
     /* Known Kaappi commands not yet supported */
-    static const char *nyi[] = {",condition",
-                                ",profile", ",dis",         ",describe", ",apropos", ",import",
-                                NULL};
+    static const char *nyi[] = {",condition", ",profile", ",describe", ",apropos", NULL};
     for (int i = 0; nyi[i]; i++) {
         size_t n = strlen(nyi[i]);
         if (strncmp(cmd, nyi[i], n) == 0 && (cmd[n] == '\0' || cmd[n] == ' ')) {
@@ -361,8 +469,8 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
 #ifdef CHAAYA_HAS_LINENOISE
 static void completion_callback(const char *buf, linenoiseCompletions *lc) {
     static const char *cmds[] = {",help",     ",quit", ",exit", ",version", ",load ", ",expand ",
-                                 ",break ",   ",breakpoints", ",delete ", ",step ", ",gc",
-                                 ",env",      ",time ", ",type ", NULL};
+                                 ",import ", ",dis ",   ",break ",   ",breakpoints", ",delete ",
+                                 ",step ", ",gc", ",env", ",time ", ",type ", NULL};
     if (buf[0] == ',') {
         for (int i = 0; cmds[i]; i++) {
             if (strncmp(cmds[i], buf, strlen(buf)) == 0) {

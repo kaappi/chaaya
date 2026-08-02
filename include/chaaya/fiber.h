@@ -58,6 +58,7 @@ ChValue ch_gc_make_channel(ChGC *gc, size_t capacity);
 
 int ch_fiber_spawn(ChVM *vm, ChValue thunk, ChValue *out_fiber);
 int ch_fiber_yield(ChVM *vm);
+int ch_fiber_join(ChVM *vm, ChValue fiber, ChValue *out_result);
 int ch_channel_send(ChVM *vm, ChValue channel, ChValue value);
 int ch_channel_recv(ChVM *vm, ChValue channel, ChValue *out_value);
 

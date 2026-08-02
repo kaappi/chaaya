@@ -17,6 +17,9 @@ int ch_eval_feature_req(ChVM *vm, ChValue req);
 /* Build the (features) list (newly consed). */
 ChValue ch_features_list(ChVM *vm);
 
+void ch_features_print_text(FILE *out);
+int ch_features_print_json(FILE *out, const char **lib_paths, size_t lib_path_count);
+
 void ch_register_features_primitives(ChVM *vm);
 
 #ifdef __cplusplus

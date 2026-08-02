@@ -30,10 +30,15 @@ static bool slot_occupied(const ChHashtable *ht, size_t idx) {
 }
 
 static bool key_equal(const ChHashtable *ht, ChValue a, ChValue b) {
-    if (ht->mode == CH_HASHTABLE_EQ) {
+    switch (ht->mode) {
+    case CH_HASHTABLE_EQ:
         return ch_eq(a, b);
+    case CH_HASHTABLE_EQV:
+        return ch_eqv(a, b);
+    case CH_HASHTABLE_EQUAL:
+        return ch_equal(a, b);
     }
-    return ch_eqv(a, b);
+    return false;
 }
 
 bool ch_hashtable_key_supported(ChValue key) {

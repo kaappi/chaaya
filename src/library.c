@@ -258,6 +258,7 @@ int ch_register_builtin_libraries(ChVM *vm) {
     static const char *const file_exports[] = {
         "call-with-input-file", "call-with-output-file", "with-input-from-file",
         "with-output-to-file",  "open-input-file",       "open-output-file",
+        "open-binary-input-file", "open-binary-output-file",
         "file-exists?",         "delete-file"};
     static const char *const complex_exports[] = {
         "angle", "imag-part", "magnitude", "make-polar", "make-rectangular", "real-part"};
@@ -273,8 +274,9 @@ int ch_register_builtin_libraries(ChVM *vm) {
                                                "time?", "make-time", "time-type", "time-second",
                                                "time-nanosecond"};
     static const char *const chaaya_fibers_exports[] = {
-        "spawn-fiber", "fiber-yield", "fiber?", "make-channel",
-        "channel?",    "channel-send!", "channel-recv"};
+        "spawn-fiber", "spawn", "fiber-yield", "yield", "fiber?", "fiber-join",
+        "make-channel", "channel?", "channel-send!", "channel-send", "channel-recv",
+        "channel-receive"};
     static const char *const chaaya_ffi_exports[] = {"open-foreign-library",
                                                       "close-foreign-library!",
                                                       "foreign-library?",
@@ -296,6 +298,56 @@ int ch_register_builtin_libraries(ChVM *vm) {
     static const char *const srfi254_exports[] = {
         "make-ephemeron",   "ephemeron?",       "ephemeron-key",    "ephemeron-value",
         "ephemeron-broken?", "ephemeron-ref",   "reference-barrier"};
+    static const char *const srfi1_exports[] = {
+        "fold", "fold-right", "reduce", "reduce-right", "filter", "remove", "partition",
+        "find", "find-tail", "any", "every", "count", "iota", "zip", "concatenate",
+        "take", "drop", "take-while", "drop-while", "filter-map", "append-map", "last",
+        "last-pair", "proper-list?", "dotted-list?", "circular-list?", "lset-intersection",
+        "lset-difference", "lset=", "lset-adjoin", "lset-union", "lset-xor", "xcons",
+        "cons*", "list-tabulate", "circular-list", "not-pair?", "null-list?", "list=",
+        "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth",
+        "ninth", "tenth", "car+cdr", "take-right", "drop-right", "split-at", "list-index",
+        "span", "break", "delete", "delete-duplicates", "alist-cons", "alist-copy",
+        "alist-delete", "unfold", "unfold-right", "append-reverse", "length+", "unzip1",
+        "unzip2", "pair-for-each", "pair-fold", "pair-fold-right", "map-in-order",
+        "map", "for-each", "length", "append", "reverse", "list-ref", "list-tail",
+        "list-set!", "list-copy", "make-list", "memq", "memv", "member", "assoc", "assq",
+        "assv",
+    };
+    static const char *const srfi13_exports[] = {
+        "string-null?", "string-concatenate", "string-prefix?", "string-suffix?",
+        "string-contains", "string-unfold", "string-unfold-right", "string-index-right",
+        "string-skip", "string-skip-right", "string-index", "string-take", "string-drop",
+        "string-trim", "string-trim-right", "string-trim-both",
+        "string-length", "string-append", "string-ref", "string-set!", "string-copy",
+        "string=?", "string<?", "string<=?", "string>?", "string>=?", "substring",
+    };
+    static const char *const srfi39_exports[] = {"make-parameter"};
+    static const char *const srfi69_exports[] = {
+        "make-hash-table", "hash-table?", "hash-table-ref", "hash-table-set!",
+        "hash-table-delete!", "hash-table-size", "hash-table-keys", "hash-table-values",
+        "hash-table-walk", "hash-table-fold", "hash-table-exists?", "hash-table-ref/default",
+        "hash-table-update!", "hash-table-update!/default", "hash-table->alist",
+        "alist->hash-table", "hash-table-merge!", "hash", "string-hash", "string-ci-hash",
+        "hash-by-identity",
+    };
+    static const char *const srfi133_exports[] = {
+        "vector-empty?", "vector-count", "vector-any", "vector-every", "vector-index",
+        "vector-index-right", "vector-skip", "vector-skip-right", "vector-swap!",
+        "vector-reverse!", "vector-reverse-copy", "vector-unfold", "vector-unfold-right",
+        "vector-fold", "vector-fold-right", "vector-map!", "vector-partition",
+        "vector-concatenate", "vector=", "vector-length", "vector-ref", "vector-set!",
+        "vector-copy", "vector-append", "vector-map", "vector-for-each", "make-vector",
+        "vector->list", "list->vector",
+    };
+    static const char *const srfi192_exports[] = {
+        "port-position", "set-port-position!", "port-has-port-position?",
+        "port-has-set-port-position!?",
+    };
+    static const char *const srfi258_exports[] = {
+        "string->uninterned-symbol", "symbol-interned?", "generate-uninterned-symbol",
+    };
+    static const char *const srfi260_exports[] = {"generate-symbol"};
     if (register_exports_from_globals(vm, "scheme.write", write_exports,
                                       sizeof(write_exports) / sizeof(write_exports[0])) != 0) {
         return -1;
@@ -357,6 +409,11 @@ int ch_register_builtin_libraries(ChVM *vm) {
                                           sizeof(chaaya_fibers_exports[0])) != 0) {
         return -1;
     }
+    if (register_exports_from_globals(vm, "kaappi.fibers", chaaya_fibers_exports,
+                                      sizeof(chaaya_fibers_exports) /
+                                          sizeof(chaaya_fibers_exports[0])) != 0) {
+        return -1;
+    }
     if (register_exports_from_globals(vm, "chaaya.ffi", chaaya_ffi_exports,
                                       sizeof(chaaya_ffi_exports) / sizeof(chaaya_ffi_exports[0])) !=
         0) {
@@ -377,6 +434,42 @@ int ch_register_builtin_libraries(ChVM *vm) {
     }
     if (register_exports_from_globals(vm, "srfi.254", srfi254_exports,
                                       sizeof(srfi254_exports) / sizeof(srfi254_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "srfi.1", srfi1_exports,
+                                      sizeof(srfi1_exports) / sizeof(srfi1_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "srfi.13", srfi13_exports,
+                                      sizeof(srfi13_exports) / sizeof(srfi13_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "srfi.39", srfi39_exports,
+                                      sizeof(srfi39_exports) / sizeof(srfi39_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "srfi.69", srfi69_exports,
+                                      sizeof(srfi69_exports) / sizeof(srfi69_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "srfi.133", srfi133_exports,
+                                      sizeof(srfi133_exports) / sizeof(srfi133_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "srfi.192", srfi192_exports,
+                                      sizeof(srfi192_exports) / sizeof(srfi192_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "srfi.258", srfi258_exports,
+                                      sizeof(srfi258_exports) / sizeof(srfi258_exports[0])) != 0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "srfi.260", srfi260_exports,
+                                      sizeof(srfi260_exports) / sizeof(srfi260_exports[0])) != 0) {
+        return -1;
+    }
+    /* SRFI 9 (define-record-type) is syntax-only; library exists for import. */
+    if (register_exports_from_globals(vm, "srfi.9", NULL, 0) != 0) {
         return -1;
     }
     /* case-lambda is a compiler special form; library exists for R7RS import. */

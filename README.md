@@ -69,7 +69,7 @@ See [docs/dev/cli.md](docs/dev/cli.md) and [docs/dev/repl.md](docs/dev/repl.md).
 | 4 | `call/cc`, `dynamic-wind`, exceptions (**done**) |
 | 5 | Hygienic `syntax-rules` + derived forms (**done**) |
 | 6 | R7RS libraries + portable `.sld` reuse from Kaappi (**done**) |
-| 7 | Full R7RS-small surface (**in progress**: numeric tower + math libs; R7RS suite ~85% green) |
+| 7 | Full R7RS-small surface (**R7RS CTest green**; kaappi-deferred compliance/smoke batches in progress) |
 | 8 | IR/opts, generational GC, CLI tooling (`check`, `expand`, `fmt`, cache) (**MVP done**) |
 | 9 | Portable SRFI subset + import resolution (**partial**: ~192 vendored under `lib/srfi/`) |
 | 10 | Fibers + FFI + reactor (**MVP done**; SRFI-18 threads NYI) |
@@ -86,10 +86,11 @@ These items are tracked for future work; current tree ships honest stubs only.
 | **LSP** | [`src/lsp.c`](src/lsp.c) MVP (initialize/shutdown) | diagnostics, go-to-def, document symbols |
 | **Compile cache** | [`include/chaaya/cache.h`](include/chaaya/cache.h) API stub | `.chaaya/cache` layout, invalidation, CLI `--cache` wiring |
 | **thottam** | [`docs/dev/thottam.md`](docs/dev/thottam.md); use Kaappi's Zig thottam, not a C reimplementation | Chaaya `--lib-path` consumer docs, optional `scripts/thottam-smoke.sh` in CI |
-| **R7RS CTest gate** | [`tests/scheme/run_r7rs.cmake`](tests/scheme/run_r7rs.cmake) | Drive suite to 0 failures; enable more [`tests/scheme/kaappi-deferred/`](tests/scheme/kaappi-deferred/) tiers |
+| **R7RS CTest gate** | [`tests/scheme/run_r7rs.cmake`](tests/scheme/run_r7rs.cmake) — **green** | Expand [`tests/scheme/kaappi-deferred/`](tests/scheme/kaappi-deferred/) smoke/compliance batches |
 
 Language-parity target (≈99% Kaappi language surface): R7RS-small + portable
-SRFIs. Deferred for later: fibers, FFI, LLVM, WASM, LSP, thottam.
+SRFIs. Fibers and FFI are **MVP done**; LLVM, WASM, LSP, and thottam integration
+remain deferred (see Phase 11).
 
 ## Relationship to Kaappi
 

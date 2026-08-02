@@ -57,10 +57,16 @@ add_library(chaaya_core STATIC
   src/prim_random.c
   src/prim_filesystem.c
   src/prim_weak.c
+  src/prim_srfi1.c
+  src/prim_srfi13.c
+  src/prim_srfi133.c
+  src/prim_srfi258.c
+  src/prim_srfi260.c
   src/unicode.c
   src/unicode_tables.c
   src/eval.c
   src/cache.c
+  src/disasm.c
   src/cli.c
   src/repl.c
 )
@@ -250,6 +256,36 @@ chaaya_kaappi_deferred_test(unicode_case tests/scheme/kaappi-deferred/compliance
 chaaya_kaappi_deferred_test(strings tests/scheme/kaappi-deferred/compliance/strings.scm)
 chaaya_kaappi_deferred_test(complex_strings tests/scheme/kaappi-deferred/compliance/complex-strings.scm)
 chaaya_kaappi_deferred_test(string_ports tests/scheme/kaappi-deferred/compliance/string-ports.scm)
+chaaya_kaappi_deferred_test(r7rs_datatypes_gaps tests/scheme/kaappi-deferred/compliance/r7rs-datatypes-gaps.scm)
+chaaya_kaappi_deferred_test(time tests/scheme/kaappi-deferred/compliance/time.scm)
+chaaya_kaappi_deferred_test(process_context tests/scheme/kaappi-deferred/compliance/process-context.scm)
+chaaya_kaappi_deferred_test(scheme_repl tests/scheme/kaappi-deferred/compliance/scheme-repl.scm)
+chaaya_kaappi_deferred_test(include_lib_decls tests/scheme/kaappi-deferred/compliance/include-lib-decls.scm)
+chaaya_kaappi_deferred_test(correctness_fixes tests/scheme/kaappi-deferred/compliance/correctness-fixes.scm)
+chaaya_kaappi_deferred_test(final_gaps tests/scheme/kaappi-deferred/compliance/final-gaps.scm)
+chaaya_kaappi_deferred_test(bugfixes tests/scheme/kaappi-deferred/compliance/bugfixes.scm)
+chaaya_kaappi_deferred_test(deferred_bugfixes tests/scheme/kaappi-deferred/compliance/deferred-bugfixes.scm)
+chaaya_kaappi_deferred_test(deferred_final tests/scheme/kaappi-deferred/compliance/deferred-final.scm)
+
+# Tier 3 kaappi-deferred smoke
+chaaya_kaappi_deferred_test(smoke_basic tests/scheme/kaappi-deferred/smoke/basic.scm)
+chaaya_kaappi_deferred_test(smoke_numeric tests/scheme/kaappi-deferred/smoke/numeric.scm)
+chaaya_kaappi_deferred_test(smoke_macros tests/scheme/kaappi-deferred/smoke/macros.scm)
+chaaya_kaappi_deferred_test(smoke_expander_fixes tests/scheme/kaappi-deferred/smoke/expander-fixes.scm)
+chaaya_kaappi_deferred_test(smoke_expander_many_patvars tests/scheme/kaappi-deferred/smoke/expander-many-patvars.scm)
+chaaya_kaappi_deferred_test(smoke_gc_mark_contents_types tests/scheme/kaappi-deferred/smoke/gc-mark-contents-types.scm)
+chaaya_kaappi_deferred_test(smoke_bignum_rational_arith tests/scheme/kaappi-deferred/smoke/bignum-rational-arith.scm)
+chaaya_kaappi_deferred_test(smoke_bignum_division_multi_arg tests/scheme/kaappi-deferred/smoke/bignum-division-multi-arg.scm)
+chaaya_kaappi_deferred_test(smoke_bignum_rational_normalization tests/scheme/kaappi-deferred/smoke/bignum-rational-normalization.scm)
+chaaya_kaappi_deferred_test(smoke_not_not_non_boolean tests/scheme/kaappi-deferred/smoke/not-not-non-boolean.scm)
+chaaya_kaappi_deferred_test(smoke_zero_pred_type_error tests/scheme/kaappi-deferred/smoke/zero-pred-type-error.scm)
+chaaya_kaappi_deferred_test(smoke_literal_immutability tests/scheme/kaappi-deferred/smoke/literal-immutability.scm)
+chaaya_kaappi_deferred_test(smoke_apply_shadowing tests/scheme/kaappi-deferred/smoke/apply-shadowing.scm)
+chaaya_kaappi_deferred_test(smoke_call_with_values_arity tests/scheme/kaappi-deferred/smoke/call-with-values-arity.scm)
+chaaya_kaappi_deferred_test(smoke_binding_form_validation tests/scheme/kaappi-deferred/smoke/binding-form-validation.scm)
+chaaya_kaappi_deferred_test(smoke_memv_assv_numeric tests/scheme/kaappi-deferred/smoke/memv-assv-numeric.scm)
+# Deferred (not green yet): circular-list-terminate (timeout), equal-dag,
+# case-lambda-fixes, expt-negative-base-1725 (negative-base fractional expt)
 
 # Display probes adapted from Kaappi differential/probes
 function(chaaya_probe_test name)
