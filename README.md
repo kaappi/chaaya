@@ -81,7 +81,7 @@ See [docs/dev/cli.md](docs/dev/cli.md) and [docs/dev/repl.md](docs/dev/repl.md).
 |------|---------------|-----------------|
 | **LLVM native** | Real LLVM IR emit + constant-exit lowering + `chaaya_rt` fallback ([`src/llvm_backend.c`](src/llvm_backend.c)) | broader form lowering, full C ABI runtime bridge |
 | **WASM** | `chaaya wasm` runs [`scripts/build-wasm.sh`](scripts/build-wasm.sh); host-stub / WASI CMake paths | wasm32-wasi CI matrix, browser playground binary |
-| **LSP** | Diagnostics, symbols, completion, hover, definition, references ([`src/lsp.c`](src/lsp.c)) | workspace/project indexing, richer docs |
+| **LSP** | Diagnostics, symbols, completion, hover, definition, references ([`src/lsp.c`](src/lsp.c), [`src/lsp_analysis.c`](src/lsp_analysis.c)) | workspace/project indexing, richer docs |
 | **Compile cache** | Auto `.chbc` read/write + `cache status\|clear` ([`src/cache.c`](src/cache.c)) | import-aware caching, richer per-entry status |
 | **CLI observability** | `--disassemble`, `--timings`, `--gc-stats`, `--compile`, profile/coverage/timeout/sandbox MVPs | deeper coverage of library exports, parallel test `--changed` |
 | **thottam** | Use Kaappi's Zig thottam ([`docs/dev/thottam.md`](docs/dev/thottam.md)); not reimplemented in C | consumer docs / smoke wiring only |

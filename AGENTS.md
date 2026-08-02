@@ -69,7 +69,9 @@ docs/dev/         Contributor docs
 third_party/      Vendored deps (linenoise)
 ```
 
-Keep source files under ~1500 lines; split along domain seams when they grow.
+Logic `src/*.c` files: soft limit ~1500 lines, hard limit 1800. Split along
+domain seams before crossing the hard limit. Exempt generated data (e.g.
+`unicode_tables.c`) and `third_party/`.
 
 ## Adding primitives
 
@@ -167,6 +169,7 @@ See [README.md](README.md) for the full phase table.
 - Keep diffs focused — one concern per change when possible.
 - Consult `docs/dev/` before guessing at CLI, REPL, or test conventions.
 - Prefer **C23 standard features** over C17 workarounds or compiler extensions when touching C code; follow [docs/dev/c23.md](docs/dev/c23.md).
+- Split logic sources before they exceed 1800 lines (soft target ~1500).
 
 **Don't**
 

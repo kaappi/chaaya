@@ -98,10 +98,11 @@ records old→young stores on a remembered set; minor GC marks from roots plus
 remembered-set object contents, then prunes entries that no longer reference
 young objects.
 
-**Fibers / reactor:** cooperative fibers (`src/fiber.c`) park on channels, timers,
-and fds. The reactor (`src/reactor.c`) owns a timer heap plus a kqueue (Darwin)
-or epoll (Linux) fd multiplexer; `thread-sleep!` schedules a timer and parks the
-current fiber so siblings keep running. Feature ids: `chaaya-reactor` /
+**Fibers / reactor:** cooperative fibers (`src/fiber.c`; local (non-shared)
+channel storage and send/recv/close in `src/channel.c`) park on channels,
+timers, and fds. The reactor (`src/reactor.c`) owns a timer heap plus a kqueue
+(Darwin) or epoll (Linux) fd multiplexer; `thread-sleep!` schedules a timer and
+parks the current fiber so siblings keep running. Feature ids: `chaaya-reactor` /
 `kaappi-reactor`.
 
 **SRFI-18 / shared channels / FFI callbacks:** OS threads (`src/thread.c`) use a

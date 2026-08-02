@@ -41,6 +41,7 @@ add_library(chaaya_core STATIC
   src/diagnostics.c
   src/doctor.c
   src/fiber.c
+  src/channel.c
   src/reactor.c
   src/thread.c
   src/gc_deep_copy.c
@@ -49,6 +50,7 @@ add_library(chaaya_core STATIC
   src/ffi_callback.c
   src/llvm_backend.c
   src/lsp.c
+  src/lsp_analysis.c
   src/runtime_exports.c
   src/vm.c
   src/prim_core.c
@@ -64,6 +66,7 @@ add_library(chaaya_core STATIC
   src/prim_bytevector.c
   src/prim_math.c
   src/prim_port.c
+  src/prim_port_io.c
   src/prim_error.c
   src/prim_record.c
   src/prim_lazy.c
@@ -137,6 +140,7 @@ add_library(chaaya_rt STATIC
   src/features.c
   src/diagnostics.c
   src/fiber.c
+  src/channel.c
   src/reactor.c
   src/thread.c
   src/gc_deep_copy.c
@@ -157,6 +161,7 @@ add_library(chaaya_rt STATIC
   src/prim_bytevector.c
   src/prim_math.c
   src/prim_port.c
+  src/prim_port_io.c
   src/prim_error.c
   src/prim_record.c
   src/prim_lazy.c
