@@ -113,6 +113,9 @@ void ch_vm_register_primitives(ChVM *vm) {
     ch_register_core_primitives(vm);
     ch_register_list_primitives(vm);
     ch_register_data_primitives(vm);
+    ch_register_char_primitives(vm);
+    ch_register_string_primitives(vm);
+    ch_register_vector_primitives(vm);
     ch_register_bytevector_primitives(vm);
     ch_register_math_primitives(vm);
     ch_register_port_primitives(vm);

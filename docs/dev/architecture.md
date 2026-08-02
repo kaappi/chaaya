@@ -30,17 +30,17 @@ the compiler via `CH_IR_RAW` passthrough. Details: [ir.md](ir.md).
 
 | Stage | Files | Role |
 |-------|-------|------|
-| **Reader** | [`src/reader.c`](../../src/reader.c), [`include/chaaya/reader.h`](../../include/chaaya/reader.h) | Recursive-descent datum reader: lists, vectors, quote/quasiquote abbrevs, strings, numbers, `#t`/`#f`, characters |
-| **Expander** | [`src/expander.c`](../../src/expander.c), [`include/chaaya/expander.h`](../../include/chaaya/expander.h) | `syntax-rules` match/instantiate, macro table, `chaaya expand` |
+| **Reader** | [`src/reader.c`](../../src/reader.c), [`src/reader_number.c`](../../src/reader_number.c), [`include/chaaya/reader.h`](../../include/chaaya/reader.h) | Recursive-descent datum reader: lists, vectors, quote/quasiquote abbrevs, strings, numbers, `#t`/`#f`, characters |
+| **Expander** | [`src/expander_syntax_rules.c`](../../src/expander_syntax_rules.c), [`src/expander_toplevel.c`](../../src/expander_toplevel.c), [`include/chaaya/expander.h`](../../include/chaaya/expander.h) | `syntax-rules` match/instantiate, macro table, `chaaya expand` |
 | **IR** | [`src/ir_*.c`](../../src/ir_lower.c), [`include/chaaya/ir.h`](../../include/chaaya/ir.h) | Tree IR: lower, analyze, optimize, reify; see [ir.md](ir.md) |
 | **Printer** | [`src/printer.c`](../../src/printer.c), [`include/chaaya/printer.h`](../../include/chaaya/printer.h) | `write` / `display` rendering |
-| **Compiler** | [`src/compiler.c`](../../src/compiler.c), [`include/chaaya/compiler.h`](../../include/chaaya/compiler.h) | Top-level AST → `ChFunction` bytecode; lexical locals + upvalues |
+| **Compiler** | [`src/compiler.c`](../../src/compiler.c), [`src/compiler_bind.c`](../../src/compiler_bind.c), [`src/compiler_control.c`](../../src/compiler_control.c), [`include/chaaya/compiler.h`](../../include/chaaya/compiler.h) | Top-level AST → `ChFunction` bytecode; lexical locals + upvalues |
 | **VM** | [`src/vm.c`](../../src/vm.c), [`include/chaaya/vm.h`](../../include/chaaya/vm.h) | Dispatch loop, calls/tail-calls, globals, upvalue close-over |
 | **GC** | [`src/gc.c`](../../src/gc.c), [`include/chaaya/gc.h`](../../include/chaaya/gc.h) | Mark-sweep heap, root stack, symbol intern table |
 | **Values** | [`src/value.c`](../../src/value.c), [`include/chaaya/value.h`](../../include/chaaya/value.h) | NaN-boxed `ChValue`, heap object tags, equality |
-| **Primitives** | [`src/prim_core.c`](../../src/prim_core.c), [`src/prim_control.c`](../../src/prim_control.c) | Core natives + `call/cc` / wind / exceptions |
+| **Primitives** | [`src/prim_*.c`](../../src/prim_core.c) | Core natives + domain registrars (`char`/`string`/`vector`/…) |
 | **Eval** | [`src/eval.c`](../../src/eval.c) | Shared top-level eval + `_` binding |
-| **CLI** | [`src/cli.c`](../../src/cli.c), [`include/chaaya/cli.h`](../../include/chaaya/cli.h) | Kaappi-shaped help/flags/subcommands; see [cli.md](cli.md) |
+| **CLI** | [`src/cli.c`](../../src/cli.c), [`src/cli_parse.c`](../../src/cli_parse.c), [`src/cli_cmds.c`](../../src/cli_cmds.c), [`include/chaaya/cli.h`](../../include/chaaya/cli.h) | Kaappi-shaped help/flags/subcommands; see [cli.md](cli.md) |
 | **REPL** | [`src/repl.c`](../../src/repl.c), [`include/chaaya/repl.h`](../../include/chaaya/repl.h) | Interactive loop; see [repl.md](repl.md) |
 | **Driver** | [`src/main.c`](../../src/main.c) | `main` → parse → dispatch |
 | **linenoise** | [`third_party/linenoise/`](../../third_party/linenoise/) | Vendored BSD line editor (history in `~/.chaaya/history`) |

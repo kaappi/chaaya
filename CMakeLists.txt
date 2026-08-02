@@ -22,6 +22,7 @@ add_library(chaaya_core STATIC
   src/rational.c
   src/complex.c
   src/reader.c
+  src/reader_number.c
   src/printer.c
   src/ir.c
   src/ir_lower.c
@@ -29,9 +30,13 @@ add_library(chaaya_core STATIC
   src/ir_opt.c
   src/ir_emit.c
   src/compiler.c
-  src/expander.c
+  src/compiler_bind.c
+  src/compiler_control.c
+  src/expander_syntax_rules.c
+  src/expander_toplevel.c
   src/environment.c
   src/library.c
+  src/library_builtin.c
   src/features.c
   src/diagnostics.c
   src/doctor.c
@@ -52,6 +57,10 @@ add_library(chaaya_core STATIC
   src/prim_ffi.c
   src/prim_list.c
   src/prim_data.c
+  src/prim_char.c
+  src/prim_string.c
+  src/prim_vector.c
+  src/prim_utf8.c
   src/prim_bytevector.c
   src/prim_math.c
   src/prim_port.c
@@ -78,6 +87,8 @@ add_library(chaaya_core STATIC
   src/test_runner.c
   src/fmt.c
   src/cli.c
+  src/cli_parse.c
+  src/cli_cmds.c
   src/repl.c
   src/sandbox.c
   src/profile.c
@@ -108,6 +119,7 @@ add_library(chaaya_rt STATIC
   src/rational.c
   src/complex.c
   src/reader.c
+  src/reader_number.c
   src/printer.c
   src/ir.c
   src/ir_lower.c
@@ -115,9 +127,13 @@ add_library(chaaya_rt STATIC
   src/ir_opt.c
   src/ir_emit.c
   src/compiler.c
-  src/expander.c
+  src/compiler_bind.c
+  src/compiler_control.c
+  src/expander_syntax_rules.c
+  src/expander_toplevel.c
   src/environment.c
   src/library.c
+  src/library_builtin.c
   src/features.c
   src/diagnostics.c
   src/fiber.c
@@ -134,6 +150,10 @@ add_library(chaaya_rt STATIC
   src/prim_ffi.c
   src/prim_list.c
   src/prim_data.c
+  src/prim_char.c
+  src/prim_string.c
+  src/prim_vector.c
+  src/prim_utf8.c
   src/prim_bytevector.c
   src/prim_math.c
   src/prim_port.c

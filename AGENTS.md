@@ -44,15 +44,15 @@ Source → Reader → Expander → Compiler → VM → GC
 
 | Stage | Key files |
 |-------|-----------|
-| Reader | `src/reader.c`, `include/chaaya/reader.h` |
-| Expander | `src/expander.c` — `syntax-rules`, hygiene |
-| Compiler | `src/compiler.c` — AST → register bytecode |
+| Reader | `src/reader.c`, `src/reader_number.c`, `include/chaaya/reader.h` |
+| Expander | `src/expander_syntax_rules.c`, `src/expander_toplevel.c` — `syntax-rules`, hygiene |
+| Compiler | `src/compiler.c`, `src/compiler_bind.c`, `src/compiler_control.c` — AST → register bytecode |
 | VM | `src/vm.c`, `include/chaaya/opcode.h` |
 | GC / values | `src/gc.c`, `src/value.c` — NaN-boxed `ChValue` |
 | Primitives | `src/prim_*.c` — one file per domain |
-| Libraries | `src/library.c` — R7RS `(scheme …)` exports |
+| Libraries | `src/library.c`, `src/library_builtin.c` — R7RS `(scheme …)` exports |
 | Numeric tower | `src/bignum.c`, `src/rational.c`, `src/complex.c` |
-| CLI / REPL | `src/cli.c`, `src/repl.c`, `src/main.c` |
+| CLI / REPL | `src/cli.c`, `src/cli_parse.c`, `src/cli_cmds.c`, `src/repl.c`, `src/main.c` |
 
 Full detail: [docs/dev/architecture.md](docs/dev/architecture.md). C23 policy and
 features: [docs/dev/c23.md](docs/dev/c23.md).
@@ -86,7 +86,7 @@ On error, set `vm->error` and return `CH_UNDEFINED`.
 ## Adding R7RS libraries
 
 Built-in `(scheme …)` libraries are registered in
-`ch_register_builtin_libraries()` in `src/library.c`. Each library lists export
+`ch_register_builtin_libraries()` in `src/library_builtin.c`. Each library lists export
 names; bindings are resolved from VM globals (soft-skip if a name is missing).
 
 `(scheme base)` auto-exports all defined globals except `%`-prefixed internals.
