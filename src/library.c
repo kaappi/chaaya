@@ -1301,8 +1301,8 @@ static int lib_include_decls(ChVM *vm, ChLibEnv *env, ChValue files, ChSymbol **
                      "include-library-declarations: file not found: %s", s->data);
             return -1;
         }
-        char *old_dir = vm->current_lib_dir;
-        vm->current_lib_dir = dirname_dup(path);
+        /* Keep current_lib_dir (library/script dir) for nested ild paths —
+         * match Kaappi: do not re-root to the included file's directory. */
         ChValue forms = CH_NIL;
         ch_gc_push(&vm->gc, &forms);
         int rc = read_forms_from_file(vm, path, 0, &forms);
@@ -1317,8 +1317,6 @@ static int lib_include_decls(ChVM *vm, ChLibEnv *env, ChValue files, ChSymbol **
             }
         }
         ch_gc_pop(&vm->gc);
-        free(vm->current_lib_dir);
-        vm->current_lib_dir = old_dir;
         if (rc != 0) {
             return -1;
         }

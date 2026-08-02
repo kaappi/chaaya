@@ -5,8 +5,8 @@ These trees are copied from [Kaappi](https://github.com/kaappi/kaappi)
 
 | Tree | Source | CTest / blockers (2026-08) |
 |------|--------|----------------------------|
-| `smoke/` | `kaappi/tests/scheme/smoke/` | not wired — enable after compliance Tier-1 stabilizes |
-| `compliance/` | `kaappi/tests/scheme/compliance/` | **Tier 1 wired (green):** `sqrt-exact`, `lists`, `vectors`. **Tier 2 wired (green):** `macro-export-scope`, `chars`, `bytevectors`, `eval`, `lazy`. |
+| `smoke/` | `kaappi/tests/scheme/smoke/` | **partially wired** — language + green batch in CTest; skip `jit-*` / `llvm-*` / SRFI-18 |
+| `compliance/` | `kaappi/tests/scheme/compliance/` | **language-parity track wired (green)** including hygiene, continuations, tail-procedures, printer-gaps, import/libraries, expressions, port refill, records |
 | `differential-probes/` | `kaappi/tests/scheme/differential/probes/` | not wired — needs full numeric tower + error semantics |
 
 Active ports that already run under `make test`:

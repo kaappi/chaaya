@@ -12,22 +12,73 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define CH_MAX_SHARED 1024
 #define CH_MAX_PRINT_DEPTH 1024
 
 typedef struct ChSharedState {
-    ChValue seen[CH_MAX_SHARED];
+    ChValue *seen;
     size_t seen_count;
-    ChValue shared[CH_MAX_SHARED];
-    int32_t labels[CH_MAX_SHARED];
+    size_t seen_cap;
+    ChValue *shared;
+    int32_t *labels;
     size_t shared_count;
+    size_t shared_cap;
     int32_t next_label;
     uint32_t depth;
-    ChValue on_stack[CH_MAX_SHARED];
+    ChValue *on_stack;
     size_t on_stack_count;
-    ChValue done[CH_MAX_SHARED];
+    size_t on_stack_cap;
+    ChValue *done;
     size_t done_count;
+    size_t done_cap;
+    int oom;
 } ChSharedState;
+
+static int ensure_values_cap(ChValue **arr, size_t *cap, size_t need) {
+    if (need <= *cap) {
+        return 0;
+    }
+    size_t ncap = *cap ? *cap * 2 : 64;
+    while (ncap < need) {
+        ncap *= 2;
+    }
+    ChValue *n = (ChValue *)realloc(*arr, ncap * sizeof(ChValue));
+    if (!n) {
+        return -1;
+    }
+    *arr = n;
+    *cap = ncap;
+    return 0;
+}
+
+static int ensure_labels_cap(ChSharedState *st, size_t need) {
+    if (need <= st->shared_cap) {
+        return 0;
+    }
+    size_t ncap = st->shared_cap ? st->shared_cap * 2 : 64;
+    while (ncap < need) {
+        ncap *= 2;
+    }
+    ChValue *ns = (ChValue *)realloc(st->shared, ncap * sizeof(ChValue));
+    int32_t *nl = (int32_t *)realloc(st->labels, ncap * sizeof(int32_t));
+    if (!ns || !nl) {
+        free(ns);
+        free(nl);
+        return -1;
+    }
+    st->shared = ns;
+    st->labels = nl;
+    st->shared_cap = ncap;
+    return 0;
+}
+
+static void shared_state_free(ChSharedState *st) {
+    free(st->seen);
+    free(st->shared);
+    free(st->labels);
+    free(st->on_stack);
+    free(st->done);
+    memset(st, 0, sizeof(*st));
+}
 
 static void print_value_atom(FILE *out, ChValue v, bool display);
 static void print_value_shared(FILE *out, ChValue v, ChSharedState *st, bool display);
@@ -251,7 +302,8 @@ static void record_shared(ChSharedState *st, ChValue v) {
     if (shared_index(st, v) >= 0) {
         return;
     }
-    if (st->shared_count >= CH_MAX_SHARED) {
+    if (ensure_labels_cap(st, st->shared_count + 1) != 0) {
+        st->oom = 1;
         return;
     }
     st->shared[st->shared_count] = v;
@@ -280,7 +332,7 @@ static int32_t peek_label(ChSharedState *st, ChValue v) {
 
 /* write-shared: mark every heap object referenced more than once. */
 static void mark_shared(ChValue v, ChSharedState *st) {
-    if (!is_labelable(v) || st->depth >= CH_MAX_PRINT_DEPTH) {
+    if (!is_labelable(v) || st->depth >= CH_MAX_PRINT_DEPTH || st->oom) {
         return;
     }
     st->depth++;
@@ -289,9 +341,12 @@ static void mark_shared(ChValue v, ChSharedState *st) {
         st->depth--;
         return;
     }
-    if (st->seen_count < CH_MAX_SHARED) {
-        st->seen[st->seen_count++] = v;
+    if (ensure_values_cap(&st->seen, &st->seen_cap, st->seen_count + 1) != 0) {
+        st->oom = 1;
+        st->depth--;
+        return;
     }
+    st->seen[st->seen_count++] = v;
     if (ch_is_pair(v)) {
         mark_shared(ch_car(v), st);
         mark_shared(ch_cdr(v), st);
@@ -309,44 +364,89 @@ static void mark_shared(ChValue v, ChSharedState *st) {
     st->depth--;
 }
 
-/* write/display: mark only objects on a cycle (DFS back-edges). */
+/* write/display: mark only objects on a cycle (DFS back-edges).
+ * Pair spines are walked iteratively so flat lists of any length do not blow
+ * the C stack (Kaappi markCycles). */
+static void mark_cycles(ChValue v, ChSharedState *st);
+
+static int push_value(ChValue **arr, size_t *count, size_t *cap, ChValue v, ChSharedState *st) {
+    if (ensure_values_cap(arr, cap, *count + 1) != 0) {
+        st->oom = 1;
+        return -1;
+    }
+    (*arr)[(*count)++] = v;
+    return 0;
+}
+
 static void mark_cycles(ChValue v, ChSharedState *st) {
-    if (!is_labelable(v) || st->depth >= CH_MAX_PRINT_DEPTH) {
+    if (st->depth >= CH_MAX_PRINT_DEPTH || st->oom) {
         return;
     }
-    if (contains_value(st->on_stack, st->on_stack_count, v)) {
-        record_shared(st, v);
+    if (!ch_is_pointer(v)) {
         return;
-    }
-    if (contains_value(st->done, st->done_count, v)) {
-        return;
-    }
-    if (st->on_stack_count >= CH_MAX_SHARED) {
-        return;
-    }
-    st->on_stack[st->on_stack_count++] = v;
-    st->depth++;
-
-    if (ch_is_pair(v)) {
-        mark_cycles(ch_car(v), st);
-        mark_cycles(ch_cdr(v), st);
-    } else if (ch_is_vector(v)) {
-        ChVector *vec = ch_as_vector(v);
-        for (size_t i = 0; i < vec->len; i++) {
-            mark_cycles(vec->items[i], st);
-        }
-    } else if (ch_is_record(v)) {
-        ChRecord *r = ch_as_record(v);
-        for (size_t i = 0; i < r->num_fields; i++) {
-            mark_cycles(r->fields[i], st);
-        }
     }
 
-    st->on_stack_count--;
-    if (st->done_count < CH_MAX_SHARED) {
-        st->done[st->done_count++] = v;
+    if (ch_is_vector(v) || ch_is_record(v)) {
+        if (contains_value(st->on_stack, st->on_stack_count, v)) {
+            record_shared(st, v);
+            return;
+        }
+        if (contains_value(st->done, st->done_count, v)) {
+            return;
+        }
+        if (push_value(&st->on_stack, &st->on_stack_count, &st->on_stack_cap, v, st) != 0) {
+            return;
+        }
+        st->depth++;
+        if (ch_is_vector(v)) {
+            ChVector *vec = ch_as_vector(v);
+            for (size_t i = 0; i < vec->len; i++) {
+                mark_cycles(vec->items[i], st);
+            }
+        } else {
+            ChRecord *r = ch_as_record(v);
+            for (size_t i = 0; i < r->num_fields; i++) {
+                mark_cycles(r->fields[i], st);
+            }
+        }
+        st->on_stack_count--;
+        (void)push_value(&st->done, &st->done_count, &st->done_cap, v, st);
+        st->depth--;
+        return;
     }
-    st->depth--;
+
+    if (!ch_is_pair(v)) {
+        return;
+    }
+
+    /* Walk cdr spine iteratively; recurse only into cars / dotted tails. */
+    size_t spine_start = st->on_stack_count;
+    ChValue cur = v;
+    while (ch_is_pair(cur)) {
+        if (contains_value(st->on_stack, st->on_stack_count, cur)) {
+            record_shared(st, cur);
+            break;
+        }
+        if (contains_value(st->done, st->done_count, cur)) {
+            break;
+        }
+        if (push_value(&st->on_stack, &st->on_stack_count, &st->on_stack_cap, cur, st) != 0) {
+            break;
+        }
+        if (st->depth < CH_MAX_PRINT_DEPTH) {
+            st->depth++;
+            mark_cycles(ch_car(cur), st);
+            st->depth--;
+        }
+        cur = ch_cdr(cur);
+    }
+    if (!ch_is_nil(cur) && !ch_is_pair(cur)) {
+        mark_cycles(cur, st);
+    }
+    while (st->on_stack_count > spine_start) {
+        ChValue node = st->on_stack[--st->on_stack_count];
+        (void)push_value(&st->done, &st->done_count, &st->done_cap, node, st);
+    }
 }
 
 static void print_string_write(FILE *out, const ChString *s) {
@@ -400,7 +500,9 @@ static void print_list_shared(FILE *out, ChValue v, ChSharedState *st, bool disp
     fputc(')', out);
 }
 
-static void print_list_simple(FILE *out, ChValue v, bool display) {
+static void print_value_with_depth(FILE *out, ChValue v, bool display, uint32_t depth);
+
+static void print_list_simple(FILE *out, ChValue v, bool display, uint32_t depth) {
     fputc('(', out);
     bool first = true;
     while (ch_is_pair(v)) {
@@ -408,12 +510,12 @@ static void print_list_simple(FILE *out, ChValue v, bool display) {
             fputc(' ', out);
         }
         first = false;
-        print_value_atom(out, ch_car(v), display);
+        print_value_with_depth(out, ch_car(v), display, depth + 1);
         v = ch_cdr(v);
     }
     if (!ch_is_nil(v)) {
         fputs(" . ", out);
-        print_value_atom(out, v, display);
+        print_value_with_depth(out, v, display, depth + 1);
     }
     fputc(')', out);
 }
@@ -496,8 +598,9 @@ static void print_value_atom(FILE *out, ChValue v, bool display) {
         }
         return;
     }
-    if (ch_is_pair(v)) {
-        print_list_simple(out, v, display);
+    if (ch_is_pair(v) || ch_is_vector(v)) {
+        /* Prefer print_value_with_depth for compound data. */
+        print_value_with_depth(out, v, display, 0);
         return;
     }
     if (ch_is_symbol(v)) {
@@ -518,18 +621,6 @@ static void print_value_atom(FILE *out, ChValue v, bool display) {
         } else {
             print_string_write(out, s);
         }
-        return;
-    }
-    if (ch_is_vector(v)) {
-        ChVector *vec = ch_as_vector(v);
-        fputs("#(", out);
-        for (size_t i = 0; i < vec->len; i++) {
-            if (i > 0) {
-                fputc(' ', out);
-            }
-            print_value_atom(out, vec->items[i], display);
-        }
-        fputc(')', out);
         return;
     }
     if (ch_is_bytevector(v)) {
@@ -619,11 +710,54 @@ static void print_value_atom(FILE *out, ChValue v, bool display) {
         fputs("#<promise>", out);
         return;
     }
+    if (ch_is_error_object(v)) {
+        ChErrorObject *err = ch_as_error_object(v);
+        fputs("#<error ", out);
+        print_value_with_depth(out, err->message, display, 0);
+        ChValue irr = err->irritants;
+        while (!ch_is_nil(irr)) {
+            fputc(' ', out);
+            if (ch_is_pair(irr)) {
+                print_value_with_depth(out, ch_car(irr), display, 0);
+                irr = ch_cdr(irr);
+            } else {
+                print_value_with_depth(out, irr, display, 0);
+                break;
+            }
+        }
+        fputc('>', out);
+        return;
+    }
     if (ch_is_function(v)) {
         fputs("#<function>", out);
         return;
     }
     fputs("#<unknown>", out);
+}
+
+/* write/display without datum labels: truncate with "..." past MAX_PRINT_DEPTH. */
+static void print_value_with_depth(FILE *out, ChValue v, bool display, uint32_t depth) {
+    if (depth >= CH_MAX_PRINT_DEPTH) {
+        fputs("...", out);
+        return;
+    }
+    if (ch_is_pair(v)) {
+        print_list_simple(out, v, display, depth);
+        return;
+    }
+    if (ch_is_vector(v)) {
+        ChVector *vec = ch_as_vector(v);
+        fputs("#(", out);
+        for (size_t i = 0; i < vec->len; i++) {
+            if (i > 0) {
+                fputc(' ', out);
+            }
+            print_value_with_depth(out, vec->items[i], display, depth + 1);
+        }
+        fputc(')', out);
+        return;
+    }
+    print_value_atom(out, v, display);
 }
 
 static void print_value_shared(FILE *out, ChValue v, ChSharedState *st, bool display) {
@@ -679,7 +813,7 @@ static void print_value_shared(FILE *out, ChValue v, ChSharedState *st, bool dis
 void ch_print_value_mode(FILE *out, ChValue v, ChPrintMode mode) {
     bool display = (mode == CH_PRINT_DISPLAY);
     if (mode == CH_PRINT_SIMPLE) {
-        print_value_atom(out, v, false);
+        print_value_with_depth(out, v, false, 0);
         return;
     }
 
@@ -692,10 +826,11 @@ void ch_print_value_mode(FILE *out, ChValue v, ChPrintMode mode) {
     }
     st.depth = 0;
     if (st.shared_count == 0) {
-        print_value_atom(out, v, display);
+        print_value_with_depth(out, v, display, 0);
     } else {
         print_value_shared(out, v, &st, display);
     }
+    shared_state_free(&st);
 }
 
 char *ch_value_to_string_mode(ChValue v, ChPrintMode mode) {

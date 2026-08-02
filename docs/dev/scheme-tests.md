@@ -61,15 +61,12 @@ ctest --output-on-failure -R kaappi_deferred -E smoke
 **Wired (language-parity track, green):** includes
 `include-lib-decls`, `r7rs-import-macro-gaps`, `r7rs-libraries-gaps`,
 `r7rs-control-io-gaps`, `reader-port-refill-gaps`, `r7rs-expressions-gaps`,
-`r7rs-hygiene-gaps`, `r7rs-continuation-gaps`, `record-ctor-clause-keyword-1882`,
-plus earlier numeric/reader/unicode/string/datatype/time suites.
+`r7rs-hygiene-gaps`, `r7rs-continuation-gaps`, `r7rs-tail-procedures-gaps`,
+`printer-gaps`, `record-ctor-clause-keyword-1882`, plus earlier
+numeric/reader/unicode/string/datatype/time suites.
 
-**Deferred (not wired — known blockers):**
-
-| File | Reason |
-|------|--------|
-| `r7rs-tail-procedures-gaps.scm` | `let-values` TCO at N=40000 (register growth via `call-with-values`) |
-| `printer-gaps.scm` | 300s+ `write-shared` scan — too slow for default CTest |
+**Still deferred (not wired):** none on the language-parity track above.
+Remaining Kaappi compliance files stay out until separately triaged.
 
 ## kaappi-deferred smoke
 
@@ -79,13 +76,15 @@ Wired in CTest as `kaappi_deferred_smoke_*`. Enable with:
 ctest --output-on-failure -R kaappi_deferred_smoke
 ```
 
-**Recently wired (language surface):** `case-lambda-fixes`,
-`expt-negative-base-1725`, `equal-dag`, `circular-list-terminate`.
+**Wired:** language-surface fixes (`case-lambda-fixes`, `expt-negative-base-1725`,
+`equal-dag`, `circular-list-terminate`) plus a large batch of locally green
+smoke files (see `CMakeLists.txt` `smoke_*` entries).
 
 **Skipped (do not wire):**
 
 | File | Reason |
 |------|--------|
 | `jit-*.scm`, `llvm-*.scm` | JIT/LLVM backend not in Chaaya |
+| SRFI-18 thread smokes | OS threads not implemented |
 
 Add further smoke batches only after local green + `make test`.

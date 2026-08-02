@@ -239,6 +239,8 @@ static ChValue prim_call_with_values(ChVM *vm, ChValue *args, int nargs) {
         snprintf(vm->error, sizeof(vm->error), "call-with-values: not a procedure");
         return CH_UNDEFINED;
     }
+    /* Capture before nested applies (producer may call values) clear the flag. */
+    bool was_tail = vm->native_was_tail;
     ChValue produced = CH_VOID;
     ChVMStatus st = ch_vm_apply(vm, producer, NULL, 0, &produced);
     if (st == CH_VM_CONTINUATION_INVOKED) {
@@ -249,17 +251,38 @@ static ChValue prim_call_with_values(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
 
-    ChValue result = CH_VOID;
+    ChValue cargs[CH_VM_MAX_PENDING_ARGS];
+    int cnargs = 0;
     if (ch_is_values(produced)) {
         ChValues *vs = ch_as_values(produced);
-        if (vs->count > 256) {
+        if (vs->count > (size_t)CH_VM_MAX_PENDING_ARGS) {
             snprintf(vm->error, sizeof(vm->error), "call-with-values: too many values");
             return CH_UNDEFINED;
         }
-        st = ch_vm_apply(vm, consumer, vs->items, (int)vs->count, &result);
+        cnargs = (int)vs->count;
+        for (int i = 0; i < cnargs; i++) {
+            cargs[i] = vs->items[i];
+        }
     } else {
-        st = ch_vm_apply(vm, consumer, &produced, 1, &result);
+        cnargs = 1;
+        cargs[0] = produced;
     }
+
+    /* Tail position: request a follow-up call so the consumer is not nested
+     * under another run_until (proper TCO for loop-cwv / let-values). */
+    if (was_tail) {
+        vm->has_pending_call = true;
+        vm->pending_call_tail = true;
+        vm->pending_proc = consumer;
+        vm->pending_nargs = cnargs;
+        for (int i = 0; i < cnargs; i++) {
+            vm->pending_args[i] = cargs[i];
+        }
+        return CH_UNDEFINED;
+    }
+
+    ChValue result = CH_VOID;
+    st = ch_vm_apply(vm, consumer, cargs, cnargs, &result);
     if (st == CH_VM_CONTINUATION_INVOKED) {
         vm->continuation_invoked = true;
         return CH_UNDEFINED;

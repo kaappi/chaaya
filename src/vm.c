@@ -18,6 +18,15 @@ void ch_vm_init(ChVM *vm) {
     memset(vm, 0, sizeof(*vm));
     ch_gc_init(&vm->gc);
     vm->gc.vm = vm;
+    vm->regs = (ChValue *)calloc(CH_VM_MAX_REGS, sizeof(ChValue));
+    vm->frames = (ChCallFrame *)calloc(CH_VM_MAX_FRAMES, sizeof(ChCallFrame));
+    if (!vm->regs || !vm->frames) {
+        free(vm->regs);
+        free(vm->frames);
+        vm->regs = NULL;
+        vm->frames = NULL;
+        abort();
+    }
     vm->result = CH_VOID;
     vm->default_random_source = CH_UNDEFINED;
     vm->fiber_runtime = (ChFiberRuntime *)calloc(1, sizeof(ChFiberRuntime));
@@ -54,6 +63,10 @@ void ch_vm_deinit(ChVM *vm) {
         free(vm->fiber_runtime);
         vm->fiber_runtime = NULL;
     }
+    free(vm->regs);
+    vm->regs = NULL;
+    free(vm->frames);
+    vm->frames = NULL;
     ch_gc_deinit(&vm->gc);
 }
 
@@ -111,6 +124,8 @@ void ch_vm_register_primitives(ChVM *vm) {
     ch_register_srfi133_primitives(vm);
     ch_register_srfi258_primitives(vm);
     ch_register_srfi260_primitives(vm);
+    /* Scheme map/for-each overwrite native stubs (no C re-entrancy). */
+    ch_install_list_bootstrap(vm);
     if (vm->libraries) {
         (void)ch_register_builtin_libraries(vm);
     }
@@ -302,28 +317,13 @@ static ChLibEnv *resolve_lib_env(ChVM *vm, ChCallFrame *frame) {
     return NULL;
 }
 
-static ChValue frame_closure_roots[CH_VM_MAX_FRAMES];
-
 size_t ch_vm_push_gc_roots(ChVM *vm) {
-    /* Registers and frame closures only; other VM slots are marked in collection. */
-    size_t before = vm->gc.root_count;
-    for (size_t i = 0; i < vm->reg_top; i++) {
-        ch_gc_push(&vm->gc, &vm->regs[i]);
-    }
-    for (ChUpvalue *uv = vm->open_upvalues; uv; uv = uv->next) {
-        if (uv->is_closed) {
-            ch_gc_push(&vm->gc, &uv->closed_value);
-        }
-    }
-    for (size_t i = 0; i < vm->frame_count; i++) {
-        if (vm->frames[i].closure) {
-            frame_closure_roots[i] = ch_make_pointer(&vm->frames[i].closure->header);
-        } else {
-            frame_closure_roots[i] = CH_NIL;
-        }
-        ch_gc_push(&vm->gc, &frame_closure_roots[i]);
-    }
-    return vm->gc.root_count - before;
+    /* Registers, frames, upvalues, globals, etc. are marked in
+     * ch_vm_mark_gc_roots during collection (gc->vm). Pushing the full
+     * register window here exhausts CH_GC_ROOT_MAX on deep Scheme recursion
+     * (map callbacks, etc.). Explicit ch_gc_push remains for C locals. */
+    (void)vm;
+    return 0;
 }
 
 void ch_vm_mark_gc_roots(ChVM *vm) {
@@ -363,6 +363,12 @@ void ch_vm_mark_gc_roots(ChVM *vm) {
     for (size_t i = 0; i < vm->frame_count; i++) {
         if (vm->frames[i].closure) {
             ch_gc_mark_value(ch_make_pointer(&vm->frames[i].closure->header));
+        }
+    }
+    if (vm->has_pending_call) {
+        ch_gc_mark_value(vm->pending_proc);
+        for (int i = 0; i < vm->pending_nargs; i++) {
+            ch_gc_mark_value(vm->pending_args[i]);
         }
     }
     if (vm->fiber_runtime) {
@@ -963,6 +969,7 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
         ChNative *n = ch_as_native(callee);
         ChValue *args = &vm->regs[arg_base + 1];
         size_t result_slot = arg_base;
+        bool was_tail = tail;
         if (tail && vm->frame_count > 0) {
             /* Drop current frame first so call/cc captures the caller (R7RS tail). */
             ChCallFrame *frame = &vm->frames[vm->frame_count - 1];
@@ -982,21 +989,66 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
             return raise_message_to_slot(vm, buf, result_slot);
         }
         vm->native_result_slot = result_slot;
+        bool saved_native_was_tail = vm->native_was_tail;
+        vm->native_was_tail = was_tail;
         vm->continuation_invoked = false;
+        vm->has_pending_call = false;
         size_t roots = push_gc_roots(vm);
         ChValue result = n->fn(vm, args, nargs);
         pop_gc_roots_n(vm, roots);
+        vm->native_was_tail = saved_native_was_tail;
         if (vm->continuation_invoked) {
             vm->continuation_invoked = false;
+            vm->has_pending_call = false;
             return CH_VM_CONTINUATION_INVOKED;
         }
-        if (vm->error[0] != '\0' && result == CH_UNDEFINED) {
+        if (vm->error[0] != '\0' && result == CH_UNDEFINED && !vm->has_pending_call) {
             char buf[256];
             snprintf(buf, sizeof(buf), "%s", vm->error);
             return raise_message_to_slot(vm, buf, result_slot);
         }
+        /* Drain pending follow-up calls without nesting run_until (TCO).
+         * The native's frame was already dropped when was_tail; install the
+         * follow-up at result_slot with tail=false so we do not pop the real
+         * caller (that bug broke call/cc return values). */
+        while (vm->has_pending_call) {
+            ChValue pproc = vm->pending_proc;
+            int pnargs = vm->pending_nargs;
+            ChValue pargs[CH_VM_MAX_PENDING_ARGS];
+            for (int i = 0; i < pnargs; i++) {
+                pargs[i] = vm->pending_args[i];
+            }
+            vm->has_pending_call = false;
+            (void)vm->pending_call_tail;
+
+            size_t base = result_slot;
+            if (base + 1 + (size_t)pnargs > CH_VM_MAX_REGS) {
+                return CH_VM_STACK_OVERFLOW;
+            }
+            if (vm->reg_top < base + 1 + (size_t)pnargs) {
+                vm->reg_top = base + 1 + (size_t)pnargs;
+            }
+            vm->regs[base] = pproc;
+            for (int i = 0; i < pnargs; i++) {
+                vm->regs[base + 1 + (size_t)i] = pargs[i];
+            }
+            size_t frames_before = vm->frame_count;
+            ChVMStatus st = call_value(vm, pproc, base, pnargs, false);
+            if (st == CH_VM_CONTINUATION_INVOKED) {
+                return st;
+            }
+            if (st != CH_VM_OK) {
+                return st;
+            }
+            /* Closure frame pushed: let the outer run_until continue. */
+            if (vm->frame_count > frames_before) {
+                return CH_VM_OK;
+            }
+            /* Synchronous native completion — may have queued another pending. */
+            result = vm->regs[base];
+        }
         vm->regs[result_slot] = result;
-        if (tail && vm->frame_count == 0) {
+        if (was_tail && vm->frame_count == 0) {
             vm->result = result;
         }
         return CH_VM_OK;

@@ -19,6 +19,7 @@ void ch_reader_init(ChReader *r, ChGC *gc, const char *src, size_t len) {
     r->fold_case = 0;
     r->refill = NULL;
     r->refill_ctx = NULL;
+    r->nesting_depth = 0;
     r->error[0] = '\0';
     memset(r->label_set, 0, sizeof(r->label_set));
     for (size_t i = 0; i < CH_READER_MAX_LABELS; i++) {
@@ -1312,6 +1313,21 @@ static ChReadStatus read_atom(ChReader *r, ChValue *out) {
     if (maybe_number) {
         size_t end = scan_number_token_end(r, start);
         r->pos = end;
+    } else if (c0 == '#' && c1 == '\\') {
+        /* Character literals: #\x may be a delimiter (e.g. #\(). */
+        advance(r); /* # */
+        advance(r); /* \ */
+        if (peek(r) < 0) {
+            return fail(r, "unterminated character literal");
+        }
+        int first = peek(r);
+        advance(r);
+        /* Named / hex forms continue with non-delimiter letters/digits. */
+        if (!is_delim(first) && (isalpha(first) || first == 'x' || first == 'X')) {
+            while (!is_delim(peek(r))) {
+                advance(r);
+            }
+        }
     } else {
         bool ident_mode = is_ident_start(peek(r));
         while (!is_delim(peek(r))) {
@@ -1624,27 +1640,52 @@ static ChReadStatus read_list(ChReader *r, ChValue *out) {
 static ChReadStatus read_vector(ChReader *r, ChValue *out) {
     /* already consumed #, next is ( */
     advance(r); /* ( */
-    ChValue items[256];
+    size_t cap = 16;
     size_t n = 0;
+    ChValue *items = (ChValue *)malloc(cap * sizeof(ChValue));
+    if (!items) {
+        return fail(r, "out of memory");
+    }
+    ChValue items_root = CH_NIL;
+    ch_gc_push(r->gc, &items_root);
+
     ChReadStatus ws = skip_ws_and_comments(r);
     if (ws != CH_READ_OK) {
+        free(items);
+        ch_gc_pop(r->gc);
         return ws;
     }
     while (peek(r) >= 0 && peek(r) != ')') {
-        if (n >= 256) {
-            return fail(r, "vector too large");
+        if (n >= cap) {
+            size_t ncap = cap * 2;
+            ChValue *ni = (ChValue *)realloc(items, ncap * sizeof(ChValue));
+            if (!ni) {
+                free(items);
+                ch_gc_pop(r->gc);
+                return fail(r, "out of memory");
+            }
+            items = ni;
+            cap = ncap;
         }
         ChReadStatus st = read_datum(r, &items[n]);
         if (st != CH_READ_OK) {
+            free(items);
+            ch_gc_pop(r->gc);
             return st;
         }
         n++;
+        /* Keep a cons spine so GC can see items across nested reads. */
+        items_root = ch_gc_cons(r->gc, items[n - 1], items_root);
         ws = skip_ws_and_comments(r);
         if (ws != CH_READ_OK) {
+            free(items);
+            ch_gc_pop(r->gc);
             return ws;
         }
     }
     if (peek(r) != ')') {
+        free(items);
+        ch_gc_pop(r->gc);
         return fail(r, "unterminated vector");
     }
     advance(r);
@@ -1653,6 +1694,8 @@ static ChReadStatus read_vector(ChReader *r, ChValue *out) {
     for (size_t i = 0; i < n; i++) {
         v->items[i] = items[i];
     }
+    free(items);
+    ch_gc_pop(r->gc);
     *out = vec;
     return CH_READ_OK;
 }
@@ -1684,15 +1727,17 @@ static ChReadStatus read_bytevector(ChReader *r, ChValue *out) {
         return ws;
     }
     while (peek(r) >= 0 && peek(r) != ')') {
-        ChValue item = CH_NIL;
-        ch_gc_push(r->gc, &item);
-        ChReadStatus st = read_datum(r, &item);
-        ch_gc_pop(r->gc);
-        if (st != CH_READ_OK) {
+        /* Parse integers via the atom path without bumping nesting_depth
+         * (Kaappi uses nextToken here). Nested #u8 at depth 1023 must work. */
+        size_t start = r->pos;
+        size_t end = scan_number_token_end(r, start);
+        if (end == start) {
             free(bytes);
-            return st;
+            return fail(r, "bytevector element is not an exact integer");
         }
-        if (!ch_is_fixnum(item)) {
+        r->pos = end;
+        ChValue item = CH_NIL;
+        if (!try_parse_number(r->gc, r->src + start, end - start, &item) || !ch_is_fixnum(item)) {
             free(bytes);
             return fail(r, "bytevector element is not an exact integer");
         }
@@ -1841,62 +1886,85 @@ static ChReadStatus read_datum_label(ChReader *r, ChValue *out) {
 }
 
 static ChReadStatus read_datum(ChReader *r, ChValue *out) {
+    if (r->nesting_depth >= CH_READER_MAX_NESTING_DEPTH) {
+        return fail(r, "nesting too deep");
+    }
+    r->nesting_depth++;
+    ChReadStatus st = CH_READ_ERROR;
     ChReadStatus ws = skip_ws_and_comments(r);
     if (ws != CH_READ_OK) {
-        return ws;
+        st = ws;
+        goto done;
     }
     int c = peek(r);
     if (c < 0) {
-        return CH_READ_EOF;
+        st = CH_READ_EOF;
+        goto done;
     }
     if (c == '(') {
-        return read_list(r, out);
+        st = read_list(r, out);
+        goto done;
     }
     if (c == '\'') {
         advance(r);
-        return read_abbrev(r, "quote", out);
+        st = read_abbrev(r, "quote", out);
+        goto done;
     }
     if (c == '`') {
         advance(r);
-        return read_abbrev(r, "quasiquote", out);
+        st = read_abbrev(r, "quasiquote", out);
+        goto done;
     }
     if (c == ',') {
         advance(r);
         if (peek(r) == '@') {
             advance(r);
-            return read_abbrev(r, "unquote-splicing", out);
+            st = read_abbrev(r, "unquote-splicing", out);
+        } else {
+            st = read_abbrev(r, "unquote", out);
         }
-        return read_abbrev(r, "unquote", out);
+        goto done;
     }
     if (c == '"') {
-        return read_string(r, out);
+        st = read_string(r, out);
+        goto done;
     }
     if (c == '|') {
-        return read_delimited_identifier(r, out);
+        st = read_delimited_identifier(r, out);
+        goto done;
     }
     if (c == '#') {
         size_t save = r->pos;
         advance(r);
         int n = peek(r);
         if (n == '(') {
-            return read_vector(r, out);
+            st = read_vector(r, out);
+            goto done;
         }
         if ((n == 'u' || n == 'U') && peek_n(r, 1) == '8' && peek_n(r, 2) == '(') {
-            return read_bytevector(r, out);
+            st = read_bytevector(r, out);
+            goto done;
         }
         if (n >= '0' && n <= '9') {
-            return read_datum_label(r, out);
+            st = read_datum_label(r, out);
+            goto done;
         }
         r->pos = save;
-        return read_atom(r, out);
+        st = read_atom(r, out);
+        goto done;
     }
     if (c == ')') {
-        return fail(r, "unexpected )");
+        st = fail(r, "unexpected )");
+        goto done;
     }
     if (is_ident_start(c) || isdigit(c) || c == '#' || c == '.' || c == '+' || c == '-') {
-        return read_atom(r, out);
+        st = read_atom(r, out);
+        goto done;
     }
-    return fail(r, "unexpected character");
+    st = fail(r, "unexpected character");
+done:
+    r->nesting_depth--;
+    return st;
 }
 
 ChReadStatus ch_read_datum(ChReader *r, ChValue *out) {

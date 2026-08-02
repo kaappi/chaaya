@@ -33,7 +33,16 @@ static ChValue prim_call_cc(ChVM *vm, ChValue *args, int nargs) {
         snprintf(vm->error, sizeof(vm->error), "call/cc: receiver not a procedure");
         return CH_UNDEFINED;
     }
+    bool was_tail = vm->native_was_tail;
     ChValue cont = ch_vm_capture_continuation(vm, vm->native_result_slot);
+    if (was_tail) {
+        vm->has_pending_call = true;
+        vm->pending_call_tail = true;
+        vm->pending_proc = receiver;
+        vm->pending_nargs = 1;
+        vm->pending_args[0] = cont;
+        return CH_UNDEFINED;
+    }
     ChValue call_args[1] = {cont};
     ChValue result = CH_VOID;
     return finish_apply(vm, ch_vm_apply(vm, receiver, call_args, 1, &result), result);

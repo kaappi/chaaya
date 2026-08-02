@@ -1,6 +1,9 @@
 #include "chaaya/prim.h"
 
+#include "chaaya/eval.h"
+
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define CH_APPLY_MAX_ARGS 256
@@ -59,6 +62,22 @@ static ChValue prim_apply(ChVM *vm, ChValue *args, int nargs) {
     }
     if (!ch_is_nil(last)) {
         snprintf(vm->error, sizeof(vm->error), "apply: last argument not a proper list");
+        return CH_UNDEFINED;
+    }
+
+    bool was_tail = vm->native_was_tail;
+    if (was_tail) {
+        if (nflat > CH_VM_MAX_PENDING_ARGS) {
+            snprintf(vm->error, sizeof(vm->error), "apply: too many arguments");
+            return CH_UNDEFINED;
+        }
+        vm->has_pending_call = true;
+        vm->pending_call_tail = true;
+        vm->pending_proc = proc;
+        vm->pending_nargs = nflat;
+        for (int i = 0; i < nflat; i++) {
+            vm->pending_args[i] = flat[i];
+        }
         return CH_UNDEFINED;
     }
 
@@ -609,7 +628,89 @@ void ch_register_list_primitives(ChVM *vm) {
     define_prim(vm, "assq", prim_assq, 2, 2);
     define_prim(vm, "assv", prim_assv, 2, 2);
     define_prim(vm, "assoc", prim_assoc, -1, 2);
+    /* Temporary natives; ch_install_list_bootstrap replaces with Scheme. */
     define_prim(vm, "map", prim_map, -1, 2);
     define_prim(vm, "for-each", prim_for_each, -1, 2);
     define_prim(vm, "symbol=?", prim_symbol_eq, -1, 2);
+}
+
+/* Kaappi-style Scheme map/for-each: callbacks run in the bytecode loop so deep
+ * recursion does not nest the C stack (r7rs-tail-procedures-gaps deep-map). */
+static const char *for_each_src =
+    "(define for-each\n"
+    "  (let ((null? null?) (pair? pair?) (car car) (cdr cdr) (cons cons)\n"
+    "        (apply apply) (procedure? procedure?) (not not) (error error))\n"
+    "    (lambda (proc list1 . lists)\n"
+    "      (if (not (procedure? proc))\n"
+    "          (error \"type error in 'for-each': expected procedure\" proc))\n"
+    "      (if (null? lists)\n"
+    "          (let loop ((lst list1))\n"
+    "            (if (pair? lst)\n"
+    "                (begin (proc (car lst)) (loop (cdr lst)))\n"
+    "                (if (null? lst)\n"
+    "                    (if #f #f)\n"
+    "                    (error \"for-each: not a proper list\"))))\n"
+    "          (let loop ((lsts (cons list1 lists)))\n"
+    "            (let ((go (let check ((l lsts))\n"
+    "                        (if (null? l) #t\n"
+    "                            (if (null? (car l)) #f\n"
+    "                                (if (not (pair? (car l)))\n"
+    "                                    (error \"for-each: not a proper list\")\n"
+    "                                    (check (cdr l))))))))\n"
+    "              (if go\n"
+    "                  (begin\n"
+    "                    (apply proc\n"
+    "                      (let cars ((l lsts))\n"
+    "                        (if (null? l) '()\n"
+    "                            (cons (car (car l)) (cars (cdr l))))))\n"
+    "                    (loop\n"
+    "                      (let cdrs ((l lsts))\n"
+    "                        (if (null? l) '()\n"
+    "                            (cons (cdr (car l)) (cdrs (cdr l)))))))\n"
+    "                  (if #f #f))))))))\n";
+
+static const char *map_src =
+    "(define map\n"
+    "  (let ((null? null?) (pair? pair?) (car car) (cdr cdr) (cons cons)\n"
+    "        (reverse reverse) (apply apply) (procedure? procedure?)\n"
+    "        (not not) (error error))\n"
+    "    (lambda (proc list1 . lists)\n"
+    "      (if (not (procedure? proc))\n"
+    "          (error \"type error in 'map': expected procedure\" proc))\n"
+    "      (if (null? lists)\n"
+    "          (let loop ((lst list1) (acc '()))\n"
+    "            (if (pair? lst)\n"
+    "                (loop (cdr lst) (cons (proc (car lst)) acc))\n"
+    "                (if (null? lst)\n"
+    "                    (reverse acc)\n"
+    "                    (error \"map: not a proper list\"))))\n"
+    "          (let loop ((lsts (cons list1 lists)) (acc '()))\n"
+    "            (let ((go (let check ((l lsts))\n"
+    "                        (if (null? l) #t\n"
+    "                            (if (null? (car l)) #f\n"
+    "                                (if (not (pair? (car l)))\n"
+    "                                    (error \"map: not a proper list\")\n"
+    "                                    (check (cdr l))))))))\n"
+    "              (if go\n"
+    "                  (loop\n"
+    "                    (let cdrs ((l lsts))\n"
+    "                      (if (null? l) '()\n"
+    "                          (cons (cdr (car l)) (cdrs (cdr l)))))\n"
+    "                    (cons\n"
+    "                      (apply proc\n"
+    "                        (let cars ((l lsts))\n"
+    "                          (if (null? l) '()\n"
+    "                              (cons (car (car l)) (cars (cdr l))))))\n"
+    "                      acc))\n"
+    "                  (reverse acc))))))))\n";
+
+void ch_install_list_bootstrap(ChVM *vm) {
+    if (ch_eval_source(vm, for_each_src, strlen(for_each_src), 0) != 0) {
+        fprintf(stderr, "chaaya: failed to install for-each bootstrap\n");
+        abort();
+    }
+    if (ch_eval_source(vm, map_src, strlen(map_src), 0) != 0) {
+        fprintf(stderr, "chaaya: failed to install map bootstrap\n");
+        abort();
+    }
 }

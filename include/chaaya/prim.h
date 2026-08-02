@@ -10,6 +10,8 @@ extern "C" {
 void ch_register_core_primitives(ChVM *vm);
 void ch_register_control_primitives(ChVM *vm);
 void ch_register_list_primitives(ChVM *vm);
+/* Overwrite map/for-each with Scheme implementations (call after error). */
+void ch_install_list_bootstrap(ChVM *vm);
 void ch_register_data_primitives(ChVM *vm);
 void ch_register_port_primitives(ChVM *vm);
 void ch_register_record_primitives(ChVM *vm);

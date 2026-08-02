@@ -9,7 +9,8 @@
 extern "C" {
 #endif
 
-#define CH_GC_ROOT_MAX 4096
+/* Deep reader nesting (1023) and nested C helpers push many temporary roots. */
+#define CH_GC_ROOT_MAX 16384
 #define CH_GC_DEFAULT_THRESHOLD 1024
 #define CH_GC_DEFAULT_PROMOTION_AGE 2
 #define CH_GC_DEFAULT_MAJOR_INTERVAL 8

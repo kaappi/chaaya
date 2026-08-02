@@ -10,8 +10,11 @@
 extern "C" {
 #endif
 
-#define CH_VM_MAX_FRAMES 256
-#define CH_VM_MAX_REGS 4096
+/* Hard caps match Kaappi's growable stacks (~32768 frames). Heap-allocated in
+ * ch_vm_init so deep Scheme recursion (e.g. map callbacks) does not blow the
+ * C stack or a small fixed ChVM on the process stack. */
+#define CH_VM_MAX_FRAMES 32768
+#define CH_VM_MAX_REGS 262144
 #define CH_VM_MAX_GLOBALS 4096
 #define CH_VM_MAX_LIB_PATHS 32
 #define CH_VM_MAX_SCRIPT_ARGS 64
@@ -21,6 +24,7 @@ extern "C" {
 #define CH_VM_MAX_MACROS 256
 #define CH_VM_MAX_SYNTAX_PROPS 128
 #define CH_VM_MAX_BREAKPOINTS 32
+#define CH_VM_MAX_PENDING_ARGS 64
 
 struct ChLibEnv;
 struct ChLibraryRegistry;
@@ -59,9 +63,9 @@ typedef struct ChSyntaxProp {
 
 typedef struct ChVM {
     ChGC gc;
-    ChValue regs[CH_VM_MAX_REGS];
+    ChValue *regs; /* heap; length CH_VM_MAX_REGS */
     size_t reg_top;
-    ChCallFrame frames[CH_VM_MAX_FRAMES];
+    ChCallFrame *frames; /* heap; length CH_VM_MAX_FRAMES */
     size_t frame_count;
     ChGlobal globals[CH_VM_MAX_GLOBALS];
     size_t global_count;
@@ -89,6 +93,14 @@ typedef struct ChVM {
     /* set by call_value before invoking a native; used by call/cc */
     size_t native_result_slot;
     bool continuation_invoked; /* native saw a continuation restore */
+    bool native_was_tail;      /* current native was entered via TAIL_CALL */
+    /* Native requests a follow-up procedure call without nesting run_until
+     * (proper TCO for apply / call-with-values). */
+    bool has_pending_call;
+    bool pending_call_tail;
+    ChValue pending_proc;
+    int pending_nargs;
+    ChValue pending_args[CH_VM_MAX_PENDING_ARGS];
 
     /* R7RS libraries */
     struct ChLibraryRegistry *libraries;

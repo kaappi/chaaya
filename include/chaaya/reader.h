@@ -18,6 +18,8 @@ struct ChReader;
 typedef bool (*ChReaderRefillFn)(struct ChReader *reader, void *ctx);
 
 #define CH_READER_MAX_LABELS 256
+/* Match Kaappi: 1023 nested datums succeed; 1024 raises NestingTooDeep. */
+#define CH_READER_MAX_NESTING_DEPTH 1024
 
 typedef struct ChReader {
     ChGC *gc;
@@ -27,6 +29,7 @@ typedef struct ChReader {
     int fold_case; /* ASCII fold for identifiers when non-zero */
     ChReaderRefillFn refill;
     void *refill_ctx;
+    uint32_t nesting_depth;
     char error[256];
     /* Datum labels (#n= / #n#) for the current top-level read. */
     ChValue labels[CH_READER_MAX_LABELS];

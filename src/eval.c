@@ -107,6 +107,9 @@ int ch_eval_datum(ChVM *vm, ChValue expr, ChValue env_or_void, ChValue *out) {
         *out = CH_VOID;
     }
 
+    /* Capture before nested natives clear it. */
+    bool was_tail = vm->native_was_tail;
+
     ChEnvironment *env_obj = NULL;
     ChLibEnv *eval_env = NULL;
     if (env_or_void != CH_VOID) {
@@ -157,11 +160,24 @@ int ch_eval_datum(ChVM *vm, ChValue expr, ChValue env_or_void, ChValue *out) {
         } else {
             ChValue fn_keep = ch_make_pointer(&fn->header);
             ch_gc_push(&vm->gc, &fn_keep);
-            ch_gc_push(&vm->gc, &result);
-            ChVMStatus st = ch_vm_eval_function(vm, fn, &result);
-            ch_gc_pop_n(&vm->gc, 2);
-            if (st != CH_VM_OK || (vm->error[0] != '\0' && result == CH_UNDEFINED)) {
-                rc = -1;
+            /* Tail eval in the interaction environment: trampoline the thunk
+             * so recursive (eval ...) does not grow the C stack. */
+            bool can_tail = was_tail && (!env_obj || env_obj->kind == CH_ENV_INTERACTION);
+            if (can_tail) {
+                ChValue cl = ch_gc_make_closure(&vm->gc, fn, NULL);
+                vm->has_pending_call = true;
+                vm->pending_call_tail = true;
+                vm->pending_proc = cl;
+                vm->pending_nargs = 0;
+                result = CH_UNDEFINED;
+                ch_gc_pop(&vm->gc);
+            } else {
+                ch_gc_push(&vm->gc, &result);
+                ChVMStatus st = ch_vm_eval_function(vm, fn, &result);
+                ch_gc_pop_n(&vm->gc, 2);
+                if (st != CH_VM_OK || (vm->error[0] != '\0' && result == CH_UNDEFINED)) {
+                    rc = -1;
+                }
             }
         }
     }
