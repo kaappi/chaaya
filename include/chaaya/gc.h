@@ -49,6 +49,10 @@ typedef struct ChGC {
     struct ChVM *vm; /* live interpreter roots during collection */
     struct ChFunction *compiling_fns[32];
     size_t compiling_fn_depth;
+    /* Permanent roots for native-backend caches (eval/quote slots). */
+    ChValue *extra_roots;
+    size_t extra_root_count;
+    size_t extra_root_cap;
 } ChGC;
 
 void ch_gc_init(ChGC *gc);
@@ -60,6 +64,9 @@ void ch_gc_push(ChGC *gc, ChValue *slot);
 void ch_gc_pop(ChGC *gc);
 void ch_gc_pop_n(ChGC *gc, size_t n);
 void ch_gc_pop_to(ChGC *gc, size_t target);
+
+/* Permanently root a value for the lifetime of the GC (native caches). */
+int ch_gc_add_extra_root(ChGC *gc, ChValue value);
 
 void ch_gc_collect(ChGC *gc);
 void ch_gc_collect_minor(ChGC *gc);

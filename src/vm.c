@@ -121,7 +121,9 @@ void ch_vm_register_primitives(ChVM *vm) {
     ch_register_process_primitives(vm);
     ch_register_hashtable_primitives(vm);
     ch_register_fiber_primitives(vm);
+#if !defined(__wasi__)
     ch_register_ffi_primitives(vm);
+#endif
     ch_register_random_primitives(vm);
     ch_register_filesystem_primitives(vm);
     ch_register_weak_primitives(vm);

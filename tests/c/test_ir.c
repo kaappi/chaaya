@@ -168,6 +168,39 @@ static int test_boolean_simplify(ChVM *vm) {
     return 1;
 }
 
+static int test_llvm_emittable(ChVM *vm) {
+    ChCompiler compiler;
+    ChValue expr = CH_NIL;
+    ChValue expanded = CH_NIL;
+    ChIrNode *ir = NULL;
+    if (!build_ir(vm, "(+ 1 2)", &compiler, &expr, &expanded, &ir)) {
+        return 0;
+    }
+    ch_ir_analyze(ir);
+    if (ch_ir_optimize(&compiler, &ir) != CH_COMPILE_OK) {
+        fprintf(stderr, "llvm emittable: optimize failed\n");
+        teardown_ir(vm, ir);
+        return 0;
+    }
+    if (!ch_ir_llvm_emittable(ir)) {
+        fprintf(stderr, "llvm emittable: (+ 1 2) should be emittable\n");
+        teardown_ir(vm, ir);
+        return 0;
+    }
+    teardown_ir(vm, ir);
+
+    if (!build_ir(vm, "(lambda (x) x)", &compiler, &expr, &expanded, &ir)) {
+        return 0;
+    }
+    if (ch_ir_llvm_emittable(ir) || !ch_ir_llvm_needs_fallback(ir)) {
+        fprintf(stderr, "llvm emittable: lambda should require fallback\n");
+        teardown_ir(vm, ir);
+        return 0;
+    }
+    teardown_ir(vm, ir);
+    return 1;
+}
+
 int main(void) {
     ChVM vm;
     ch_vm_init(&vm);
@@ -177,6 +210,7 @@ int main(void) {
     CH_CHECK(test_const_fold(&vm));
     CH_CHECK(test_dead_branch(&vm));
     CH_CHECK(test_boolean_simplify(&vm));
+    CH_CHECK(test_llvm_emittable(&vm));
 
     /* IR pipeline stays semantically transparent at runtime. */
     CH_CHECK(ch_test_expect_fixnum(&vm, "(+ 40 2)", 42));

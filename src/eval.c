@@ -154,9 +154,15 @@ int ch_eval_datum(ChVM *vm, ChValue expr, ChValue env_or_void, ChValue *out) {
     } else {
         ChCompiler compiler;
         ch_compiler_init(&compiler, vm);
+        if (vm->error_line > 0) {
+            ch_compiler_set_location(&compiler, vm->error_line, vm->error_column);
+        }
         ChFunction *fn = NULL;
         if (ch_compile_toplevel(&compiler, expr_root, &fn) != CH_COMPILE_OK) {
             snprintf(vm->error, sizeof(vm->error), "%s", ch_compiler_error(&compiler));
+            vm->error_line = compiler.error_line;
+            vm->error_column = compiler.error_column;
+            vm->error_code = ch_compiler_error_code(&compiler);
             rc = -1;
         } else {
             ChValue fn_keep = ch_make_pointer(&fn->header);
@@ -206,6 +212,7 @@ int ch_eval_source(ChVM *vm, const char *source, size_t len, int print_results) 
         /* Globals/macros/libraries are marked via ch_vm_mark_gc_roots /
          * ch_library_mark_gc_roots — do not push them all (hits CH_GC_ROOT_MAX
          * once several libraries each hold a full (scheme base) import). */
+        size_t form_start = reader.pos;
         ChReadStatus rs = ch_read_datum(&reader, &expr);
         if (rs == CH_READ_EOF) {
             ch_gc_pop(&vm->gc);
@@ -218,6 +225,8 @@ int ch_eval_source(ChVM *vm, const char *source, size_t len, int print_results) 
             ch_gc_pop(&vm->gc);
             return 1;
         }
+
+        ch_diag_location_from_offset(source, len, form_start, &vm->error_line, &vm->error_column);
 
         ChValue result = CH_VOID;
         if (ch_eval_datum(vm, expr, CH_VOID, &result) != 0) {

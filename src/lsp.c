@@ -1141,11 +1141,16 @@ static int publish_diagnostics(const char *uri, const char *text) {
     diags[0] = '\0';
     int first = 1;
 
+    size_t text_len = strlen(text);
     ChReader reader;
-    ch_reader_init(&reader, &vm.gc, text, strlen(text));
+    ch_reader_init(&reader, &vm.gc, text, text_len);
     for (;;) {
         ChValue v = CH_NIL;
         ch_gc_push(&vm.gc, &v);
+        size_t form_start = reader.pos;
+        int form_line = 0;
+        int form_col = 0;
+        ch_diag_location_from_offset(text, text_len, form_start, &form_line, &form_col);
         ChReadStatus st = ch_read_datum(&reader, &v);
         if (st == CH_READ_EOF) {
             ch_gc_pop(&vm.gc);
@@ -1182,7 +1187,8 @@ static int publish_diagnostics(const char *uri, const char *text) {
         char err[256];
         if (ch_expand_toplevel(&vm, v, &expanded, err, sizeof(err)) != CH_EXPAND_OK) {
             ChDiag d;
-            ch_diag_init(&d, ch_diag_classify_message(err, CH_DIAG_STAGE_COMPILE), uri, 0, 0, err);
+            ch_diag_init(&d, ch_diag_classify_message(err, CH_DIAG_STAGE_COMPILE), uri, form_line,
+                         form_col, err);
             char one[1024];
             FILE *mem = fmemopen(one, sizeof(one), "w");
             if (mem) {
@@ -1208,6 +1214,7 @@ static int publish_diagnostics(const char *uri, const char *text) {
 
         ChCompiler compiler;
         ch_compiler_init(&compiler, &vm);
+        ch_compiler_set_location(&compiler, form_line, form_col);
         ChFunction *fn = NULL;
         if (ch_compile_toplevel(&compiler, expanded, &fn) != CH_COMPILE_OK) {
             ChDiag d;
@@ -1569,38 +1576,55 @@ static int write_references_response(const char *id_start, size_t id_len, const 
     return write_jsonrpc_message(response);
 }
 
-static int write_symbols_response(const char *id_start, size_t id_len, ChVM *vm) {
-    char body[8192];
-    size_t blen = 0;
-    body[0] = '[';
-    blen = 1;
-    int first = 1;
-    for (size_t i = 0; i < vm->global_count && blen + 128 < sizeof(body); i++) {
-        if (!vm->globals[i].defined || !vm->globals[i].name) {
+static int write_symbols_response(const char *id_start, size_t id_len, const char *json) {
+    char uri[1024];
+    if (!extract_json_string_field_bounded(json, "uri", uri, sizeof(uri))) {
+        /* textDocument.uri may be nested; try full extract path used elsewhere */
+        int line = 0;
+        int character = 0;
+        if (!extract_uri_and_position(json, uri, sizeof(uri), &line, &character)) {
+            return write_empty_array_response(id_start, id_len);
+        }
+    }
+    const char *text = get_document_text(uri);
+    if (!text) {
+        return write_empty_array_response(id_start, id_len);
+    }
+
+    ChLspTokenVec tokens = {0};
+    ChLspBindingVec bindings = {0};
+    if (!scan_document_tokens(text, &tokens) || !collect_bindings(text, &tokens, &bindings)) {
+        token_vec_free(&tokens);
+        binding_vec_free(&bindings);
+        return CH_EXIT_ERROR;
+    }
+
+    char response[16384];
+    size_t len = 0;
+    bool ok = buf_append_fmt(response, &len, sizeof(response),
+                             "{\"jsonrpc\":\"2.0\",\"id\":%.*s,\"result\":[", (int)id_len, id_start);
+    bool first = true;
+    for (size_t i = 0; i < bindings.count && ok; i++) {
+        const ChLspBinding *b = &bindings.items[i];
+        if (b->kind == CH_LSP_BIND_SET) {
             continue;
         }
         if (!first) {
-            body[blen++] = ',';
+            ok = buf_append_char(response, &len, sizeof(response), ',');
         }
-        first = 0;
-        int n = snprintf(body + blen, sizeof(body) - blen,
-                         "{\"name\":\"%s\",\"kind\":12,\"location\":{\"uri\":\"\",\"range\":{"
-                         "\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}"
-                         "}}}",
-                         vm->globals[i].name->name);
-        if (n < 0 || (size_t)n >= sizeof(body) - blen) {
-            break;
-        }
-        blen += (size_t)n;
+        first = false;
+        int kind = b->kind == CH_LSP_BIND_DEFINE_SYNTAX ? 14 : 12;
+        size_t name_len = b->symbol.end > b->symbol.start ? b->symbol.end - b->symbol.start : 0;
+        ok = ok && buf_append_fmt(response, &len, sizeof(response),
+                                  "{\"name\":\"%.*s\",\"kind\":%d,\"location\":", (int)name_len,
+                                  text + b->symbol.start, kind) &&
+             append_location_json(response, &len, sizeof(response), uri, &b->symbol) &&
+             buf_append(response, &len, sizeof(response), "}");
     }
-    if (blen + 1 < sizeof(body)) {
-        body[blen++] = ']';
-        body[blen] = '\0';
-    }
-    char response[16384];
-    int n = snprintf(response, sizeof(response), "{\"jsonrpc\":\"2.0\",\"id\":%.*s,\"result\":%s}",
-                     (int)id_len, id_start, body);
-    if (n < 0 || (size_t)n >= sizeof(response)) {
+    ok = ok && buf_append(response, &len, sizeof(response), "]}");
+    token_vec_free(&tokens);
+    binding_vec_free(&bindings);
+    if (!ok) {
         return CH_EXIT_ERROR;
     }
     return write_jsonrpc_message(response);
@@ -1643,12 +1667,7 @@ static int handle_request(const char *json) {
         return write_hover_response(id_start, id_len, json);
     }
     if (strcmp(method, "textDocument/documentSymbol") == 0 && has_id) {
-        ChVM vm;
-        ch_vm_init(&vm);
-        ch_vm_register_primitives(&vm);
-        int rc = write_symbols_response(id_start, id_len, &vm);
-        ch_vm_deinit(&vm);
-        return rc;
+        return write_symbols_response(id_start, id_len, json);
     }
     if (strcmp(method, "textDocument/definition") == 0 && has_id) {
         return write_definition_response(id_start, id_len, json);

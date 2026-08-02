@@ -66,6 +66,14 @@ void ch_compiler_init(ChCompiler *c, ChVM *vm) {
     c->next_binding_id = 1;
 }
 
+void ch_compiler_set_location(ChCompiler *c, int line, int column) {
+    if (!c) {
+        return;
+    }
+    c->error_line = line;
+    c->error_column = column;
+}
+
 const char *ch_compiler_error(const ChCompiler *c) {
     return c->error;
 }
@@ -80,6 +88,7 @@ ChDiagCode ch_compiler_error_code(const ChCompiler *c) {
 static ChCompileStatus fail(ChCompiler *c, const char *msg) {
     snprintf(c->error, sizeof(c->error), "%s", msg);
     c->error_code = ch_diag_classify_message(msg, CH_DIAG_STAGE_COMPILE);
+    /* Preserve caller-supplied location when set; otherwise leave 0 (unknown). */
     return CH_COMPILE_ERROR;
 }
 

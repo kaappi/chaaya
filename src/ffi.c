@@ -490,6 +490,12 @@ void ch_ffi_finalize_library(ChForeignLibrary *library) {
 }
 
 int ch_ffi_open_library(ChVM *vm, const char *path, ChValue *out_library) {
+#if defined(__wasi__)
+    (void)path;
+    (void)out_library;
+    set_error(vm, "open-foreign-library: not available on WASI");
+    return -1;
+#else
     if (!out_library) {
         set_error(vm, "ffi: internal open-library error");
         return -1;
@@ -518,6 +524,7 @@ int ch_ffi_open_library(ChVM *vm, const char *path, ChValue *out_library) {
 
     *out_library = ch_gc_make_foreign_library(&vm->gc, handle, owned);
     return 0;
+#endif
 }
 
 int ch_ffi_close_library(ChVM *vm, ChValue library) {

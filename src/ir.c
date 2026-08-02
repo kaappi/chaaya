@@ -224,3 +224,65 @@ void ch_ir_free(ChIrNode *node) {
     }
     free(node);
 }
+
+static bool all_emittable(ChIrNode **items, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (!ch_ir_llvm_emittable(items[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ch_ir_llvm_emittable(const ChIrNode *node) {
+    if (!node) {
+        return true;
+    }
+    switch (node->kind) {
+    case CH_IR_VOID:
+        return true;
+    case CH_IR_LITERAL:
+        return ch_is_fixnum(node->as.literal) || node->as.literal == CH_TRUE ||
+               node->as.literal == CH_FALSE || ch_is_nil(node->as.literal) ||
+               node->as.literal == CH_VOID;
+    case CH_IR_VAR:
+        return true;
+    case CH_IR_IF:
+        return ch_ir_llvm_emittable(node->as.if_expr.test) &&
+               ch_ir_llvm_emittable(node->as.if_expr.consequent) &&
+               (!node->as.if_expr.has_alternate ||
+                ch_ir_llvm_emittable(node->as.if_expr.alternate));
+    case CH_IR_SEQ:
+        return all_emittable(node->as.seq.items, node->as.seq.count);
+    case CH_IR_AND:
+        return all_emittable(node->as.and_expr.items, node->as.and_expr.count);
+    case CH_IR_OR:
+        return all_emittable(node->as.or_expr.items, node->as.or_expr.count);
+    case CH_IR_PRIM_CALL: {
+        ChIrPrim p = node->as.prim_call.prim;
+        if (p != CH_IR_PRIM_ADD && p != CH_IR_PRIM_SUB && p != CH_IR_PRIM_MUL &&
+            p != CH_IR_PRIM_LT && p != CH_IR_PRIM_NUM_EQ && p != CH_IR_PRIM_NOT) {
+            return false;
+        }
+        return all_emittable(node->as.prim_call.args, node->as.prim_call.arg_count);
+    }
+    case CH_IR_DEFINE:
+        /* MVP: define of an immediately emittable non-lambda value. */
+        return ch_is_symbol(node->as.define_expr.target) && node->as.define_expr.value &&
+               node->as.define_expr.value->kind != CH_IR_LAMBDA &&
+               ch_ir_llvm_emittable(node->as.define_expr.value);
+    case CH_IR_CALL:
+    case CH_IR_LAMBDA:
+    case CH_IR_QUOTE:
+    case CH_IR_SET:
+    case CH_IR_DEFINE_SYNTAX:
+    case CH_IR_RAW:
+        /* Closures/calls/raw → eval-fallback (Kaappi whole-scope rule). */
+        return false;
+    }
+    return false;
+}
+
+bool ch_ir_llvm_needs_fallback(const ChIrNode *node) {
+    return !ch_ir_llvm_emittable(node);
+}

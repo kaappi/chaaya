@@ -43,6 +43,7 @@ add_library(chaaya_core STATIC
   src/ffi_callback.c
   src/llvm_backend.c
   src/lsp.c
+  src/runtime_exports.c
   src/vm.c
   src/prim_core.c
   src/prim_control.c
@@ -87,6 +88,7 @@ target_include_directories(chaaya_core
 target_compile_definitions(chaaya_core
   PUBLIC
     CHAAYA_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    CHAAYA_BUILD_DIR="${CMAKE_BINARY_DIR}"
 )
 
 target_compile_options(chaaya_core PRIVATE
@@ -94,8 +96,74 @@ target_compile_options(chaaya_core PRIVATE
   $<$<BOOL:${CHAAYA_WARNINGS_AS_ERRORS}>:-Werror>
 )
 
+# Full runtime archive for LLVM-native binaries (same objects as chaaya_core + exports).
 add_library(chaaya_rt STATIC
-  src/ch_rt_main.c
+  src/value.c
+  src/gc.c
+  src/hashtable.c
+  src/bignum.c
+  src/rational.c
+  src/complex.c
+  src/reader.c
+  src/printer.c
+  src/ir.c
+  src/ir_lower.c
+  src/ir_analyze.c
+  src/ir_opt.c
+  src/ir_emit.c
+  src/compiler.c
+  src/expander.c
+  src/environment.c
+  src/library.c
+  src/features.c
+  src/diagnostics.c
+  src/fiber.c
+  src/reactor.c
+  src/thread.c
+  src/gc_deep_copy.c
+  src/shared_channel.c
+  src/ffi.c
+  src/ffi_callback.c
+  src/vm.c
+  src/prim_core.c
+  src/prim_control.c
+  src/prim_fiber.c
+  src/prim_ffi.c
+  src/prim_list.c
+  src/prim_data.c
+  src/prim_bytevector.c
+  src/prim_math.c
+  src/prim_port.c
+  src/prim_error.c
+  src/prim_record.c
+  src/prim_lazy.c
+  src/prim_eval.c
+  src/prim_process.c
+  src/prim_hashtable.c
+  src/prim_random.c
+  src/prim_filesystem.c
+  src/prim_weak.c
+  src/prim_srfi1.c
+  src/prim_srfi13.c
+  src/prim_srfi133.c
+  src/prim_srfi258.c
+  src/prim_srfi260.c
+  src/unicode.c
+  src/unicode_tables.c
+  src/eval.c
+  src/cache.c
+  src/disasm.c
+  src/timings.c
+  src/sandbox.c
+  src/profile.c
+  src/coverage.c
+  src/runtime_exports.c
+)
+target_include_directories(chaaya_rt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_definitions(chaaya_rt
+  PUBLIC
+    CHAAYA_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    CHAAYA_BUILD_DIR="${CMAKE_BINARY_DIR}"
 )
 target_compile_options(chaaya_rt PRIVATE
   -Wall -Wextra -Wpedantic
@@ -112,13 +180,16 @@ endif()
 
 if(UNIX AND NOT APPLE)
   target_link_libraries(chaaya_core PUBLIC dl)
+  target_link_libraries(chaaya_rt PUBLIC dl)
 endif()
 
 find_package(Threads REQUIRED)
 target_link_libraries(chaaya_core PUBLIC Threads::Threads)
+target_link_libraries(chaaya_rt PUBLIC Threads::Threads)
 
 add_executable(chaaya src/main.c)
 target_link_libraries(chaaya PRIVATE chaaya_core)
+add_dependencies(chaaya chaaya_rt)
 target_compile_options(chaaya PRIVATE
   -Wall -Wextra -Wpedantic
   $<$<BOOL:${CHAAYA_WARNINGS_AS_ERRORS}>:-Werror>
@@ -128,6 +199,7 @@ if(CHAAYA_WASM)
   if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
     add_executable(chaaya_wasm src/main.c)
     target_link_libraries(chaaya_wasm PRIVATE chaaya_core)
+    target_compile_definitions(chaaya_core PUBLIC CHAAYA_WASM=1)
     target_compile_options(chaaya_wasm PRIVATE
       -Wall -Wextra -Wpedantic
       $<$<BOOL:${CHAAYA_WARNINGS_AS_ERRORS}>:-Werror>
@@ -561,12 +633,21 @@ add_test(NAME cli_compile_mvp
     -DOUTPUT=${CMAKE_BINARY_DIR}/cli_compile_out
     -P ${CMAKE_SOURCE_DIR}/tests/cli/expect_nyi_compile.cmake
 )
+set_tests_properties(cli_compile_mvp PROPERTIES DEPENDS chaaya_rt)
 
 add_test(NAME cli_native_mvp
   COMMAND ${CMAKE_COMMAND}
     -DCHAAYA=$<TARGET_FILE:chaaya>
+    -DINPUT=${CMAKE_SOURCE_DIR}/tests/cli/native_ok.scm
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/run_native_exec.cmake
+)
+
+add_test(NAME cli_native_defines
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
     -DINPUT=${CMAKE_SOURCE_DIR}/tests/cli/check_ok.scm
-    -P ${CMAKE_SOURCE_DIR}/tests/cli/expect_nyi_native.cmake
+    -DOUTPUT=${CMAKE_BINARY_DIR}/cli_native_defines_bin
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/run_native_defines.cmake
 )
 
 add_test(NAME cli_nyi_wasm

@@ -163,7 +163,25 @@ void ch_gc_deinit(ChGC *gc) {
     }
     free(gc->pending_ephemerons);
     free(gc->remembered_set);
+    free(gc->extra_roots);
     memset(gc, 0, sizeof(*gc));
+}
+
+int ch_gc_add_extra_root(ChGC *gc, ChValue value) {
+    if (!gc) {
+        return -1;
+    }
+    if (gc->extra_root_count >= gc->extra_root_cap) {
+        size_t ncap = gc->extra_root_cap ? gc->extra_root_cap * 2 : 16;
+        ChValue *nroots = (ChValue *)realloc(gc->extra_roots, ncap * sizeof(ChValue));
+        if (!nroots) {
+            return -1;
+        }
+        gc->extra_roots = nroots;
+        gc->extra_root_cap = ncap;
+    }
+    gc->extra_roots[gc->extra_root_count++] = value;
+    return 0;
 }
 
 void ch_gc_push(ChGC *gc, ChValue *slot) {
@@ -806,6 +824,9 @@ static void mark_roots_and_symbols(ChGC *gc) {
     }
     for (size_t i = 0; i < gc->root_count; i++) {
         mark_value(*gc->roots[i]);
+    }
+    for (size_t i = 0; i < gc->extra_root_count; i++) {
+        mark_value(gc->extra_roots[i]);
     }
     for (size_t i = 0; i < gc->symbol_count; i++) {
         if (gc->symbols[i]) {

@@ -124,6 +124,13 @@ ChCompileStatus ch_ir_emit(ChCompiler *c, ChIrNode *root, ChIrLegacyEmitFn emit_
 /* Pretty-print IR tree (used by `chaaya ir`). */
 void ch_ir_print(FILE *out, const ChIrNode *node, int indent);
 
+/* True when the node (and all children) can be lowered to native LLVM IR
+ * without eval-fallback. CH_IR_RAW and unsupported forms return false. */
+bool ch_ir_llvm_emittable(const ChIrNode *node);
+
+/* True when any descendant requires eval-fallback (whole-scope abandon). */
+bool ch_ir_llvm_needs_fallback(const ChIrNode *node);
+
 #ifdef __cplusplus
 }
 #endif

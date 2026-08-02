@@ -6,6 +6,7 @@
 #include "chaaya/expander.h"
 #include "chaaya/ir.h"
 #include "chaaya/reader.h"
+#include "chaaya/runtime_exports.h"
 #include "chaaya/version.h"
 #include "chaaya/vm.h"
 
@@ -25,6 +26,17 @@
 #ifndef CHAAYA_SOURCE_DIR
 #define CHAAYA_SOURCE_DIR "."
 #endif
+#ifndef CHAAYA_BUILD_DIR
+#define CHAAYA_BUILD_DIR "."
+#endif
+
+typedef struct {
+    FILE *out;
+    int next_id;
+    bool ok;
+} EmitCtx;
+
+static void sanitize_sym(const char *name, char *out, size_t out_sz);
 
 static bool checked_add_i64(int64_t a, int64_t b, int64_t *out) {
     if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) {
@@ -63,179 +75,43 @@ static bool checked_mul_i64(int64_t a, int64_t b, int64_t *out) {
     return true;
 }
 
-static const char *value_symbol_name(ChValue value) {
-    if (!ch_is_symbol(value)) {
-        return NULL;
-    }
-    return ch_symbol_basename(ch_as_symbol(value));
+static const char *host_triple(void) {
+#if defined(__APPLE__) && defined(__aarch64__)
+    return "arm64-apple-macosx";
+#elif defined(__APPLE__) && (defined(__x86_64__) || defined(__amd64__))
+    return "x86_64-apple-macosx";
+#elif defined(__linux__) && defined(__aarch64__)
+    return "aarch64-unknown-linux-gnu";
+#elif defined(__linux__) && (defined(__x86_64__) || defined(__amd64__))
+    return "x86_64-unknown-linux-gnu";
+#else
+    return "unknown-unknown-unknown";
+#endif
 }
 
-static bool list_last_item(ChValue list, ChValue *out) {
-    if (!ch_is_pair(list) || !out) {
+static bool source_has_import(const char *src, size_t len) {
+    if (!src) {
         return false;
     }
-    ChValue it = list;
-    ChValue last = CH_UNDEFINED;
-    while (ch_is_pair(it)) {
-        last = ch_car(it);
-        it = ch_cdr(it);
-    }
-    if (!ch_is_nil(it) || last == CH_UNDEFINED) {
-        return false;
-    }
-    *out = last;
-    return true;
-}
-
-static bool datum_eval_fixnum_expr(ChValue expr, int64_t *out) {
-    if (!out) {
-        return false;
-    }
-    if (ch_is_fixnum(expr)) {
-        *out = ch_to_fixnum(expr);
-        return true;
-    }
-    if (!ch_is_pair(expr)) {
-        return false;
-    }
-    ChValue op = ch_car(expr);
-    const char *name = value_symbol_name(op);
-    if (!name) {
-        return false;
-    }
-    ChValue args = ch_cdr(expr);
-    if (strcmp(name, "begin") == 0) {
-        ChValue last = CH_UNDEFINED;
-        return list_last_item(args, &last) && datum_eval_fixnum_expr(last, out);
-    }
-    if (strcmp(name, "+") == 0) {
-        int64_t acc = 0;
-        ChValue it = args;
-        while (ch_is_pair(it)) {
-            int64_t part = 0;
-            if (!datum_eval_fixnum_expr(ch_car(it), &part) || !checked_add_i64(acc, part, &acc)) {
-                return false;
+    for (size_t i = 0; i + 6 < len; i++) {
+        if (src[i] == '(' && strncmp(src + i + 1, "import", 6) == 0) {
+            char next = src[i + 7];
+            if (next == ' ' || next == '\t' || next == '\n' || next == '\r' || next == '(') {
+                return true;
             }
-            it = ch_cdr(it);
         }
-        if (!ch_is_nil(it)) {
-            return false;
-        }
-        *out = acc;
-        return true;
-    }
-    if (strcmp(name, "-") == 0) {
-        if (!ch_is_pair(args)) {
-            return false;
-        }
-        int64_t acc = 0;
-        if (!datum_eval_fixnum_expr(ch_car(args), &acc)) {
-            return false;
-        }
-        ChValue rest = ch_cdr(args);
-        if (ch_is_nil(rest)) {
-            return checked_sub_i64(0, acc, out);
-        }
-        while (ch_is_pair(rest)) {
-            int64_t part = 0;
-            if (!datum_eval_fixnum_expr(ch_car(rest), &part) || !checked_sub_i64(acc, part, &acc)) {
-                return false;
-            }
-            rest = ch_cdr(rest);
-        }
-        if (!ch_is_nil(rest)) {
-            return false;
-        }
-        *out = acc;
-        return true;
-    }
-    if (strcmp(name, "*") == 0) {
-        int64_t acc = 1;
-        ChValue it = args;
-        while (ch_is_pair(it)) {
-            int64_t part = 0;
-            if (!datum_eval_fixnum_expr(ch_car(it), &part) || !checked_mul_i64(acc, part, &acc)) {
-                return false;
-            }
-            it = ch_cdr(it);
-        }
-        if (!ch_is_nil(it)) {
-            return false;
-        }
-        *out = acc;
-        return true;
     }
     return false;
-}
-
-static bool expanded_extract_main_constant(ChValue expanded, int64_t *out) {
-    if (!ch_is_pair(expanded) || !out) {
-        return false;
-    }
-    ChValue head = ch_car(expanded);
-    const char *head_name = value_symbol_name(head);
-    if (!head_name || strcmp(head_name, "define") != 0) {
-        return false;
-    }
-    ChValue rest = ch_cdr(expanded);
-    if (!ch_is_pair(rest)) {
-        return false;
-    }
-
-    ChValue target = ch_car(rest);
-    ChValue body = ch_cdr(rest);
-
-    if (ch_is_symbol(target)) {
-        const char *name = value_symbol_name(target);
-        if (!name || strcmp(name, "main") != 0 || !ch_is_pair(body)) {
-            return false;
-        }
-        ChValue rhs = ch_car(body);
-        if (datum_eval_fixnum_expr(rhs, out)) {
-            return true;
-        }
-        if (ch_is_pair(rhs) && value_symbol_name(ch_car(rhs)) &&
-            strcmp(value_symbol_name(ch_car(rhs)), "lambda") == 0) {
-            ChValue lambda_rest = ch_cdr(rhs);
-            if (!ch_is_pair(lambda_rest)) {
-                return false;
-            }
-            ChValue params = ch_car(lambda_rest);
-            ChValue lambda_body = ch_cdr(lambda_rest);
-            ChValue last = CH_UNDEFINED;
-            if (ch_is_nil(params) && list_last_item(lambda_body, &last)) {
-                return datum_eval_fixnum_expr(last, out);
-            }
-        }
-        return false;
-    }
-
-    if (!ch_is_pair(target)) {
-        return false;
-    }
-    ChValue fn_name = ch_car(target);
-    const char *name = value_symbol_name(fn_name);
-    if (!name || strcmp(name, "main") != 0) {
-        return false;
-    }
-    ChValue params = ch_cdr(target);
-    if (!ch_is_nil(params)) {
-        return false;
-    }
-    ChValue last = CH_UNDEFINED;
-    return list_last_item(body, &last) && datum_eval_fixnum_expr(last, out);
 }
 
 static bool ir_eval_fixnum_expr(const ChIrNode *node, int64_t *out) {
     if (!node || !out) {
         return false;
     }
-
     if (node->is_constant && ch_is_fixnum(node->constant_value)) {
         *out = ch_to_fixnum(node->constant_value);
         return true;
     }
-
     switch (node->kind) {
     case CH_IR_LITERAL:
         if (ch_is_fixnum(node->as.literal)) {
@@ -303,73 +179,336 @@ static bool ir_eval_fixnum_expr(const ChIrNode *node, int64_t *out) {
     }
 }
 
-static bool ir_extract_main_constant(const ChIrNode *node, int64_t *out) {
-    if (!node || !out) {
-        return false;
-    }
-    switch (node->kind) {
-    case CH_IR_DEFINE: {
-        ChValue target = node->as.define_expr.target;
-        if (!ch_is_symbol(target)) {
-            return false;
-        }
-        const char *name = ch_symbol_basename(ch_as_symbol(target));
-        if (!name || strcmp(name, "main") != 0) {
-            return false;
-        }
-        ChIrNode *value = node->as.define_expr.value;
-        if (!value) {
-            return false;
-        }
-        if (ir_eval_fixnum_expr(value, out)) {
-            return true;
-        }
-        if (value->kind == CH_IR_LAMBDA && ch_is_nil(value->as.lambda.params) &&
-            value->as.lambda.body_count > 0) {
-            return ir_eval_fixnum_expr(value->as.lambda.body[value->as.lambda.body_count - 1], out);
-        }
-        return false;
-    }
-    case CH_IR_SEQ: {
-        bool found = false;
-        int64_t last = 0;
-        for (size_t i = 0; i < node->as.seq.count; i++) {
-            int64_t candidate = 0;
-            if (ir_extract_main_constant(node->as.seq.items[i], &candidate)) {
-                found = true;
-                last = candidate;
-            }
-        }
-        if (found) {
-            *out = last;
-        }
-        return found;
-    }
+static int fresh(EmitCtx *ctx) {
+    return ctx->next_id++;
+}
+
+static int emit_value(EmitCtx *ctx, const ChIrNode *node);
+
+static const char *prim_rt_name(ChIrPrim prim) {
+    switch (prim) {
+    case CH_IR_PRIM_ADD:
+        return "ch_rt_fixnum_add";
+    case CH_IR_PRIM_SUB:
+        return "ch_rt_fixnum_sub";
+    case CH_IR_PRIM_MUL:
+        return "ch_rt_fixnum_mul";
+    case CH_IR_PRIM_LT:
+        return "ch_rt_fixnum_lt";
+    case CH_IR_PRIM_NUM_EQ:
+        return "ch_rt_fixnum_eq";
     default:
-        return false;
+        return NULL;
     }
 }
 
-static void emit_llvm_module(FILE *out, const char *path, bool has_const_exit, int64_t const_exit,
-                             size_t form_count) {
-    fprintf(out, "; ModuleID = 'chaaya-mvp'\n");
-    fprintf(out, "; source = %s\n", path);
-    fprintf(out, "; forms = %zu\n", form_count);
-    fprintf(out, "; Chaaya %s LLVM MVP lowering\n", CHAAYA_VERSION);
-    fprintf(out, "declare i32 @ch_rt_main()\n\n");
-    fprintf(out, "define i32 @main() {\n");
-    fprintf(out, "entry:\n");
-    if (has_const_exit) {
-        int32_t exit_code = (int32_t)const_exit;
-        if ((int64_t)exit_code != const_exit) {
-            fprintf(out, "  ; fixnum %lld truncated to i32\n", (long long)const_exit);
-        }
-        fprintf(out, "  ret i32 %d\n", exit_code);
-    } else {
-        fprintf(out, "  %%code = call i32 @ch_rt_main()\n");
-        fprintf(out, "  ret i32 %%code\n");
+static int emit_value(EmitCtx *ctx, const ChIrNode *node) {
+    if (!ctx->ok || !node) {
+        ctx->ok = false;
+        return -1;
     }
-    fprintf(out, "}\n");
+    switch (node->kind) {
+    case CH_IR_VOID: {
+        int id = fresh(ctx);
+        fprintf(ctx->out, "  %%v%d = add i64 0, %llu\n", id, (unsigned long long)CH_VOID);
+        return id;
+    }
+    case CH_IR_LITERAL: {
+        int id = fresh(ctx);
+        fprintf(ctx->out, "  %%v%d = add i64 0, %llu\n", id,
+                (unsigned long long)node->as.literal);
+        return id;
+    }
+    case CH_IR_VAR: {
+        const char *name = node->as.var ? ch_symbol_basename(node->as.var) : NULL;
+        if (!name) {
+            ctx->ok = false;
+            return -1;
+        }
+        char san[128];
+        sanitize_sym(name, san, sizeof(san));
+        int id = fresh(ctx);
+        int name_id = fresh(ctx);
+        fprintf(ctx->out, "  %%n%d = getelementptr inbounds [%zu x i8], ptr @.name_%s, i64 0, i64 0\n",
+                name_id, strlen(name) + 1, san);
+        fprintf(ctx->out, "  %%v%d = call i64 @ch_rt_global_lookup(ptr %%vm, ptr %%n%d, i64 %zu)\n",
+                id, name_id, strlen(name));
+        return id;
+    }
+    case CH_IR_SEQ: {
+        int last = -1;
+        for (size_t i = 0; i < node->as.seq.count; i++) {
+            last = emit_value(ctx, node->as.seq.items[i]);
+            if (last < 0) {
+                return -1;
+            }
+        }
+        if (last < 0) {
+            int id = fresh(ctx);
+            fprintf(ctx->out, "  %%v%d = add i64 0, %llu\n", id, (unsigned long long)CH_VOID);
+            return id;
+        }
+        return last;
+    }
+    case CH_IR_IF: {
+        int test = emit_value(ctx, node->as.if_expr.test);
+        if (test < 0) {
+            return -1;
+        }
+        int then_l = fresh(ctx);
+        int else_l = fresh(ctx);
+        int join_l = fresh(ctx);
+        int cmp = fresh(ctx);
+        fprintf(ctx->out, "  %%c%d = icmp ne i64 %%v%d, %llu\n", cmp, test,
+                (unsigned long long)CH_FALSE);
+        fprintf(ctx->out, "  br i1 %%c%d, label %%L%d, label %%L%d\n", cmp, then_l, else_l);
+        fprintf(ctx->out, "L%d:\n", then_l);
+        int then_v = emit_value(ctx, node->as.if_expr.consequent);
+        if (then_v < 0) {
+            return -1;
+        }
+        fprintf(ctx->out, "  br label %%L%d\n", join_l);
+        fprintf(ctx->out, "L%d:\n", else_l);
+        int else_v;
+        if (node->as.if_expr.has_alternate) {
+            else_v = emit_value(ctx, node->as.if_expr.alternate);
+        } else {
+            else_v = fresh(ctx);
+            fprintf(ctx->out, "  %%v%d = add i64 0, %llu\n", else_v, (unsigned long long)CH_VOID);
+        }
+        if (else_v < 0) {
+            return -1;
+        }
+        fprintf(ctx->out, "  br label %%L%d\n", join_l);
+        fprintf(ctx->out, "L%d:\n", join_l);
+        int phi = fresh(ctx);
+        fprintf(ctx->out, "  %%v%d = phi i64 [ %%v%d, %%L%d ], [ %%v%d, %%L%d ]\n", phi, then_v,
+                then_l, else_v, else_l);
+        return phi;
+    }
+    case CH_IR_PRIM_CALL: {
+        const char *fn = prim_rt_name(node->as.prim_call.prim);
+        if (!fn || node->as.prim_call.arg_count == 0) {
+            ctx->ok = false;
+            return -1;
+        }
+        int acc = emit_value(ctx, node->as.prim_call.args[0]);
+        if (acc < 0) {
+            return -1;
+        }
+        if (node->as.prim_call.arg_count == 1 && node->as.prim_call.prim == CH_IR_PRIM_SUB) {
+            int zero = fresh(ctx);
+            fprintf(ctx->out, "  %%v%d = add i64 0, %llu\n", zero,
+                    (unsigned long long)ch_make_fixnum(0));
+            int id = fresh(ctx);
+            fprintf(ctx->out, "  %%v%d = call i64 @%s(i64 %%v%d, i64 %%v%d)\n", id, fn, zero, acc);
+            return id;
+        }
+        if (node->as.prim_call.prim == CH_IR_PRIM_NOT) {
+            int cmp = fresh(ctx);
+            int id = fresh(ctx);
+            fprintf(ctx->out, "  %%c%d = icmp eq i64 %%v%d, %llu\n", cmp, acc,
+                    (unsigned long long)CH_FALSE);
+            fprintf(ctx->out, "  %%v%d = select i1 %%c%d, i64 %llu, i64 %llu\n", id, cmp,
+                    (unsigned long long)CH_TRUE, (unsigned long long)CH_FALSE);
+            return id;
+        }
+        for (size_t i = 1; i < node->as.prim_call.arg_count; i++) {
+            int arg = emit_value(ctx, node->as.prim_call.args[i]);
+            if (arg < 0) {
+                return -1;
+            }
+            int id = fresh(ctx);
+            fprintf(ctx->out, "  %%v%d = call i64 @%s(i64 %%v%d, i64 %%v%d)\n", id, fn, acc, arg);
+            acc = id;
+        }
+        return acc;
+    }
+    case CH_IR_DEFINE: {
+        if (!ch_is_symbol(node->as.define_expr.target) || !node->as.define_expr.value) {
+            ctx->ok = false;
+            return -1;
+        }
+        const char *name = ch_symbol_basename(ch_as_symbol(node->as.define_expr.target));
+        int val = emit_value(ctx, node->as.define_expr.value);
+        if (val < 0 || !name) {
+            return -1;
+        }
+        char san[128];
+        sanitize_sym(name, san, sizeof(san));
+        int name_id = fresh(ctx);
+        fprintf(ctx->out, "  %%n%d = getelementptr inbounds [%zu x i8], ptr @.str_%s, i64 0, i64 0\n",
+                name_id, strlen(name) + 1, san);
+        fprintf(ctx->out, "  call void @ch_rt_define_global(ptr %%vm, ptr %%n%d, i64 %zu, i64 %%v%d)\n",
+                name_id, strlen(name), val);
+        return val;
+    }
+    case CH_IR_AND:
+    case CH_IR_OR: {
+        ChIrNodeArray arr = node->kind == CH_IR_AND ? node->as.and_expr : node->as.or_expr;
+        if (arr.count == 0) {
+            int id = fresh(ctx);
+            fprintf(ctx->out, "  %%v%d = add i64 0, %llu\n", id,
+                    (unsigned long long)(node->kind == CH_IR_AND ? CH_TRUE : CH_FALSE));
+            return id;
+        }
+        int last = -1;
+        for (size_t i = 0; i < arr.count; i++) {
+            last = emit_value(ctx, arr.items[i]);
+            if (last < 0) {
+                return -1;
+            }
+        }
+        return last;
+    }
+    default:
+        ctx->ok = false;
+        return -1;
+    }
+}
+
+static void sanitize_sym(const char *name, char *out, size_t out_sz) {
+    size_t j = 0;
+    for (size_t i = 0; name[i] && j + 1 < out_sz; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '_' || c == '.') {
+            out[j++] = (char)c;
+        } else {
+            if (j + 3 >= out_sz) {
+                break;
+            }
+            out[j++] = '_';
+            static const char hex[] = "0123456789abcdef";
+            out[j++] = hex[(c >> 4) & 0xf];
+            out[j++] = hex[c & 0xf];
+        }
+    }
+    out[j] = '\0';
+    if (j == 0 && out_sz > 1) {
+        out[0] = 'x';
+        out[1] = '\0';
+    }
+}
+
+static void emit_string_global(FILE *out, const char *sym, const char *text) {
+    size_t len = strlen(text);
+    fprintf(out, "@%s = private unnamed_addr constant [%zu x i8] c\"", sym, len + 1);
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)text[i];
+        if (c >= 32 && c < 127 && c != '"' && c != '\\') {
+            fputc((char)c, out);
+        } else {
+            fprintf(out, "\\%02X", c);
+        }
+    }
+    fprintf(out, "\\00\"\n");
+}
+
+static void emit_source_global(FILE *out, const char *src, size_t len) {
+    fprintf(out, "@.ch_src = private unnamed_addr constant [%zu x i8] c\"", len + 1);
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c >= 32 && c < 127 && c != '"' && c != '\\') {
+            fputc((char)c, out);
+        } else {
+            fprintf(out, "\\%02X", c);
+        }
+    }
+    fprintf(out, "\\00\"\n");
+}
+
+static void emit_runtime_decls(FILE *out) {
+    fprintf(out, "declare ptr @ch_rt_init()\n");
+    fprintf(out, "declare void @ch_rt_deinit(ptr)\n");
+    fprintf(out, "declare i64 @ch_rt_eval(ptr, ptr, i64)\n");
+    fprintf(out, "declare i64 @ch_rt_global_lookup(ptr, ptr, i64)\n");
+    fprintf(out, "declare void @ch_rt_define_global(ptr, ptr, i64, i64)\n");
+    fprintf(out, "declare i64 @ch_rt_fixnum_add(i64, i64)\n");
+    fprintf(out, "declare i64 @ch_rt_fixnum_sub(i64, i64)\n");
+    fprintf(out, "declare i64 @ch_rt_fixnum_mul(i64, i64)\n");
+    fprintf(out, "declare i64 @ch_rt_fixnum_lt(i64, i64)\n");
+    fprintf(out, "declare i64 @ch_rt_fixnum_eq(i64, i64)\n");
+    fprintf(out, "declare i32 @ch_rt_main()\n\n");
+}
+
+static void collect_define_names(const ChIrNode *node, char ***names, size_t *count, size_t *cap) {
+    if (!node) {
+        return;
+    }
+    if (node->kind == CH_IR_DEFINE && ch_is_symbol(node->as.define_expr.target)) {
+        const char *name = ch_symbol_basename(ch_as_symbol(node->as.define_expr.target));
+        if (name) {
+            if (*count >= *cap) {
+                *cap = *cap ? *cap * 2 : 8;
+                *names = (char **)realloc(*names, *cap * sizeof(char *));
+            }
+            (*names)[(*count)++] = strdup(name);
+        }
+        collect_define_names(node->as.define_expr.value, names, count, cap);
+        return;
+    }
+    if (node->kind == CH_IR_SEQ) {
+        for (size_t i = 0; i < node->as.seq.count; i++) {
+            collect_define_names(node->as.seq.items[i], names, count, cap);
+        }
+    }
+}
+
+static void collect_var_names(const ChIrNode *node, char ***names, size_t *count, size_t *cap) {
+    if (!node) {
+        return;
+    }
+    if (node->kind == CH_IR_VAR && node->as.var) {
+        const char *name = ch_symbol_basename(node->as.var);
+        if (name) {
+            for (size_t i = 0; i < *count; i++) {
+                if (strcmp((*names)[i], name) == 0) {
+                    return;
+                }
+            }
+            if (*count >= *cap) {
+                *cap = *cap ? *cap * 2 : 8;
+                *names = (char **)realloc(*names, *cap * sizeof(char *));
+            }
+            (*names)[(*count)++] = strdup(name);
+        }
+        return;
+    }
+    switch (node->kind) {
+    case CH_IR_IF:
+        collect_var_names(node->as.if_expr.test, names, count, cap);
+        collect_var_names(node->as.if_expr.consequent, names, count, cap);
+        if (node->as.if_expr.has_alternate) {
+            collect_var_names(node->as.if_expr.alternate, names, count, cap);
+        }
+        break;
+    case CH_IR_SEQ:
+        for (size_t i = 0; i < node->as.seq.count; i++) {
+            collect_var_names(node->as.seq.items[i], names, count, cap);
+        }
+        break;
+    case CH_IR_PRIM_CALL:
+        for (size_t i = 0; i < node->as.prim_call.arg_count; i++) {
+            collect_var_names(node->as.prim_call.args[i], names, count, cap);
+        }
+        break;
+    case CH_IR_DEFINE:
+        collect_var_names(node->as.define_expr.value, names, count, cap);
+        break;
+    case CH_IR_AND:
+        for (size_t i = 0; i < node->as.and_expr.count; i++) {
+            collect_var_names(node->as.and_expr.items[i], names, count, cap);
+        }
+        break;
+    case CH_IR_OR:
+        for (size_t i = 0; i < node->as.or_expr.count; i++) {
+            collect_var_names(node->as.or_expr.items[i], names, count, cap);
+        }
+        break;
+    default:
+        break;
+    }
 }
 
 static int lower_file_to_llvm(const char *path, FILE *out) {
@@ -377,6 +516,18 @@ static int lower_file_to_llvm(const char *path, FILE *out) {
     char *src = ch_read_file(path, &len);
     if (!src) {
         fprintf(stderr, "Error opening file '%s'\n", path);
+        return CH_EXIT_ERROR;
+    }
+
+    if (source_has_import(src, len)) {
+        fprintf(stderr, "compile: refusing sources that use import (native runtime has no lib-path)\n");
+        free(src);
+        return CH_EXIT_ERROR;
+    }
+
+    if (!ch_rt_native_arch_supported()) {
+        fprintf(stderr, "compile: native backend supports aarch64/x86_64 only\n");
+        free(src);
         return CH_EXIT_ERROR;
     }
 
@@ -389,11 +540,12 @@ static int lower_file_to_llvm(const char *path, FILE *out) {
     ch_reader_init(&reader, &vm.gc, src, len);
 
     int rc = CH_EXIT_OK;
+    ChIrNode **forms = NULL;
     size_t form_count = 0;
+    size_t form_cap = 0;
+    bool all_emittable = true;
     bool last_form_constant = false;
     int64_t last_form_value = 0;
-    bool main_constant = false;
-    int64_t main_value = 0;
 
     for (;;) {
         ChValue v = CH_NIL;
@@ -438,31 +590,104 @@ static int lower_file_to_llvm(const char *path, FILE *out) {
             break;
         }
 
-        form_count++;
+        if (form_count >= form_cap) {
+            form_cap = form_cap ? form_cap * 2 : 8;
+            forms = (ChIrNode **)realloc(forms, form_cap * sizeof(ChIrNode *));
+        }
+        forms[form_count++] = ir;
+        if (!ch_ir_llvm_emittable(ir)) {
+            all_emittable = false;
+        }
         int64_t value = 0;
-        bool expanded_constant = datum_eval_fixnum_expr(expanded, &value);
-        last_form_constant = expanded_constant || ir_eval_fixnum_expr(ir, &value);
+        last_form_constant = ir_eval_fixnum_expr(ir, &value);
         if (last_form_constant) {
             last_form_value = value;
         }
-        if (expanded_extract_main_constant(expanded, &value)) {
-            main_constant = true;
-            main_value = value;
-        }
-        if (ir_extract_main_constant(ir, &value)) {
-            main_constant = true;
-            main_value = value;
-        }
-        ch_ir_free(ir);
         ch_gc_pop_n(&vm.gc, 2);
     }
 
     if (rc == CH_EXIT_OK) {
-        bool has_const_exit = last_form_constant || main_constant;
-        int64_t const_exit = last_form_constant ? last_form_value : main_value;
-        emit_llvm_module(out, path, has_const_exit, const_exit, form_count);
+        enum { MODE_CONST, MODE_NATIVE, MODE_EVAL } mode = MODE_EVAL;
+        if (last_form_constant && form_count > 0) {
+            mode = MODE_CONST;
+        } else if (all_emittable && form_count > 0) {
+            mode = MODE_NATIVE;
+        }
+
+        fprintf(out, "; ModuleID = 'chaaya'\n");
+        fprintf(out, "; source = %s\n", path);
+        fprintf(out, "; Chaaya %s LLVM backend\n", CHAAYA_VERSION);
+        fprintf(out, "target triple = \"%s\"\n\n", host_triple());
+
+        if (mode == MODE_CONST) {
+            fprintf(out, "define i32 @main() {\nentry:\n");
+            fprintf(out, "  ret i32 %d\n}\n", (int32_t)last_form_value);
+        } else if (mode == MODE_NATIVE) {
+            char *body = NULL;
+            size_t body_sz = 0;
+            FILE *mem = open_memstream(&body, &body_sz);
+            if (!mem) {
+                mode = MODE_EVAL;
+            } else {
+                emit_runtime_decls(mem);
+                char **names = NULL;
+                size_t ncount = 0;
+                size_t ncap = 0;
+                for (size_t i = 0; i < form_count; i++) {
+                    collect_define_names(forms[i], &names, &ncount, &ncap);
+                    collect_var_names(forms[i], &names, &ncount, &ncap);
+                }
+                for (size_t i = 0; i < ncount; i++) {
+                    char san[128];
+                    char sym[160];
+                    sanitize_sym(names[i], san, sizeof(san));
+                    snprintf(sym, sizeof(sym), ".str_%s", san);
+                    emit_string_global(mem, sym, names[i]);
+                    snprintf(sym, sizeof(sym), ".name_%s", san);
+                    emit_string_global(mem, sym, names[i]);
+                }
+                fprintf(mem, "\ndefine i32 @main() {\nentry:\n");
+                fprintf(mem, "  %%vm = call ptr @ch_rt_init()\n");
+                EmitCtx ctx = {.out = mem, .next_id = 0, .ok = true};
+                for (size_t i = 0; i < form_count; i++) {
+                    if (emit_value(&ctx, forms[i]) < 0 || !ctx.ok) {
+                        mode = MODE_EVAL;
+                        break;
+                    }
+                }
+                for (size_t i = 0; i < ncount; i++) {
+                    free(names[i]);
+                }
+                free(names);
+                if (mode == MODE_NATIVE) {
+                    fprintf(mem, "  call void @ch_rt_deinit(ptr %%vm)\n");
+                    fprintf(mem, "  ret i32 0\n}\n");
+                    fclose(mem);
+                    fwrite(body, 1, body_sz, out);
+                } else {
+                    fclose(mem);
+                }
+                free(body);
+            }
+        }
+
+        if (mode == MODE_EVAL) {
+            emit_runtime_decls(out);
+            emit_source_global(out, src, len);
+            fprintf(out, "\ndefine i32 @main() {\nentry:\n");
+            fprintf(out, "  %%p = getelementptr inbounds [%zu x i8], ptr @.ch_src, i64 0, i64 0\n",
+                    len + 1);
+            fprintf(out, "  %%vm = call ptr @ch_rt_init()\n");
+            fprintf(out, "  %%_ = call i64 @ch_rt_eval(ptr %%vm, ptr %%p, i64 %zu)\n", len);
+            fprintf(out, "  call void @ch_rt_deinit(ptr %%vm)\n");
+            fprintf(out, "  ret i32 0\n}\n");
+        }
     }
 
+    for (size_t i = 0; i < form_count; i++) {
+        ch_ir_free(forms[i]);
+    }
+    free(forms);
     free(src);
     ch_vm_deinit(&vm);
     return rc;
@@ -550,18 +775,71 @@ static int add_unique_compiler(const char **list, size_t *count, size_t cap, con
     return 0;
 }
 
-static int try_link_native(const char *compiler, const char *ll_path, const char *rt_source,
-                           const char *bin) {
-    char cmd[2048];
-    if (snprintf(cmd, sizeof(cmd), "%s -O0 -x ir \"%s\" -x c \"%s\" -o \"%s\"", compiler, ll_path,
-                 rt_source, bin) >= (int)sizeof(cmd)) {
+static int find_libchaaya_rt(char *out, size_t out_sz) {
+    const char *candidates[8];
+    size_t n = 0;
+    const char *env = getenv("CHAAYA_LIB_DIR");
+    static char env_path[PATH_MAX];
+    static char src_path[PATH_MAX];
+    static char build_path[PATH_MAX];
+    if (env && env[0]) {
+        snprintf(env_path, sizeof(env_path), "%s/libchaaya_rt.a", env);
+        candidates[n++] = env_path;
+    }
+    snprintf(build_path, sizeof(build_path), "%s/libchaaya_rt.a", CHAAYA_BUILD_DIR);
+    candidates[n++] = build_path;
+    snprintf(src_path, sizeof(src_path), "%s/build/libchaaya_rt.a", CHAAYA_SOURCE_DIR);
+    candidates[n++] = src_path;
+    candidates[n++] = "libchaaya_rt.a";
+    candidates[n++] = "./libchaaya_rt.a";
+
+    for (size_t i = 0; i < n; i++) {
+        if (access(candidates[i], R_OK) == 0) {
+            snprintf(out, out_sz, "%s", candidates[i]);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int ll_needs_runtime(const char *ll_path) {
+    FILE *f = fopen(ll_path, "r");
+    if (!f) {
+        return 1;
+    }
+    char line[512];
+    int needs = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, "@ch_rt_")) {
+            needs = 1;
+            break;
+        }
+    }
+    fclose(f);
+    return needs;
+}
+
+static int try_link_native(const char *compiler, const char *ll_path, const char *rt_lib,
+                           const char *bin, int needs_rt) {
+    char cmd[4096];
+    if (!needs_rt) {
+        if (snprintf(cmd, sizeof(cmd), "%s -O2 -Wno-override-module -o \"%s\" \"%s\"", compiler, bin,
+                     ll_path) >= (int)sizeof(cmd)) {
+            return -1;
+        }
+        return run_command_exit_code(cmd) == 0 ? 0 : -1;
+    }
+    if (!rt_lib) {
         return -1;
     }
-    if (run_command_exit_code(cmd) == 0) {
-        return 0;
-    }
-    if (snprintf(cmd, sizeof(cmd), "%s -O0 -o \"%s\" \"%s\" \"%s\"", compiler, bin, ll_path, rt_source) >=
-        (int)sizeof(cmd)) {
+#if defined(__APPLE__)
+    const char *extra = "";
+#else
+    const char *extra = "-ldl -lpthread -lm";
+#endif
+    if (snprintf(cmd, sizeof(cmd),
+                 "%s -O2 -Wno-override-module -o \"%s\" \"%s\" \"%s\" %s", compiler, bin, ll_path,
+                 rt_lib, extra) >= (int)sizeof(cmd)) {
         return -1;
     }
     return run_command_exit_code(cmd) == 0 ? 0 : -1;
@@ -581,30 +859,41 @@ int ch_llvm_backend_compile_native(const char *path, const char *out_path) {
         return rc;
     }
 
-    const char *runtime_source = CHAAYA_SOURCE_DIR "/src/ch_rt_main.c";
-    if (access(runtime_source, R_OK) != 0) {
-        fprintf(stderr, "compile: runtime source missing at %s\n", runtime_source);
-        return CH_EXIT_ERROR;
+    int needs_rt = ll_needs_runtime(ll_path);
+    char rt_lib[PATH_MAX];
+    const char *rt_lib_ptr = NULL;
+    if (needs_rt) {
+        if (find_libchaaya_rt(rt_lib, sizeof(rt_lib)) != 0) {
+            fprintf(stderr,
+                    "compile: emitted LLVM IR to %s but libchaaya_rt.a was not found. "
+                    "Set CHAAYA_LIB_DIR or build chaaya_rt.\n",
+                    ll_path);
+            return CH_EXIT_ERROR;
+        }
+        rt_lib_ptr = rt_lib;
     }
 
-    const char *compilers[4];
+    const char *compilers[5];
     size_t compiler_count = 0;
     const char *env_compiler = getenv("CHAAYA_LLVM_CC");
-    (void)add_unique_compiler(compilers, &compiler_count, 4, env_compiler);
+    (void)add_unique_compiler(compilers, &compiler_count, 5, env_compiler);
     if (path_has_executable("clang")) {
-        (void)add_unique_compiler(compilers, &compiler_count, 4, "clang");
+        (void)add_unique_compiler(compilers, &compiler_count, 5, "clang");
+    }
+    if (path_has_executable("zig")) {
+        /* zig cc can compile .ll */
     }
     if (path_has_executable("cc")) {
-        (void)add_unique_compiler(compilers, &compiler_count, 4, "cc");
+        (void)add_unique_compiler(compilers, &compiler_count, 5, "cc");
     }
     if (compiler_count == 0) {
         compilers[compiler_count++] = "cc";
     }
 
     for (size_t i = 0; i < compiler_count; i++) {
-        if (try_link_native(compilers[i], ll_path, runtime_source, bin) == 0) {
-            fprintf(stderr, "compile: wrote %s (llvm ir at %s, runtime=%s, cc=%s)\n", bin, ll_path,
-                    runtime_source, compilers[i]);
+        if (try_link_native(compilers[i], ll_path, rt_lib_ptr, bin, needs_rt) == 0) {
+            fprintf(stderr, "compile: wrote %s (llvm ir at %s, cc=%s%s%s)\n", bin, ll_path,
+                    compilers[i], needs_rt ? ", rt=" : "", needs_rt ? rt_lib : "");
             return CH_EXIT_OK;
         }
     }
@@ -635,5 +924,9 @@ int ch_llvm_backend_run_file(const char *path) {
     }
     int st = run_command_exit_code(cmd);
     unlink(bin);
-    return st == 0 ? CH_EXIT_OK : CH_EXIT_ERROR;
+    /* Propagate the native program's exit code (constant-exit MVP uses it). */
+    if (st < 0) {
+        return CH_EXIT_ERROR;
+    }
+    return st;
 }

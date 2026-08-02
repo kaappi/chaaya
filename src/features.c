@@ -19,14 +19,21 @@ static const char *const k_features[] = {
     /* Kaappi-compatible cond-expand id for shared deferred/portable suites. */
     "kaappi",
     "chaaya-fibers",
+#if !defined(__wasi__)
     "chaaya-ffi",
+#endif
     "chaaya-reactor",
     "kaappi-reactor",
+#if !defined(__wasi__)
     "chaaya-threads",
     "kaappi-threads",
+#endif
     "ieee-float",
     "exact-closed",
-#if defined(__APPLE__)
+#if defined(__wasi__)
+    "wasm32",
+    "wasi",
+#elif defined(__APPLE__)
     "darwin",
     "macos",
     "posix",
@@ -437,11 +444,11 @@ int ch_features_print_json(FILE *out, const char **lib_paths, size_t lib_path_co
           "true",
           out);
     fputs(",\"native_backend\":", out);
-    json_escape_string(out, "stub");
+    json_escape_string(out, "mvp");
     fputs(",\"wasm_backend\":", out);
-    json_escape_string(out, "stub");
+    json_escape_string(out, "mvp");
     fputs(",\"lsp\":", out);
-    json_escape_string(out, "stub");
+    json_escape_string(out, "mvp");
     fputs(",\"features\":[", out);
     for (size_t i = 0; i < sizeof(k_features) / sizeof(k_features[0]); i++) {
         if (i > 0) {

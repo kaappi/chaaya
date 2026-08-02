@@ -17,6 +17,7 @@
 #include "chaaya/profile.h"
 #include "chaaya/reader.h"
 #include "chaaya/repl.h"
+#include "chaaya/runtime_exports.h"
 #include "chaaya/sandbox.h"
 #include "chaaya/timings.h"
 #include "chaaya/value.h"
@@ -986,18 +987,85 @@ static int cmd_doctor(ChCliOptions *opts) {
     }
 
     {
-        const char *native_cc = getenv("CHAAYA_LLVM_CC");
-        int have_native_cc = (native_cc && native_cc[0] && path_has_executable(native_cc)) ||
-                             path_has_executable("clang") || path_has_executable("cc");
-        if (have_native_cc) {
+        if (!ch_rt_native_arch_supported()) {
             DOCTOR_EMIT("WARN", "native-backend",
-                        "native compile path available; lowering is partial "
-                        "(const exits + ch_rt_main fallback)");
+                        "unsupported architecture (aarch64/x86_64 only)");
             warns++;
         } else {
-            DOCTOR_EMIT("WARN", "native-backend",
-                        "no native compiler found in PATH for LLVM linking");
-            warns++;
+            const char *native_cc = getenv("CHAAYA_LLVM_CC");
+            const char *cc = NULL;
+            if (native_cc && native_cc[0] && path_has_executable(native_cc)) {
+                cc = native_cc;
+            } else if (path_has_executable("clang")) {
+                cc = "clang";
+            } else if (path_has_executable("cc")) {
+                cc = "cc";
+            }
+            char rt_lib[PATH_MAX];
+            int have_rt = 0;
+            const char *lib_dir = getenv("CHAAYA_LIB_DIR");
+            if (lib_dir && lib_dir[0]) {
+                snprintf(rt_lib, sizeof(rt_lib), "%s/libchaaya_rt.a", lib_dir);
+                have_rt = access(rt_lib, R_OK) == 0;
+            }
+#ifndef CHAAYA_BUILD_DIR
+#define CHAAYA_BUILD_DIR "."
+#endif
+            if (!have_rt) {
+                snprintf(rt_lib, sizeof(rt_lib), "%s/libchaaya_rt.a", CHAAYA_BUILD_DIR);
+                have_rt = access(rt_lib, R_OK) == 0;
+            }
+            if (!have_rt) {
+                snprintf(rt_lib, sizeof(rt_lib), "%s/build/libchaaya_rt.a", CHAAYA_SOURCE_DIR);
+                have_rt = access(rt_lib, R_OK) == 0;
+            }
+            if (!cc) {
+                DOCTOR_EMIT("WARN", "native-backend", "no C/LLVM compiler in PATH");
+                warns++;
+            } else if (!have_rt) {
+                DOCTOR_EMIT("WARN", "native-backend",
+                            "libchaaya_rt.a not found (build chaaya_rt or set CHAAYA_LIB_DIR)");
+                warns++;
+            } else {
+                char src_path[PATH_MAX];
+                char bin_path[PATH_MAX];
+                snprintf(src_path, sizeof(src_path), "/tmp/chaaya-doctor-rt-%d.c", (int)getpid());
+                snprintf(bin_path, sizeof(bin_path), "/tmp/chaaya-doctor-rt-%d", (int)getpid());
+                FILE *sf = fopen(src_path, "w");
+                int smoke_ok = 0;
+                if (sf) {
+                    fputs("#include <stdint.h>\n"
+                          "uint64_t ch_rt_fixnum_add(uint64_t, uint64_t);\n"
+                          "int main(void) {\n"
+                          "  uint64_t a = 0xFFFD000000000001ULL;\n"
+                          "  uint64_t b = 0xFFFD000000000002ULL;\n"
+                          "  uint64_t r = ch_rt_fixnum_add(a, b);\n"
+                          "  return (r == 0xFFFD000000000003ULL) ? 0 : 1;\n"
+                          "}\n",
+                          sf);
+                    fclose(sf);
+                    char cmd[2048];
+#if defined(__APPLE__)
+                    snprintf(cmd, sizeof(cmd), "%s -O0 -o \"%s\" \"%s\" \"%s\"", cc, bin_path,
+                             src_path, rt_lib);
+#else
+                    snprintf(cmd, sizeof(cmd), "%s -O0 -o \"%s\" \"%s\" \"%s\" -lpthread -ldl -lm",
+                             cc, bin_path, src_path, rt_lib);
+#endif
+                    if (system(cmd) == 0) {
+                        int st = system(bin_path);
+                        smoke_ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+                    }
+                    unlink(src_path);
+                    unlink(bin_path);
+                }
+                if (smoke_ok) {
+                    DOCTOR_EMIT("PASS", "native-backend", "libchaaya_rt smoke-link ok");
+                } else {
+                    DOCTOR_EMIT("WARN", "native-backend", "libchaaya_rt smoke-link failed");
+                    warns++;
+                }
+            }
         }
     }
 
@@ -1453,6 +1521,10 @@ static int cmd_check(const char *path, const ChCliOptions *opts) {
     for (;;) {
         ChValue v = CH_NIL;
         ch_gc_push(&vm.gc, &v);
+        size_t form_start = reader.pos;
+        int form_line = 0;
+        int form_col = 0;
+        ch_diag_location_from_offset(src, len, form_start, &form_line, &form_col);
         ChReadStatus st = read_cli_datum(&vm, &reader, &v);
         if (st == CH_READ_EOF) {
             ch_gc_pop(&vm.gc);
@@ -1470,7 +1542,7 @@ static int cmd_check(const char *path, const ChCliOptions *opts) {
         char err[256];
         if (ch_expand_toplevel(&vm, v, &expanded, err, sizeof(err)) != CH_EXPAND_OK) {
             ChDiagCode code = ch_diag_classify_message(err, CH_DIAG_STAGE_COMPILE);
-            ch_diag_report_simple(stderr, path, 0, 0, code, NULL, err);
+            ch_diag_report_simple(stderr, path, form_line, form_col, code, NULL, err);
             ch_gc_pop_n(&vm.gc, 2);
             rc = CH_EXIT_ERROR;
             break;
@@ -1480,6 +1552,7 @@ static int cmd_check(const char *path, const ChCliOptions *opts) {
 
         ChCompiler compiler;
         ch_compiler_init(&compiler, &vm);
+        ch_compiler_set_location(&compiler, form_line, form_col);
         ChFunction *fn = NULL;
         if (ch_compile_toplevel(&compiler, expanded, &fn) != CH_COMPILE_OK) {
             report_compiler_diag(path, &compiler);
@@ -2145,6 +2218,10 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
             fprintf(stderr, "chaaya: compile/--native requires a Scheme file argument\n");
             usage_hint(argv0);
             return CH_EXIT_USAGE;
+        }
+        if (opts->flag_native && opts->command != CH_CMD_COMPILE) {
+            /* --native: compile to a temp binary, run it, delete it. */
+            return ch_llvm_backend_run_file(opts->file);
         }
         return ch_llvm_backend_compile_native(opts->file, opts->output);
     }

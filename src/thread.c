@@ -82,6 +82,13 @@ int ch_thread_check_owner(ChVM *vm, ChValue thread, const char *who) {
 }
 
 int ch_thread_make(ChVM *vm, ChValue thunk, ChValue name, ChValue *out) {
+#if defined(__wasi__)
+    (void)thunk;
+    (void)name;
+    (void)out;
+    set_error(vm, "make-thread: not available on WASI");
+    return -1;
+#else
     if (!ch_is_procedure(thunk)) {
         set_error(vm, "make-thread: expected procedure");
         return -1;
@@ -103,6 +110,7 @@ int ch_thread_make(ChVM *vm, ChValue thunk, ChValue name, ChValue *out) {
         *out = fiber;
     }
     return 0;
+#endif
 }
 
 typedef struct ThreadStartArg {
