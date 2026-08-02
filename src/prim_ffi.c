@@ -18,8 +18,7 @@ static void define_prim(ChVM *vm, const char *name, ChNativeFn fn, int arity, in
 
 static ChValue prim_open_foreign_library(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    if (ch_sandbox_deny_ffi()) {
-        snprintf(vm->error, sizeof(vm->error), "open-foreign-library: denied by sandbox");
+    if (ch_ffi_check_sandbox(vm, "open-foreign-library") != 0) {
         return CH_UNDEFINED;
     }
 
@@ -201,6 +200,9 @@ static ChValue fn_ptr_to_value(ChVM *vm, void *ptr) {
 
 static ChValue prim_ffi_callback(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
+    if (ch_ffi_check_sandbox(vm, "ffi-callback") != 0) {
+        return CH_UNDEFINED;
+    }
     if (!ch_is_procedure(args[0])) {
         snprintf(vm->error, sizeof(vm->error), "ffi-callback: expected procedure");
         return CH_UNDEFINED;
@@ -251,6 +253,18 @@ static ChValue prim_ffi_callback_p(ChVM *vm, ChValue *args, int nargs) {
     return (fn && ch_ffi_callback_p(fn)) ? CH_TRUE : CH_FALSE;
 }
 
+/* (ffi-bytevector-ptr bv) => exact integer address of the bytevector's
+ * backing storage, for handing to FFI calls that expect a raw buffer
+ * pointer (e.g. as a `pointer` argument alongside a separate length). */
+static ChValue prim_ffi_bytevector_ptr(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_bytevector(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "ffi-bytevector-ptr: expected bytevector");
+        return CH_UNDEFINED;
+    }
+    return fn_ptr_to_value(vm, ch_as_bytevector(args[0])->data);
+}
+
 void ch_register_ffi_primitives(ChVM *vm) {
     define_prim(vm, "open-foreign-library", prim_open_foreign_library, 1, 1);
     define_prim(vm, "close-foreign-library!", prim_close_foreign_library, 1, 1);
@@ -265,4 +279,5 @@ void ch_register_ffi_primitives(ChVM *vm) {
     define_prim(vm, "ffi-callback", prim_ffi_callback, 3, 3);
     define_prim(vm, "ffi-callback-release", prim_ffi_callback_release, 1, 1);
     define_prim(vm, "ffi-callback?", prim_ffi_callback_p, 1, 1);
+    define_prim(vm, "ffi-bytevector-ptr", prim_ffi_bytevector_ptr, 1, 1);
 }

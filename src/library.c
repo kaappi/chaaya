@@ -286,7 +286,7 @@ int ch_register_builtin_libraries(ChVM *vm) {
         "spawn-fiber", "spawn", "fiber-yield", "yield", "fiber?", "fiber-join",
         "make-channel", "channel?", "channel-send!", "channel-send", "channel-recv",
         "channel-receive", "channel-get", "channel-close!", "channel-closed?",
-        "channel-timeout-exception?"};
+        "channel-timeout-exception?", "processor-count"};
     static const char *const chaaya_ffi_exports[] = {"open-foreign-library",
                                                       "close-foreign-library!",
                                                       "foreign-library?",
@@ -297,7 +297,8 @@ int ch_register_builtin_libraries(ChVM *vm) {
                                                       "ffi-fn",
                                                       "ffi-callback",
                                                       "ffi-callback-release",
-                                                      "ffi-callback?"};
+                                                      "ffi-callback?",
+                                                      "ffi-bytevector-ptr"};
     static const char *const chaaya_primitives_exports[] = {
         "%default-random-source", "%rs-next-int", "%rs-next-real"};
     static const char *const srfi170_exports[] = {
@@ -311,9 +312,16 @@ int ch_register_builtin_libraries(ChVM *vm) {
     static const char *const srfi18_exports[] = {
         "make-thread",      "thread-start!",    "thread-join!",     "thread-sleep!",
         "thread-yield!",    "current-thread",   "thread?",          "thread-name",
+        "thread-specific",  "thread-specific-set!", "thread-terminate!",
         "make-mutex",       "mutex?",           "mutex-lock!",      "mutex-unlock!",
+        "mutex-name",       "mutex-specific",   "mutex-specific-set!", "mutex-state",
         "make-condition-variable", "condition-variable?",
-        "condition-variable-signal!", "condition-variable-broadcast!"};
+        "condition-variable-signal!", "condition-variable-broadcast!",
+        "condition-variable-name", "condition-variable-specific",
+        "condition-variable-specific-set!",
+        "current-time",     "time->seconds",    "seconds->time",
+        "join-timeout-exception?", "terminated-thread-exception?",
+        "abandoned-mutex-exception?", "uncaught-exception?", "uncaught-exception-reason"};
     static const char *const srfi254_exports[] = {
         "make-ephemeron",   "ephemeron?",       "ephemeron-key",    "ephemeron-value",
         "ephemeron-broken?", "ephemeron-ref",   "reference-barrier"};
@@ -1268,6 +1276,7 @@ static int read_forms_from_file(ChVM *vm, const char *path, int fold_case, ChVal
             tail = cell;
         } else {
             ch_set_cdr(tail, cell);
+            ch_gc_write_barrier(&vm->gc, ch_to_object(tail), cell);
             tail = cell;
         }
         ch_gc_pop(&vm->gc);

@@ -3,6 +3,7 @@
 
 #include "chaaya/gc.h"
 #include "chaaya/fiber.h"
+#include "chaaya/reactor.h"
 
 #include <pthread.h>
 #include <stddef.h>
@@ -11,6 +12,10 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Bound on concurrently-parked-thread waiters per direction, mirroring
+ * CH_CHANNEL_WAITER_MAX for the local (single-thread) channel. */
+#define CH_SHARED_CHANNEL_WAITER_MAX 64
 
 typedef struct ChEnvelope {
     ChGC heap; /* private mini-heap holding payload copy when !is_immediate */
@@ -33,6 +38,14 @@ typedef struct ChSharedChannel {
     int refcount;
     pthread_cond_t send_cv;
     pthread_cond_t recv_cv;
+    /* Cross-thread wakeup rings (KEP-0002 §5/§7 shape): each entry is a
+     * *retained* reference to some parked thread's reactor notifier.
+     * Registered by try_send/try_recv's would-block path, rung (notified
+     * and released) on the state transition that side is waiting for. */
+    ChThreadNotifier *send_waiters[CH_SHARED_CHANNEL_WAITER_MAX];
+    size_t send_waiter_count;
+    ChThreadNotifier *recv_waiters[CH_SHARED_CHANNEL_WAITER_MAX];
+    size_t recv_waiter_count;
 } ChSharedChannel;
 
 /* deepCopy payload into a private envelope heap (or inline immediate). */
@@ -51,11 +64,22 @@ int ch_channel_promote(ChGC *gc, ChChannel *ch);
 ChValue ch_shared_channel_alloc_stub(ChGC *gc, ChSharedChannel *sc, size_t capacity,
                                      int rendezvous, uint8_t closed);
 
-/* try_send/try_recv: 0 ok, 1 would block, -1 closed/error (sets dest gc vm error when applicable) */
-int ch_shared_channel_try_send(ChSharedChannel *sc, ChGC *src_gc, ChValue payload);
-int ch_shared_channel_try_recv(ChSharedChannel *sc, ChGC *dest_gc, ChValue *out);
+/* try_send/try_recv: 0 ok, 1 would block, -1 closed/error (sets dest gc vm
+ * error when applicable). `notifier` is optional (NULL registers nothing):
+ * when non-NULL and the call would block, it is registered (retained) in
+ * the opposite-direction waiter ring so a future send/recv/close on this
+ * channel rings it, per the would_park protocol -- see
+ * ch_shared_channel_wait_send_ready / wait_recv_ready below. */
+int ch_shared_channel_try_send(ChSharedChannel *sc, ChGC *src_gc, ChValue payload,
+                               ChThreadNotifier *notifier);
+int ch_shared_channel_try_recv(ChSharedChannel *sc, ChGC *dest_gc, ChValue *out,
+                               ChThreadNotifier *notifier);
 
-/* Block until send/recv completes (1 ms cond timedwait loop). */
+/* Block until send/recv completes. Prefers a pthread_cond wait rung by
+ * ring(); still bounded by a short timedwait so a missed/racy signal (or a
+ * caller with no notifier support) cannot hang forever. Callers that drive
+ * a fiber scheduler should use try_send/try_recv plus their own reactor
+ * poll instead -- see channel_send_shared_timeout in fiber.c. */
 int ch_shared_channel_send(ChSharedChannel *sc, ChGC *src_gc, ChValue payload);
 int ch_shared_channel_recv(ChSharedChannel *sc, ChGC *dest_gc, ChValue *out);
 

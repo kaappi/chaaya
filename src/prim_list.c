@@ -263,19 +263,21 @@ static ChValue prim_list_copy(ChVM *vm, ChValue *args, int nargs) {
     int advance_slow = 0;
     ch_gc_push(&vm->gc, &head);
     ch_gc_push(&vm->gc, &tail);
+    ch_gc_push(&vm->gc, &slow);
     while (ch_is_pair(src)) {
         ChValue cell = ch_gc_cons(&vm->gc, ch_car(src), CH_NIL);
         if (ch_is_nil(head)) {
             head = cell;
         } else {
             ch_set_cdr(tail, cell);
+            ch_gc_write_barrier(&vm->gc, ch_to_object(tail), cell);
         }
         tail = cell;
         src = ch_cdr(src);
         if (advance_slow) {
             slow = ch_cdr(slow);
             if (ch_is_pair(src) && ch_eq(src, slow)) {
-                ch_gc_pop_n(&vm->gc, 2);
+                ch_gc_pop_n(&vm->gc, 3);
                 snprintf(vm->error, sizeof(vm->error), "list-copy: circular list");
                 return CH_UNDEFINED;
             }
@@ -284,8 +286,9 @@ static ChValue prim_list_copy(ChVM *vm, ChValue *args, int nargs) {
     }
     if (!ch_is_nil(src)) {
         ch_set_cdr(tail, src);
+        ch_gc_write_barrier(&vm->gc, ch_to_object(tail), src);
     }
-    ch_gc_pop_n(&vm->gc, 2);
+    ch_gc_pop_n(&vm->gc, 3);
     return head;
 }
 

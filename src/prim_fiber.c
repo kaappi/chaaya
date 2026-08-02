@@ -2,11 +2,17 @@
 
 #include "chaaya/fiber.h"
 #include "chaaya/rational.h"
+#include "chaaya/sandbox.h"
 #include "chaaya/thread.h"
 
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 static void define_prim(ChVM *vm, const char *name, ChNativeFn fn, int arity, int min_arity) {
     ChValue sym = ch_gc_intern_symbol_cstr(&vm->gc, name);
@@ -184,6 +190,67 @@ static ChValue prim_channel_timeout_exception_p(ChVM *vm, ChValue *args, int nar
     return CH_FALSE;
 }
 
+/* Returns the error-object message iff args[0] is an error-object whose
+ * message starts with `prefix`, else NULL. */
+static const char *error_object_message_with_prefix(ChValue v, const char *prefix) {
+    if (!ch_is_error_object(v)) {
+        return NULL;
+    }
+    ChErrorObject *err = ch_as_error_object(v);
+    if (!ch_is_string(err->message)) {
+        return NULL;
+    }
+    const char *msg = ch_as_string(err->message)->data;
+    size_t plen = strlen(prefix);
+    return strncmp(msg, prefix, plen) == 0 ? msg : NULL;
+}
+
+static ChValue prim_join_timeout_exception_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)nargs;
+    return error_object_message_with_prefix(args[0], "thread-join!: timed out") ? CH_TRUE : CH_FALSE;
+}
+
+static ChValue prim_terminated_thread_exception_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)nargs;
+    return error_object_message_with_prefix(args[0], "thread-join!: terminated-thread-exception")
+              ? CH_TRUE
+              : CH_FALSE;
+}
+
+static ChValue prim_abandoned_mutex_exception_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)nargs;
+    return error_object_message_with_prefix(args[0], "mutex-lock!: abandoned mutex") ? CH_TRUE
+                                                                                     : CH_FALSE;
+}
+
+#define CH_UNCAUGHT_EXCEPTION_PREFIX "uncaught exception: "
+
+static ChValue prim_uncaught_exception_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)nargs;
+    return error_object_message_with_prefix(args[0], CH_UNCAUGHT_EXCEPTION_PREFIX) ? CH_TRUE
+                                                                                   : CH_FALSE;
+}
+
+/* The original raised value cannot in general cross the OS-thread boundary
+ * that separates the (uncaught) raise from thread-join! observing it — see
+ * ch_vm_raise's handler_count==0 branch, which keeps only a printed string.
+ * uncaught-exception-reason therefore returns that printed representation
+ * as a string rather than the original condition object. */
+static ChValue prim_uncaught_exception_reason(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    const char *msg = error_object_message_with_prefix(args[0], CH_UNCAUGHT_EXCEPTION_PREFIX);
+    if (!msg) {
+        snprintf(vm->error, sizeof(vm->error),
+                 "uncaught-exception-reason: expected an uncaught-exception");
+        return CH_UNDEFINED;
+    }
+    return ch_gc_make_string_cstr(&vm->gc, msg + (sizeof(CH_UNCAUGHT_EXCEPTION_PREFIX) - 1));
+}
+
 static ChValue prim_fiber_p(ChVM *vm, ChValue *args, int nargs) {
     (void)vm;
     (void)nargs;
@@ -226,14 +293,49 @@ static ChValue prim_thread_start(ChVM *vm, ChValue *args, int nargs) {
 }
 
 static ChValue prim_thread_join(ChVM *vm, ChValue *args, int nargs) {
-    (void)nargs;
+    if (nargs <= 1) {
+        ChValue result = CH_UNDEFINED;
+        if (ch_thread_join(vm, args[0], &result) != 0) {
+            return CH_UNDEFINED;
+        }
+        return result;
+    }
+
+    double timeout = 0.0;
+    if (args[1] == CH_FALSE) {
+        timeout = 0.0;
+    } else if (!sleep_seconds_arg(args[1], &timeout) || !isfinite(timeout) || timeout < 0.0) {
+        snprintf(vm->error, sizeof(vm->error), "thread-join!: expected non-negative timeout");
+        return CH_UNDEFINED;
+    }
+
+    int timed_out = 0;
     ChValue result = CH_UNDEFINED;
-    if (ch_thread_join(vm, args[0], &result) != 0) {
+    if (ch_thread_join_timeout(vm, args[0], timeout, &timed_out, &result) != 0) {
+        if (timed_out) {
+            if (nargs >= 3) {
+                return args[2];
+            }
+            ChValue msg = ch_gc_make_string_cstr(&vm->gc, "thread-join!: timed out");
+            ChValue irritants = CH_NIL;
+            ch_gc_push(&vm->gc, &msg);
+            ch_gc_push(&vm->gc, &irritants);
+            ChValue thread_arg = args[0];
+            ch_gc_push(&vm->gc, &thread_arg);
+            irritants = ch_gc_cons(&vm->gc, thread_arg, CH_NIL);
+            ch_gc_pop(&vm->gc);
+            ChValue err = ch_gc_make_error_object(&vm->gc, msg, irritants, 0);
+            ch_gc_pop_n(&vm->gc, 2);
+            return ch_vm_raise(vm, err, 0);
+        }
         return CH_UNDEFINED;
     }
     return result;
 }
 
+/* Accepts a plain number of seconds (relative), or an SRFI-18 time object
+ * (an absolute deadline, per SRFI-18 semantics for timeout arguments) which
+ * is converted to a relative "seconds from now" (clamped to >= 0). */
 static int sleep_seconds_arg(ChValue v, double *out) {
     if (ch_is_fixnum(v)) {
         *out = (double)ch_to_fixnum(v);
@@ -245,6 +347,18 @@ static int sleep_seconds_arg(ChValue v, double *out) {
     }
     if (ch_is_bignum(v) || ch_is_rational_obj(v)) {
         *out = ch_exact_to_f64(v);
+        return 1;
+    }
+    if (ch_is_time(v)) {
+        ChTime *t = ch_as_time(v);
+        double deadline = (double)t->seconds + ((double)t->nanoseconds / 1e9);
+        struct timespec now_ts;
+        if (timespec_get(&now_ts, TIME_UTC) == 0) {
+            return 0;
+        }
+        double now = (double)now_ts.tv_sec + ((double)now_ts.tv_nsec / 1e9);
+        double rel = deadline - now;
+        *out = rel > 0.0 ? rel : 0.0;
         return 1;
     }
     return 0;
@@ -298,6 +412,60 @@ static ChValue prim_thread_name(ChVM *vm, ChValue *args, int nargs) {
     return ch_as_fiber(args[0])->name;
 }
 
+static ChValue prim_thread_specific(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (ch_thread_check_owner(vm, args[0], "thread-specific") != 0) {
+        return CH_UNDEFINED;
+    }
+    return ch_as_fiber(args[0])->specific;
+}
+
+static ChValue prim_thread_specific_set(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (ch_thread_check_owner(vm, args[0], "thread-specific-set!") != 0) {
+        return CH_UNDEFINED;
+    }
+    ChFiber *f = ch_as_fiber(args[0]);
+    f->specific = args[1];
+    ch_gc_write_barrier(&vm->gc, &f->header, args[1]);
+    return CH_VOID;
+}
+
+static ChValue prim_thread_terminate(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (ch_thread_terminate(vm, args[0]) != 0) {
+        return CH_UNDEFINED;
+    }
+    return CH_VOID;
+}
+
+#if !defined(__wasi__)
+static ChValue prim_processor_count(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)args;
+    (void)nargs;
+    if (ch_sandbox_enabled()) {
+        return ch_make_fixnum(1);
+    }
+#if defined(_SC_NPROCESSORS_ONLN)
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 1) {
+        n = 1;
+    }
+    return ch_make_fixnum((int64_t)n);
+#else
+    return ch_make_fixnum(1);
+#endif
+}
+#else
+static ChValue prim_processor_count(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)args;
+    (void)nargs;
+    return ch_make_fixnum(1);
+}
+#endif
+
 static ChValue prim_make_mutex(ChVM *vm, ChValue *args, int nargs) {
     ChValue name = CH_FALSE;
     if (nargs >= 1) {
@@ -323,10 +491,73 @@ static ChValue prim_mutex_lock(ChVM *vm, ChValue *args, int nargs) {
         }
     }
     int rc = ch_mutex_lock(vm, args[0], timeout);
+    if (rc == -2) {
+        ChValue msg = ch_gc_make_string_cstr(&vm->gc, vm->error[0] ? vm->error
+                                                                    : "mutex-lock!: abandoned mutex");
+        vm->error[0] = '\0';
+        ch_gc_push(&vm->gc, &msg);
+        ChValue err = ch_gc_make_error_object(&vm->gc, msg, CH_NIL, 0);
+        ch_gc_pop(&vm->gc);
+        return ch_vm_raise(vm, err, 0);
+    }
     if (rc < 0) {
         return CH_UNDEFINED;
     }
     return rc ? CH_TRUE : CH_FALSE;
+}
+
+static ChValue prim_mutex_name(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_mutex(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "mutex-name: expected mutex");
+        return CH_UNDEFINED;
+    }
+    return ch_as_mutex(args[0])->name;
+}
+
+static ChValue prim_mutex_specific(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_mutex(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "mutex-specific: expected mutex");
+        return CH_UNDEFINED;
+    }
+    return ch_as_mutex(args[0])->specific;
+}
+
+static ChValue prim_mutex_specific_set(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_mutex(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "mutex-specific-set!: expected mutex");
+        return CH_UNDEFINED;
+    }
+    ChMutex *m = ch_as_mutex(args[0]);
+    m->specific = args[1];
+    ch_gc_write_barrier(&vm->gc, &m->header, args[1]);
+    return CH_VOID;
+}
+
+static ChValue prim_mutex_state(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_mutex(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "mutex-state: expected mutex");
+        return CH_UNDEFINED;
+    }
+    ChMutex *m = ch_as_mutex(args[0]);
+    if (m->header.owner != vm->gc.id) {
+        snprintf(vm->error, sizeof(vm->error), "mutex-state: mutex belongs to another OS thread");
+        return CH_UNDEFINED;
+    }
+    if (m->locked && ch_is_fiber(m->owner)) {
+        ChFiber *owner_f = ch_as_fiber(m->owner);
+        if (owner_f->state == CH_FIBER_DONE || owner_f->state == CH_FIBER_FAILED) {
+            return ch_gc_intern_symbol_cstr(&vm->gc, "abandoned");
+        }
+        return m->owner;
+    }
+    if (m->abandoned) {
+        return ch_gc_intern_symbol_cstr(&vm->gc, "abandoned");
+    }
+    return ch_gc_intern_symbol_cstr(&vm->gc, "not-owned");
 }
 
 static ChValue prim_mutex_unlock(ChVM *vm, ChValue *args, int nargs) {
@@ -379,6 +610,38 @@ static ChValue prim_condvar_broadcast(ChVM *vm, ChValue *args, int nargs) {
     return CH_VOID;
 }
 
+static ChValue prim_condvar_name(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_condvar(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "condition-variable-name: expected condition variable");
+        return CH_UNDEFINED;
+    }
+    return ch_as_condvar(args[0])->name;
+}
+
+static ChValue prim_condvar_specific(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_condvar(args[0])) {
+        snprintf(vm->error, sizeof(vm->error),
+                 "condition-variable-specific: expected condition variable");
+        return CH_UNDEFINED;
+    }
+    return ch_as_condvar(args[0])->specific;
+}
+
+static ChValue prim_condvar_specific_set(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_condvar(args[0])) {
+        snprintf(vm->error, sizeof(vm->error),
+                 "condition-variable-specific-set!: expected condition variable");
+        return CH_UNDEFINED;
+    }
+    ChCondvar *c = ch_as_condvar(args[0]);
+    c->specific = args[1];
+    ch_gc_write_barrier(&vm->gc, &c->header, args[1]);
+    return CH_VOID;
+}
+
 void ch_register_fiber_primitives(ChVM *vm) {
     define_prim(vm, "spawn-fiber", prim_spawn_fiber, 1, 1);
     define_prim(vm, "spawn", prim_spawn_fiber, 1, 1);
@@ -405,12 +668,28 @@ void ch_register_fiber_primitives(ChVM *vm) {
     define_prim(vm, "current-thread", prim_current_thread, 0, 0);
     define_prim(vm, "thread?", prim_thread_p, 1, 1);
     define_prim(vm, "thread-name", prim_thread_name, 1, 1);
+    define_prim(vm, "thread-specific", prim_thread_specific, 1, 1);
+    define_prim(vm, "thread-specific-set!", prim_thread_specific_set, 2, 2);
+    define_prim(vm, "thread-terminate!", prim_thread_terminate, 1, 1);
+    define_prim(vm, "join-timeout-exception?", prim_join_timeout_exception_p, 1, 1);
+    define_prim(vm, "terminated-thread-exception?", prim_terminated_thread_exception_p, 1, 1);
+    define_prim(vm, "uncaught-exception?", prim_uncaught_exception_p, 1, 1);
+    define_prim(vm, "uncaught-exception-reason", prim_uncaught_exception_reason, 1, 1);
+    define_prim(vm, "abandoned-mutex-exception?", prim_abandoned_mutex_exception_p, 1, 1);
+    define_prim(vm, "processor-count", prim_processor_count, 0, 0);
     define_prim(vm, "make-mutex", prim_make_mutex, -1, 0);
     define_prim(vm, "mutex?", prim_mutex_p, 1, 1);
     define_prim(vm, "mutex-lock!", prim_mutex_lock, -1, 1);
     define_prim(vm, "mutex-unlock!", prim_mutex_unlock, -1, 1);
+    define_prim(vm, "mutex-name", prim_mutex_name, 1, 1);
+    define_prim(vm, "mutex-specific", prim_mutex_specific, 1, 1);
+    define_prim(vm, "mutex-specific-set!", prim_mutex_specific_set, 2, 2);
+    define_prim(vm, "mutex-state", prim_mutex_state, 1, 1);
     define_prim(vm, "make-condition-variable", prim_make_condvar, -1, 0);
     define_prim(vm, "condition-variable?", prim_condvar_p, 1, 1);
     define_prim(vm, "condition-variable-signal!", prim_condvar_signal, 1, 1);
     define_prim(vm, "condition-variable-broadcast!", prim_condvar_broadcast, 1, 1);
+    define_prim(vm, "condition-variable-name", prim_condvar_name, 1, 1);
+    define_prim(vm, "condition-variable-specific", prim_condvar_specific, 1, 1);
+    define_prim(vm, "condition-variable-specific-set!", prim_condvar_specific_set, 2, 2);
 }

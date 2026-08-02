@@ -532,6 +532,7 @@ static void mark_object_contents(ChObject *obj) {
     case CH_TAG_CONDVAR: {
         ChCondvar *c = (ChCondvar *)obj;
         mark_value(c->name);
+        mark_value(c->specific);
         break;
     }
     }
@@ -765,6 +766,15 @@ static int references_young(ChObject *obj) {
             }
         }
         return 0;
+    }
+    case CH_TAG_MUTEX: {
+        ChMutex *m = (ChMutex *)obj;
+        return is_young_pointer(m->owner) || is_young_pointer(m->name) ||
+               is_young_pointer(m->specific);
+    }
+    case CH_TAG_CONDVAR: {
+        ChCondvar *c = (ChCondvar *)obj;
+        return is_young_pointer(c->name) || is_young_pointer(c->specific);
     }
     default:
         return 0;
@@ -1123,6 +1133,7 @@ static void init_port_common(ChPort *p, ChPortKind kind, int input, int output) 
     p->output = (uint8_t)(output ? 1 : 0);
     p->closed = 0;
     p->binary = 0;
+    p->nonblocking = 0;
     p->file = NULL;
     p->buf = NULL;
     p->len = 0;

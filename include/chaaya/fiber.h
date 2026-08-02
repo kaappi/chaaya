@@ -65,6 +65,7 @@ typedef struct ChFiber {
     uint8_t park_kind;
     uint8_t queued;
     uint8_t os_state; /* ChOsThreadState */
+    uint8_t terminated; /* SRFI-18 thread-terminate! was requested */
     ChValue thunk;
     ChValue result;
     ChValue error;
@@ -118,6 +119,11 @@ ChValue ch_gc_make_channel(ChGC *gc, size_t capacity, int rendezvous);
 int ch_fiber_spawn(ChVM *vm, ChValue thunk, ChValue *out_fiber);
 int ch_fiber_yield(ChVM *vm);
 int ch_fiber_join(ChVM *vm, ChValue fiber, ChValue *out_result);
+/* Timed counterpart of ch_fiber_join: timeout_seconds < 0 waits forever; 0 is
+ * an immediate check. Sets *timed_out and returns -1 (no vm->error) when the
+ * deadline passes before the fiber finishes. */
+int ch_fiber_join_timeout(ChVM *vm, ChValue fiber, double timeout_seconds, ChValue *out_result,
+                          int *timed_out);
 int ch_fiber_sleep(ChVM *vm, double seconds);
 int ch_fiber_wait_fd(ChVM *vm, int fd, ChReactorInterest interest);
 int ch_channel_send(ChVM *vm, ChValue channel, ChValue value);

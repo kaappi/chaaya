@@ -243,6 +243,7 @@ typedef struct ChPort {
     uint8_t output;
     uint8_t closed;
     uint8_t binary; /* file ports: #t => binary-port?, #f => textual-port? */
+    uint8_t nonblocking; /* lazily set when a fiber scheduler parks on this fd */
     FILE *file; /* CH_PORT_STDIO */
     char *buf;  /* string/bytevector ports (owned) */
     size_t len;
@@ -397,6 +398,7 @@ typedef struct ChCondvar {
     ChObject header;
     uint64_t signal_generation;
     ChValue name;
+    ChValue specific;
 } ChCondvar;
 
 /* Signed i48 fixnum range. */

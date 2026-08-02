@@ -1616,6 +1616,7 @@ static ChReadStatus read_list(ChReader *r, ChValue *out) {
                     return fail(r, "dotted pair with empty head");
                 }
                 ch_set_cdr(tail, rest);
+                ch_gc_write_barrier(r->gc, ch_to_object(tail), rest);
                 ch_gc_pop_n(r->gc, 3);
                 *out = head;
                 return CH_READ_OK;
@@ -1636,6 +1637,7 @@ static ChReadStatus read_list(ChReader *r, ChValue *out) {
             tail = cell;
         } else {
             ch_set_cdr(tail, cell);
+            ch_gc_write_barrier(r->gc, ch_to_object(tail), cell);
             tail = cell;
         }
         ws = skip_ws_and_comments(r);
@@ -1813,20 +1815,23 @@ static ChReadStatus read_abbrev(ChReader *r, const char *name, ChValue *out) {
 #define CH_DATUM_PATCH_DEPTH 1024
 
 /* Patch leftover placeholder pairs when a label is bound to a non-pair. */
-static void patch_placeholder(ChValue root, ChValue placeholder, ChValue replacement, int depth) {
+static void patch_placeholder(ChGC *gc, ChValue root, ChValue placeholder, ChValue replacement,
+                              int depth) {
     if (depth > CH_DATUM_PATCH_DEPTH || (!ch_is_pair(root) && !ch_is_vector(root))) {
         return;
     }
     if (ch_is_pair(root)) {
         if (ch_car(root) == placeholder) {
             ch_set_car(root, replacement);
+            ch_gc_write_barrier(gc, ch_to_object(root), replacement);
         } else {
-            patch_placeholder(ch_car(root), placeholder, replacement, depth + 1);
+            patch_placeholder(gc, ch_car(root), placeholder, replacement, depth + 1);
         }
         if (ch_cdr(root) == placeholder) {
             ch_set_cdr(root, replacement);
+            ch_gc_write_barrier(gc, ch_to_object(root), replacement);
         } else {
-            patch_placeholder(ch_cdr(root), placeholder, replacement, depth + 1);
+            patch_placeholder(gc, ch_cdr(root), placeholder, replacement, depth + 1);
         }
         return;
     }
@@ -1835,8 +1840,9 @@ static void patch_placeholder(ChValue root, ChValue placeholder, ChValue replace
         for (size_t i = 0; i < vec->len; i++) {
             if (vec->items[i] == placeholder) {
                 vec->items[i] = replacement;
+                ch_gc_write_barrier(gc, ch_to_object(root), replacement);
             } else {
-                patch_placeholder(vec->items[i], placeholder, replacement, depth + 1);
+                patch_placeholder(gc, vec->items[i], placeholder, replacement, depth + 1);
             }
         }
     }
@@ -1889,6 +1895,8 @@ static ChReadStatus read_datum_label(ChReader *r, ChValue *out) {
     if (ch_is_pair(datum)) {
         ch_set_car(placeholder, ch_car(datum));
         ch_set_cdr(placeholder, ch_cdr(datum));
+        ch_gc_write_barrier(r->gc, ch_to_object(placeholder), ch_car(datum));
+        ch_gc_write_barrier(r->gc, ch_to_object(placeholder), ch_cdr(datum));
         r->labels[label] = placeholder;
         *out = placeholder;
         ch_gc_pop_n(r->gc, 2);
@@ -1896,7 +1904,7 @@ static ChReadStatus read_datum_label(ChReader *r, ChValue *out) {
     }
 
     r->labels[label] = datum;
-    patch_placeholder(datum, placeholder, datum, 0);
+    patch_placeholder(r->gc, datum, placeholder, datum, 0);
     *out = datum;
     ch_gc_pop_n(r->gc, 2);
     return CH_READ_OK;

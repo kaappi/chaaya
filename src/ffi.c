@@ -28,6 +28,14 @@ static void set_error(ChVM *vm, const char *msg) {
     snprintf(vm->error, sizeof(vm->error), "%s", msg);
 }
 
+int ch_ffi_check_sandbox(ChVM *vm, const char *who) {
+    if (ch_sandbox_deny_ffi()) {
+        snprintf(vm->error, sizeof(vm->error), "%s: denied by sandbox", who ? who : "ffi");
+        return -1;
+    }
+    return 0;
+}
+
 const char *ch_ffi_type_name(ChFFIType type) {
     switch (type) {
     case CH_FFI_TYPE_VOID:
@@ -500,8 +508,7 @@ int ch_ffi_open_library(ChVM *vm, const char *path, ChValue *out_library) {
         set_error(vm, "ffi: internal open-library error");
         return -1;
     }
-    if (ch_sandbox_deny_ffi()) {
-        set_error(vm, "open-foreign-library: denied by sandbox");
+    if (ch_ffi_check_sandbox(vm, "open-foreign-library") != 0) {
         return -1;
     }
 
@@ -542,6 +549,9 @@ int ch_ffi_lookup_procedure(ChVM *vm, ChValue library, const char *symbol_name,
                             ChValue *out_proc) {
     if (!out_proc || !symbol_name) {
         set_error(vm, "foreign-procedure: internal lookup error");
+        return -1;
+    }
+    if (ch_ffi_check_sandbox(vm, "foreign-procedure") != 0) {
         return -1;
     }
     if (!ch_is_foreign_library(library)) {

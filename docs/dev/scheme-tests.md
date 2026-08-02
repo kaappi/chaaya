@@ -91,11 +91,13 @@ coverage.
 | File | Reason |
 |------|--------|
 | `jit-*.scm`, `llvm-*.scm` | JIT/LLVM backend not in Chaaya |
-| Most SRFI-18 / cross-thread smokes | Wire one file at a time after local green |
-| Full `fiber-channel-rendezvous-thread.scm` | Prefer lite smoke until rendezvous-across-threads is hardened |
+| Some remaining SRFI-18 / provenance smokes | e.g. `thread-foreign-owner-1484` needs capture-vs-global provenance |
+| `kaappi-parallel-map.scm` | Needs SRFI-1 `lset=` (unrelated gap) |
 
 **Runtime/platform smokes wired:** `fiber-gc-remembered-set`, `fiber-channel-close`,
 `fiber-sleep-does-not-stall-sibling`, `thread-sleep-876`, `thread-self-join`,
-`fiber-channel-rendezvous-thread-lite`.
+`fiber-channel-rendezvous-thread-lite`, `fiber-channel-rendezvous-thread`,
+`fiber-channel-lost-wakeup-1489`, `fiber-channel-timeout`, `thread-join-timeout-878`,
+`kaappi-parallel-pool`, `kaappi-parallel-shutdown`.
 
 Add further smoke batches only after local green + `make test`.

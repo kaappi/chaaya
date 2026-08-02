@@ -19,6 +19,65 @@ static void sc_set_error(ChGC *gc, const char *msg) {
     }
 }
 
+/* --- Cross-thread waiter rings (would_park protocol) --------------------
+ * Caller must hold sc->lock for the *_locked helpers. Registration retains
+ * the notifier; ringing notifies then releases it, so ownership always
+ * moves from "waiter list entry" to "in-flight notify call" atomically
+ * under the lock via the snapshot-and-clear step. */
+
+static void sc_register_waiter_locked(ChThreadNotifier **list, size_t *count,
+                                      ChThreadNotifier *notifier) {
+    if (!notifier) {
+        return;
+    }
+    for (size_t i = 0; i < *count; i++) {
+        if (list[i] == notifier) {
+            return; /* dedup: at most one entry per notifier per list */
+        }
+    }
+    if (*count >= CH_SHARED_CHANNEL_WAITER_MAX) {
+        /* Best-effort: drop the registration rather than overflow. The
+         * caller's own retry loop still makes progress via its poll
+         * deadline; it just won't be woken early by this particular
+         * event. */
+        return;
+    }
+    ch_thread_notifier_retain(notifier);
+    list[(*count)++] = notifier;
+}
+
+/* Snapshots and clears a waiter list under the lock, into a caller-owned
+ * buffer sized CH_SHARED_CHANNEL_WAITER_MAX. Ownership of each retained
+ * reference moves to the snapshot; sc_ring_waiters releases it after
+ * notifying. */
+static void sc_snapshot_and_clear_locked(ChThreadNotifier **list, size_t *count,
+                                         ChThreadNotifier **out, size_t *out_count) {
+    for (size_t i = 0; i < *count; i++) {
+        out[i] = list[i];
+    }
+    *out_count = *count;
+    *count = 0;
+}
+
+/* Rings every notifier in a snapshot taken under the lock, after releasing
+ * it -- a live waiter list is never walked unlocked. */
+static void sc_ring_waiters(ChThreadNotifier **notifiers, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        ch_thread_notifier_notify(notifiers[i]);
+        ch_thread_notifier_release(notifiers[i]);
+    }
+}
+
+/* Releases every remaining registration; used only at channel destruction,
+ * when no further send/recv/close can ever ring these lists. */
+static void sc_release_waiters_locked(ChThreadNotifier **list, size_t *count) {
+    for (size_t i = 0; i < *count; i++) {
+        ch_thread_notifier_release(list[i]);
+        list[i] = NULL;
+    }
+    *count = 0;
+}
+
 static int value_needs_heap_copy(ChValue v) {
     return ch_is_pointer(v) ? 1 : 0;
 }
@@ -93,7 +152,6 @@ static int sc_can_send_locked(const ChSharedChannel *sc) {
 }
 
 ChEnvelope *ch_envelope_create(ChGC *src_gc, ChValue payload) {
-    (void)src_gc;
     ChEnvelope *e = (ChEnvelope *)calloc(1, sizeof(ChEnvelope));
     if (!e) {
         return NULL;
@@ -107,6 +165,18 @@ ChEnvelope *ch_envelope_create(ChGC *src_gc, ChValue payload) {
     e->is_immediate = 0;
     ch_gc_init(&e->heap);
     e->heap.vm = src_gc ? src_gc->vm : NULL;
+    /* Adopt the sending gc's identity: a freshly made (not yet promoted)
+     * channel legitimately owned by the sender -- e.g. a fresh reply
+     * channel handed off alongside a task, per the (kaappi parallel)
+     * pool-submit pattern -- must be promotable while copied into this
+     * transient envelope heap. dc_channel_promote_gc only recognizes
+     * `dest` itself or `dest`'s parent vm as legal owners; giving the
+     * envelope heap the sender's own id makes "owned by the sender" one
+     * of those recognized cases instead of a foreign-owner rejection. The
+     * id is otherwise unused once ch_envelope_copy_out drains this heap. */
+    if (src_gc) {
+        e->heap.id = src_gc->id;
+    }
     ChValue copy = ch_gc_deep_copy(&e->heap, payload);
     if (copy == CH_UNDEFINED) {
         ch_gc_deinit(&e->heap);
@@ -199,6 +269,11 @@ static void sc_destroy(ChSharedChannel *sc) {
         sc->items[idx] = NULL;
     }
     free(sc->items);
+    /* No further send/recv/close can ever ring these lists once the last
+     * reference is gone: release the retained notifiers directly rather
+     * than notifying them (there is nothing left for them to retry). */
+    sc_release_waiters_locked(sc->send_waiters, &sc->send_waiter_count);
+    sc_release_waiters_locked(sc->recv_waiters, &sc->recv_waiter_count);
     pthread_cond_destroy(&sc->recv_cv);
     pthread_cond_destroy(&sc->send_cv);
     pthread_mutex_destroy(&sc->lock);
@@ -275,7 +350,8 @@ int ch_channel_promote(ChGC *gc, ChChannel *ch) {
     return 0;
 }
 
-int ch_shared_channel_try_send(ChSharedChannel *sc, ChGC *src_gc, ChValue payload) {
+int ch_shared_channel_try_send(ChSharedChannel *sc, ChGC *src_gc, ChValue payload,
+                               ChThreadNotifier *notifier) {
     if (!sc || !src_gc) {
         return SC_TRY_ERROR;
     }
@@ -291,6 +367,7 @@ int ch_shared_channel_try_send(ChSharedChannel *sc, ChGC *src_gc, ChValue payloa
         return SC_TRY_ERROR;
     }
     if (!sc_can_send_locked(sc)) {
+        sc_register_waiter_locked(sc->send_waiters, &sc->send_waiter_count, notifier);
         pthread_mutex_unlock(&sc->lock);
         return SC_TRY_WOULD_BLOCK;
     }
@@ -302,11 +379,18 @@ int ch_shared_channel_try_send(ChSharedChannel *sc, ChGC *src_gc, ChValue payloa
         return SC_TRY_ERROR;
     }
 
+    ChThreadNotifier *ring_buf[CH_SHARED_CHANNEL_WAITER_MAX];
+    size_t ring_count = 0;
+
     pthread_mutex_lock(&sc->lock);
-    if (sc->closed || !sc_can_send_locked(sc)) {
+    int closed_now = sc->closed;
+    if (closed_now || !sc_can_send_locked(sc)) {
+        if (!closed_now) {
+            sc_register_waiter_locked(sc->send_waiters, &sc->send_waiter_count, notifier);
+        }
         pthread_mutex_unlock(&sc->lock);
         ch_envelope_destroy(env);
-        if (sc->closed) {
+        if (closed_now) {
             sc_set_error(src_gc, "channel-send: send on closed channel");
             return SC_TRY_ERROR;
         }
@@ -316,15 +400,21 @@ int ch_shared_channel_try_send(ChSharedChannel *sc, ChGC *src_gc, ChValue payloa
     if (sc->rendezvous && sc->capacity == 0 && sc->rv_demand > 0) {
         sc->rv_demand--;
     }
+    sc_snapshot_and_clear_locked(sc->recv_waiters, &sc->recv_waiter_count, ring_buf, &ring_count);
     pthread_cond_broadcast(&sc->recv_cv);
     pthread_mutex_unlock(&sc->lock);
+    sc_ring_waiters(ring_buf, ring_count);
     return SC_TRY_OK;
 }
 
-int ch_shared_channel_try_recv(ChSharedChannel *sc, ChGC *dest_gc, ChValue *out) {
+int ch_shared_channel_try_recv(ChSharedChannel *sc, ChGC *dest_gc, ChValue *out,
+                               ChThreadNotifier *notifier) {
     if (!sc || !dest_gc) {
         return SC_TRY_ERROR;
     }
+
+    ChThreadNotifier *ring_buf[CH_SHARED_CHANNEL_WAITER_MAX];
+    size_t ring_count = 0;
 
     pthread_mutex_lock(&sc->lock);
     if (sc->count == 0) {
@@ -335,12 +425,15 @@ int ch_shared_channel_try_recv(ChSharedChannel *sc, ChGC *dest_gc, ChValue *out)
             }
             return SC_TRY_OK;
         }
+        sc_register_waiter_locked(sc->recv_waiters, &sc->recv_waiter_count, notifier);
         pthread_mutex_unlock(&sc->lock);
         return SC_TRY_WOULD_BLOCK;
     }
     ChEnvelope *env = sc_pop_front(sc);
+    sc_snapshot_and_clear_locked(sc->send_waiters, &sc->send_waiter_count, ring_buf, &ring_count);
     pthread_cond_broadcast(&sc->send_cv);
     pthread_mutex_unlock(&sc->lock);
+    sc_ring_waiters(ring_buf, ring_count);
 
     ChValue v = ch_envelope_copy_out(dest_gc, env);
     ch_envelope_destroy(env);
@@ -366,9 +459,14 @@ static int sc_cond_wait_ms(pthread_cond_t *cv, pthread_mutex_t *mu, int ms) {
     return 0;
 }
 
+/* Blocking fallback for real OS threads that have no fiber runtime (and
+ * thus no reactor to hand a notifier to): waits on the pthread_cond,
+ * rung by every try_send/try_recv/close that changes the state this side
+ * is waiting for, bounded by a short timedwait in case a signal is missed
+ * (e.g. a spurious wakeup racing a concurrent waiter-ring registration). */
 int ch_shared_channel_send(ChSharedChannel *sc, ChGC *src_gc, ChValue payload) {
     for (;;) {
-        int rc = ch_shared_channel_try_send(sc, src_gc, payload);
+        int rc = ch_shared_channel_try_send(sc, src_gc, payload, NULL);
         if (rc == SC_TRY_OK) {
             return 0;
         }
@@ -383,15 +481,13 @@ int ch_shared_channel_send(ChSharedChannel *sc, ChGC *src_gc, ChValue payload) {
         }
         (void)sc_cond_wait_ms(&sc->send_cv, &sc->lock, 1);
         pthread_mutex_unlock(&sc->lock);
-        struct timespec nap = {0, 1000000L};
-        nanosleep(&nap, NULL);
     }
 }
 
 int ch_shared_channel_recv(ChSharedChannel *sc, ChGC *dest_gc, ChValue *out) {
     int holding_rv = 0;
     for (;;) {
-        int rc = ch_shared_channel_try_recv(sc, dest_gc, out);
+        int rc = ch_shared_channel_try_recv(sc, dest_gc, out, NULL);
         if (rc == SC_TRY_OK) {
             if (holding_rv) {
                 pthread_mutex_lock(&sc->lock);
@@ -432,8 +528,6 @@ int ch_shared_channel_recv(ChSharedChannel *sc, ChGC *dest_gc, ChValue *out) {
         }
         (void)sc_cond_wait_ms(&sc->recv_cv, &sc->lock, 1);
         pthread_mutex_unlock(&sc->lock);
-        struct timespec nap = {0, 1000000L};
-        nanosleep(&nap, NULL);
     }
 }
 
@@ -441,11 +535,20 @@ int ch_shared_channel_close(ChSharedChannel *sc) {
     if (!sc) {
         return -1;
     }
+    ChThreadNotifier *ring_buf[2 * CH_SHARED_CHANNEL_WAITER_MAX];
+    size_t ring_count = 0;
+
     pthread_mutex_lock(&sc->lock);
     sc->closed = 1;
     pthread_cond_broadcast(&sc->send_cv);
     pthread_cond_broadcast(&sc->recv_cv);
+    sc_snapshot_and_clear_locked(sc->send_waiters, &sc->send_waiter_count, ring_buf, &ring_count);
+    size_t recv_count = 0;
+    sc_snapshot_and_clear_locked(sc->recv_waiters, &sc->recv_waiter_count, ring_buf + ring_count,
+                                 &recv_count);
+    ring_count += recv_count;
     pthread_mutex_unlock(&sc->lock);
+    sc_ring_waiters(ring_buf, ring_count);
     return 0;
 }
 

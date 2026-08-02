@@ -63,6 +63,11 @@ int ch_ffi_parse_type_symbol(ChValue sym, ChFFIType *out_type);
 const char *ch_ffi_type_name(ChFFIType type);
 void ch_ffi_finalize_library(ChForeignLibrary *library);
 
+/* Thin wrapper around ch_sandbox_deny_ffi(): sets vm->error to "<who>: denied
+ * by sandbox" and returns -1 when the sandbox forbids FFI; returns 0
+ * otherwise. Call from every FFI entry point (open/lookup/callback). */
+int ch_ffi_check_sandbox(ChVM *vm, const char *who);
+
 #ifdef __cplusplus
 }
 #endif

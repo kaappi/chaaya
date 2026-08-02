@@ -153,7 +153,7 @@ not a greenfield package manager in C.
 | 7B | Numeric tower + I/O hardening — **done** |
 | 8 | IR/opts + generational GC + CLI tooling (`check`, `expand`, `fmt`, cache, REPL debugger MVP) — **MVP done** |
 | 9 | Portable SRFI subset + import resolution — **partial** (13 libraries vendored; full 162 deferred) |
-| 10 | Fibers + FFI + reactor — **MVP done** (cooperative fibers/channels, dlopen FFI; SRFI-18 threads NYI) |
+| 10 | Fibers + FFI + reactor — **MVP done** (cooperative fibers/channels, dlopen FFI; SRFI-18 partial (timeouts, specifics, terminate; mutex/cond MVP)) |
 | 11 | LLVM/WASM/LSP/thottam — **MVP done** (stubs + docs; no C thottam reimplementation) |
 
 See [README.md](README.md) for the full phase table.

@@ -4,6 +4,7 @@
 #include "chaaya/environment.h"
 #include "chaaya/eval.h"
 #include "chaaya/library.h"
+#include "chaaya/rational.h"
 #include "chaaya/sandbox.h"
 
 #include <limits.h>
@@ -333,6 +334,53 @@ static ChValue prim_time_nanosecond(ChVM *vm, ChValue *args, int nargs) {
     return ch_make_fixnum(ch_as_time(args[0])->nanoseconds);
 }
 
+/* SRFI-18 current-time: a time-utc object for "now", usable directly as a
+ * (thread-join!/mutex-lock!/...) timeout argument (an absolute deadline). */
+static ChValue prim_current_time(ChVM *vm, ChValue *args, int nargs) {
+    (void)args;
+    (void)nargs;
+    struct timespec ts;
+    if (!read_current_time(vm, &ts)) {
+        return CH_UNDEFINED;
+    }
+    ChValue type_sym = ch_gc_intern_symbol_cstr(&vm->gc, "time-utc");
+    return ch_gc_make_time(&vm->gc, (int64_t)ts.tv_sec, (int32_t)ts.tv_nsec, type_sym);
+}
+
+static ChValue prim_time_to_seconds(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_time(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "time->seconds: expected time object");
+        return CH_UNDEFINED;
+    }
+    ChTime *t = ch_as_time(args[0]);
+    return ch_make_flonum((double)t->seconds + ((double)t->nanoseconds / 1000000000.0));
+}
+
+static ChValue prim_seconds_to_time(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    double seconds = 0.0;
+    if (ch_is_fixnum(args[0])) {
+        seconds = (double)ch_to_fixnum(args[0]);
+    } else if (ch_is_flonum(args[0])) {
+        seconds = ch_to_flonum(args[0]);
+    } else if (ch_is_bignum(args[0]) || ch_is_rational_obj(args[0])) {
+        seconds = ch_exact_to_f64(args[0]);
+    } else {
+        snprintf(vm->error, sizeof(vm->error), "seconds->time: expected real number");
+        return CH_UNDEFINED;
+    }
+    double whole = floor(seconds);
+    int64_t secs = (int64_t)whole;
+    int32_t nanos = (int32_t)((seconds - whole) * 1000000000.0 + 0.5);
+    if (nanos >= 1000000000) {
+        secs += 1;
+        nanos -= 1000000000;
+    }
+    ChValue type_sym = ch_gc_intern_symbol_cstr(&vm->gc, "time-utc");
+    return ch_gc_make_time(&vm->gc, secs, nanos, type_sym);
+}
+
 void ch_register_eval_primitives(ChVM *vm) {
     define_prim(vm, "eval", prim_eval, -1, 1);
     define_prim(vm, "environment", prim_environment, -1, 0);
@@ -347,6 +395,9 @@ void ch_register_eval_primitives(ChVM *vm) {
     define_prim(vm, "current-second", prim_current_second, 0, 0);
     define_prim(vm, "current-jiffy", prim_current_jiffy, 0, 0);
     define_prim(vm, "jiffies-per-second", prim_jiffies_per_second, 0, 0);
+    define_prim(vm, "current-time", prim_current_time, 0, 0);
+    define_prim(vm, "time->seconds", prim_time_to_seconds, 1, 1);
+    define_prim(vm, "seconds->time", prim_seconds_to_time, 1, 1);
     define_prim(vm, "time?", prim_time_p, 1, 1);
     define_prim(vm, "make-time", prim_make_time, 3, 3);
     define_prim(vm, "time-type", prim_time_type, 1, 1);

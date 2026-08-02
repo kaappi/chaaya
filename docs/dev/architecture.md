@@ -107,9 +107,22 @@ current fiber so siblings keep running. Feature ids: `chaaya-reactor` /
 **SRFI-18 / shared channels / FFI callbacks:** OS threads (`src/thread.c`) use a
 per-thread GC/VM, `ch_gc_deep_copy` at start/join, and owner checks on fibers and
 local channels. Captured channels promote to `SharedChannel` (`src/shared_channel.c`)
-with envelope deep-copy. FFI callbacks (`src/ffi_callback.c`) provide a small
-trampoline slot pool with deferred exception re-raise and NUL-safe string args.
-Feature ids: `chaaya-threads` / `kaappi-threads`.
+with envelope deep-copy — including a freshly made, not-yet-promoted channel handed
+off *as a message payload* (e.g. a reply channel), which the envelope's transient
+heap promotes by borrowing the sending gc's identity. FFI callbacks
+(`src/ffi_callback.c`) provide a small trampoline slot pool with deferred exception
+re-raise and NUL-safe string args. `thread-join!`/`mutex-lock!`/`fiber-join` accept
+an optional timeout (seconds or an SRFI-18 time object, an absolute deadline)
+driven through the same reactor/scheduler step used by channel timeouts.
+SRFI-18 coverage: `thread-specific[-set!]`, `thread-terminate!` (cooperative
+marker — a live OS thread cannot be force-killed from C, so it runs to
+completion but `thread-join!` reports `terminated-thread-exception?` instead of
+its real outcome), `join-timeout-exception?`, `uncaught-exception?`/
+`-reason` (reason is the printed form of the original condition — the raw
+value generally cannot cross the OS-thread boundary safely), and a mutex/condvar
+MVP (`mutex-name`/`-specific[-set!]`/`-state`, `condition-variable-name`/
+`-specific[-set!]`, abandoned-mutex detection when a lock's owner fiber/thread
+has already finished). Feature ids: `chaaya-threads` / `kaappi-threads`.
 
 **Contributor rule:** any `ChValue` that must survive a `ch_gc_*` allocation must
 be on the root stack (or reachable from something that is) before the

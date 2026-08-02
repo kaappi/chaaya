@@ -5,11 +5,13 @@
 #include "chaaya/reader.h"
 #include "chaaya/sandbox.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #if !defined(_WIN32)
+#include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
 #endif
@@ -82,11 +84,101 @@ static int ensure_port_capacity(ChPort *p, size_t extra) {
     return 0;
 }
 
-static int port_write_bytes(ChPort *p, const char *data, size_t len) {
+#if !defined(_WIN32)
+/* Lazily put a file port into nonblocking mode once a fiber scheduler parks on it. */
+static int ensure_port_nonblocking(ChPort *p) {
+    if (!p || p->nonblocking || !p->file) {
+        return 0;
+    }
+    int fd = fileno(p->file);
+    if (fd < 0) {
+        return -1;
+    }
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0) {
+        return -1;
+    }
+    if ((flags & O_NONBLOCK) == 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        return -1;
+    }
+    p->nonblocking = 1;
+    return 0;
+}
+
+/* Wake any fiber parked on this port's fd (ONESHOT registration). */
+static void wake_port_io_waiters(ChVM *vm, ChPort *p) {
+    if (!vm || !vm->fiber_runtime || !p || !p->file) {
+        return;
+    }
+    int fd = fileno(p->file);
+    if (fd < 0) {
+        return;
+    }
+    ChReactor *reactor = &vm->fiber_runtime->reactor;
+    for (size_t i = 0; i < CH_REACTOR_MAX_FDS; i++) {
+        if (!reactor->fds[i].active || reactor->fds[i].fd != fd) {
+            continue;
+        }
+        ChValue payload = reactor->fds[i].payload;
+        (void)ch_reactor_unregister_fd(reactor, fd);
+        if (ch_is_fiber(payload)) {
+            ChFiber *f = ch_as_fiber(payload);
+            if (f->state == CH_FIBER_WAITING || f->state == CH_FIBER_IO_WAITING) {
+                f->state = CH_FIBER_READY;
+                f->io_fd = -1;
+                ChFiberRuntime *rt = vm->fiber_runtime;
+                if (!f->queued && rt->ready_count < CH_FIBER_READY_MAX) {
+                    size_t tail = (rt->ready_head + rt->ready_count) % CH_FIBER_READY_MAX;
+                    rt->ready[tail] = payload;
+                    rt->ready_count++;
+                    f->queued = 1;
+                }
+            }
+        }
+        break;
+    }
+}
+#endif
+
+/* Returns 0 on success, -1 on error, -2 if a fiber parked waiting for writable. */
+static int port_write_bytes_vm(ChVM *vm, ChPort *p, const char *data, size_t len, int may_park) {
     if (p->closed || !p->output) {
         return -1;
     }
     if (p->kind == CH_PORT_STDIO || p->kind == CH_PORT_FILE) {
+#if !defined(_WIN32)
+        if (may_park && vm && vm->fiber_runtime && ch_is_fiber(vm->fiber_runtime->current) &&
+            p->file) {
+            int fd = fileno(p->file);
+            if (fd >= 0) {
+                (void)ensure_port_nonblocking(p);
+                size_t written = 0;
+                while (written < len) {
+                    ssize_t n = write(fd, data + written, len - written);
+                    if (n < 0) {
+                        if (errno == EINTR) {
+                            continue;
+                        }
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            if (ch_fiber_wait_fd(vm, fd, CH_REACTOR_WRITE) != 0) {
+                                return -1;
+                            }
+                            continue; /* fd writable; retry write */
+                        }
+                        return -1;
+                    }
+                    if (n == 0) {
+                        return -1;
+                    }
+                    written += (size_t)n;
+                }
+                return 0;
+            }
+        }
+#else
+        (void)vm;
+        (void)may_park;
+#endif
         return fwrite(data, 1, len, p->file) == len ? 0 : -1;
     }
     if (p->kind == CH_PORT_STRING_OUT) {
@@ -109,6 +201,10 @@ static int port_write_bytes(ChPort *p, const char *data, size_t len) {
     return -1;
 }
 
+static int port_write_bytes(ChPort *p, const char *data, size_t len) {
+    return port_write_bytes_vm(NULL, p, data, len, 0);
+}
+
 /* Returns bytes appended (>0), 0 at EOF, -1 on error, -2 if fiber parked on fd. */
 static int append_file_input_bytes(ChVM *vm, ChPort *p, int may_park) {
     if (p->kind != CH_PORT_STDIO && p->kind != CH_PORT_FILE) {
@@ -119,23 +215,16 @@ static int append_file_input_bytes(ChVM *vm, ChPort *p, int may_park) {
     }
 #if !defined(_WIN32)
     int fd = fileno(p->file);
-    if (may_park && vm && vm->fiber_runtime && ch_is_fiber(vm->fiber_runtime->current) &&
-        fd >= 0) {
-        struct pollfd pfd;
-        memset(&pfd, 0, sizeof(pfd));
-        pfd.fd = fd;
-        pfd.events = POLLIN;
-        int pr = poll(&pfd, 1, 0);
-        if (pr == 0) {
-            if (ch_fiber_wait_fd(vm, fd, CH_REACTOR_READ) != 0) {
-                return -1;
-            }
-            return -2;
-        }
+    int in_fiber = may_park && vm && vm->fiber_runtime &&
+                   ch_is_fiber(vm->fiber_runtime->current) && fd >= 0;
+    if (in_fiber) {
+        (void)ensure_port_nonblocking(p);
     }
 #else
     (void)vm;
     (void)may_park;
+    int in_fiber = 0;
+    int fd = -1;
 #endif
     size_t free_space = p->cap > p->len ? p->cap - p->len : 0;
     if (free_space == 0) {
@@ -148,6 +237,42 @@ static int append_file_input_bytes(ChVM *vm, ChPort *p, int may_park) {
     if (to_read > CH_PORT_INPUT_CHUNK) {
         to_read = CH_PORT_INPUT_CHUNK;
     }
+#if !defined(_WIN32)
+    if (in_fiber && p->nonblocking) {
+        for (;;) {
+            ssize_t n = read(fd, p->buf + p->len, to_read);
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    if (ch_fiber_wait_fd(vm, fd, CH_REACTOR_READ) != 0) {
+                        return -1;
+                    }
+                    continue; /* fd ready; retry read */
+                }
+                return -1;
+            }
+            if (n == 0) {
+                return 0;
+            }
+            p->len += (size_t)n;
+            return (int)n;
+        }
+    }
+    if (in_fiber) {
+        struct pollfd pfd;
+        memset(&pfd, 0, sizeof(pfd));
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        int pr = poll(&pfd, 1, 0);
+        if (pr == 0) {
+            if (ch_fiber_wait_fd(vm, fd, CH_REACTOR_READ) != 0) {
+                return -1;
+            }
+        }
+    }
+#endif
     size_t n = fread(p->buf + p->len, 1, to_read, p->file);
     if (n == 0) {
         return ferror(p->file) ? -1 : 0;
@@ -421,10 +546,15 @@ static ChValue prim_get_output_bytevector(ChVM *vm, ChValue *args, int nargs) {
     return out;
 }
 
-static void close_port_impl(ChPort *p) {
+static void close_port_impl(ChVM *vm, ChPort *p) {
     if (p->closed) {
         return;
     }
+#if !defined(_WIN32)
+    wake_port_io_waiters(vm, p);
+#else
+    (void)vm;
+#endif
     if (p->kind == CH_PORT_FILE && p->file) {
         fclose(p->file);
         p->file = NULL;
@@ -438,7 +568,7 @@ static ChValue prim_close_port(ChVM *vm, ChValue *args, int nargs) {
         snprintf(vm->error, sizeof(vm->error), "close-port: not a port");
         return CH_UNDEFINED;
     }
-    close_port_impl(ch_as_port(args[0]));
+    close_port_impl(vm, ch_as_port(args[0]));
     return CH_VOID;
 }
 
@@ -579,7 +709,7 @@ static ChValue prim_call_with_input_file(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
     if (!ch_is_procedure(args[1])) {
-        close_port_impl(ch_as_port(port));
+        close_port_impl(vm, ch_as_port(port));
         snprintf(vm->error, sizeof(vm->error), "call-with-input-file: not a procedure");
         return CH_UNDEFINED;
     }
@@ -587,11 +717,11 @@ static ChValue prim_call_with_input_file(ChVM *vm, ChValue *args, int nargs) {
     ch_gc_push(&vm->gc, &port);
     ch_gc_push(&vm->gc, &result);
     if (ch_vm_apply(vm, args[1], &port, 1, &result) != CH_VM_OK) {
-        close_port_impl(ch_as_port(port));
+        close_port_impl(vm, ch_as_port(port));
         ch_gc_pop_n(&vm->gc, 2);
         return CH_UNDEFINED;
     }
-    close_port_impl(ch_as_port(port));
+    close_port_impl(vm, ch_as_port(port));
     ch_gc_pop_n(&vm->gc, 2);
     return result;
 }
@@ -603,7 +733,7 @@ static ChValue prim_call_with_output_file(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
     if (!ch_is_procedure(args[1])) {
-        close_port_impl(ch_as_port(port));
+        close_port_impl(vm, ch_as_port(port));
         snprintf(vm->error, sizeof(vm->error), "call-with-output-file: not a procedure");
         return CH_UNDEFINED;
     }
@@ -611,11 +741,11 @@ static ChValue prim_call_with_output_file(ChVM *vm, ChValue *args, int nargs) {
     ch_gc_push(&vm->gc, &port);
     ch_gc_push(&vm->gc, &result);
     if (ch_vm_apply(vm, args[1], &port, 1, &result) != CH_VM_OK) {
-        close_port_impl(ch_as_port(port));
+        close_port_impl(vm, ch_as_port(port));
         ch_gc_pop_n(&vm->gc, 2);
         return CH_UNDEFINED;
     }
-    close_port_impl(ch_as_port(port));
+    close_port_impl(vm, ch_as_port(port));
     ch_gc_pop_n(&vm->gc, 2);
     return result;
 }
@@ -627,7 +757,7 @@ static ChValue prim_call_with_port(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
     if (!ch_is_procedure(args[1])) {
-        close_port_impl(ch_as_port(args[0]));
+        close_port_impl(vm, ch_as_port(args[0]));
         snprintf(vm->error, sizeof(vm->error), "call-with-port: not a procedure");
         return CH_UNDEFINED;
     }
@@ -636,7 +766,7 @@ static ChValue prim_call_with_port(ChVM *vm, ChValue *args, int nargs) {
     ch_gc_push(&vm->gc, &port);
     ch_gc_push(&vm->gc, &result);
     ChVMStatus st = ch_vm_apply(vm, args[1], &port, 1, &result);
-    close_port_impl(ch_as_port(port));
+    close_port_impl(vm, ch_as_port(port));
     ch_gc_pop_n(&vm->gc, 2);
     if (st == CH_VM_CONTINUATION_INVOKED) {
         vm->continuation_invoked = true;
@@ -655,18 +785,18 @@ static ChValue prim_with_input_from_file(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
     if (!ch_is_procedure(args[1])) {
-        close_port_impl(ch_as_port(port));
+        close_port_impl(vm, ch_as_port(port));
         snprintf(vm->error, sizeof(vm->error), "with-input-from-file: not a procedure");
         return CH_UNDEFINED;
     }
     ChValue parameter = get_global(vm, "current-input-port");
     if (!ch_is_parameter(parameter)) {
-        close_port_impl(ch_as_port(port));
+        close_port_impl(vm, ch_as_port(port));
         snprintf(vm->error, sizeof(vm->error), "with-input-from-file: current-input-port not a parameter");
         return CH_UNDEFINED;
     }
     if (ch_vm_parameter_push(vm, parameter, port) != 0) {
-        close_port_impl(ch_as_port(port));
+        close_port_impl(vm, ch_as_port(port));
         return CH_UNDEFINED;
     }
     ChValue result = CH_UNDEFINED;
@@ -675,7 +805,7 @@ static ChValue prim_with_input_from_file(ChVM *vm, ChValue *args, int nargs) {
     ch_gc_push(&vm->gc, &result);
     ChVMStatus st = ch_vm_apply(vm, args[1], NULL, 0, &result);
     int pop_rc = ch_vm_parameter_pop(vm, parameter);
-    close_port_impl(ch_as_port(port));
+    close_port_impl(vm, ch_as_port(port));
     ch_gc_pop_n(&vm->gc, 3);
     if (pop_rc != 0) {
         return CH_UNDEFINED;
@@ -693,19 +823,19 @@ static ChValue prim_with_output_to_file(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
     if (!ch_is_procedure(args[1])) {
-        close_port_impl(ch_as_port(port));
+        close_port_impl(vm, ch_as_port(port));
         snprintf(vm->error, sizeof(vm->error), "with-output-to-file: not a procedure");
         return CH_UNDEFINED;
     }
     ChValue parameter = get_global(vm, "current-output-port");
     if (!ch_is_parameter(parameter)) {
-        close_port_impl(ch_as_port(port));
+        close_port_impl(vm, ch_as_port(port));
         snprintf(vm->error, sizeof(vm->error),
                  "with-output-to-file: current-output-port not a parameter");
         return CH_UNDEFINED;
     }
     if (ch_vm_parameter_push(vm, parameter, port) != 0) {
-        close_port_impl(ch_as_port(port));
+        close_port_impl(vm, ch_as_port(port));
         return CH_UNDEFINED;
     }
     ChValue result = CH_UNDEFINED;
@@ -714,7 +844,7 @@ static ChValue prim_with_output_to_file(ChVM *vm, ChValue *args, int nargs) {
     ch_gc_push(&vm->gc, &result);
     ChVMStatus st = ch_vm_apply(vm, args[1], NULL, 0, &result);
     int pop_rc = ch_vm_parameter_pop(vm, parameter);
-    close_port_impl(ch_as_port(port));
+    close_port_impl(vm, ch_as_port(port));
     ch_gc_pop_n(&vm->gc, 3);
     if (pop_rc != 0) {
         return CH_UNDEFINED;
@@ -779,7 +909,14 @@ static ChValue prim_newline(ChVM *vm, ChValue *args, int nargs) {
     if (!p) {
         return CH_UNDEFINED;
     }
-    port_write_bytes(p, "\n", 1);
+    int wrc = port_write_bytes_vm(vm, p, "\n", 1, 1);
+    if (wrc == -2) {
+        return CH_UNDEFINED;
+    }
+    if (wrc != 0) {
+        snprintf(vm->error, sizeof(vm->error), "newline: write failed");
+        return CH_UNDEFINED;
+    }
     return CH_VOID;
 }
 
@@ -950,7 +1087,11 @@ static ChValue prim_write_char(ChVM *vm, ChValue *args, int nargs) {
         snprintf(vm->error, sizeof(vm->error), "write-char: invalid character");
         return CH_UNDEFINED;
     }
-    if (port_write_bytes(p, encoded, n) != 0) {
+    int wrc = port_write_bytes_vm(vm, p, encoded, n, 1);
+    if (wrc == -2) {
+        return CH_UNDEFINED;
+    }
+    if (wrc != 0) {
         snprintf(vm->error, sizeof(vm->error), "write-char: write failed");
         return CH_UNDEFINED;
     }
@@ -995,9 +1136,15 @@ static ChValue prim_write_string(ChVM *vm, ChValue *args, int nargs) {
         }
         end = (size_t)en;
     }
-    if (end > start && port_write_bytes(p, s->data + start, end - start) != 0) {
-        snprintf(vm->error, sizeof(vm->error), "write-string: write failed");
-        return CH_UNDEFINED;
+    if (end > start) {
+        int wrc = port_write_bytes_vm(vm, p, s->data + start, end - start, 1);
+        if (wrc == -2) {
+            return CH_UNDEFINED;
+        }
+        if (wrc != 0) {
+            snprintf(vm->error, sizeof(vm->error), "write-string: write failed");
+            return CH_UNDEFINED;
+        }
     }
     return CH_VOID;
 }
@@ -1202,7 +1349,11 @@ static ChValue prim_write_u8(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
     char byte = (char)b;
-    if (port_write_bytes(p, &byte, 1) != 0) {
+    int wrc = port_write_bytes_vm(vm, p, &byte, 1, 1);
+    if (wrc == -2) {
+        return CH_UNDEFINED;
+    }
+    if (wrc != 0) {
         snprintf(vm->error, sizeof(vm->error), "write-u8: write failed");
         return CH_UNDEFINED;
     }
@@ -1342,9 +1493,16 @@ static ChValue prim_write_bytevector(ChVM *vm, ChValue *args, int nargs) {
     if (parse_port_slice(vm, args, nargs, 2, bv->len, "write-bytevector", &start, &end) != 0) {
         return CH_UNDEFINED;
     }
-    if (end > start && port_write_bytes(p, (const char *)bv->data + start, end - start) != 0) {
-        snprintf(vm->error, sizeof(vm->error), "write-bytevector: write failed");
-        return CH_UNDEFINED;
+    if (end > start) {
+        int wrc =
+            port_write_bytes_vm(vm, p, (const char *)bv->data + start, end - start, 1);
+        if (wrc == -2) {
+            return CH_UNDEFINED;
+        }
+        if (wrc != 0) {
+            snprintf(vm->error, sizeof(vm->error), "write-bytevector: write failed");
+            return CH_UNDEFINED;
+        }
     }
     return CH_VOID;
 }

@@ -31,6 +31,21 @@ static void set_error(ChVM *vm, const char *msg) {
     }
 }
 
+/* Absolute deadline (reactor monotonic clock, ms) for a relative timeout in
+ * seconds. Mirrors fiber.c's private timeout_deadline_ms so thread joins and
+ * fiber joins/channels measure time the same way. */
+static uint64_t join_deadline_ms(double timeout_seconds) {
+    if (timeout_seconds <= 0.0) {
+        return ch_reactor_now_ms();
+    }
+    double ms_f = timeout_seconds * 1000.0;
+    uint64_t now = ch_reactor_now_ms();
+    if (ms_f >= (double)(UINT64_MAX - now)) {
+        return UINT64_MAX;
+    }
+    return now + (uint64_t)(ms_f + 0.5);
+}
+
 void ch_thread_runtime_init(ChVM *vm) {
     if (!vm) {
         return;
@@ -270,46 +285,9 @@ int ch_thread_start(ChVM *vm, ChValue thread) {
     return 0;
 }
 
-int ch_thread_join(ChVM *vm, ChValue thread, ChValue *out_result) {
-    if (ch_eq(thread, ch_thread_current(vm))) {
-        set_error(vm, "thread-join!: cannot join current thread");
-        return -1;
-    }
-    if (ch_thread_check_owner(vm, thread, "thread-join!") != 0) {
-        return -1;
-    }
-    ChFiber *f = ch_as_fiber(thread);
-    if (f->os_state == CH_OS_THREAD_NONE) {
-        return ch_fiber_join(vm, thread, out_result);
-    }
-    if (f->os_state == CH_OS_THREAD_CREATED) {
-        set_error(vm, "thread-join!: thread has not been started");
-        return -1;
-    }
-    ChThreadJoinBox *box = (ChThreadJoinBox *)f->os_join;
-    if (!box) {
-        set_error(vm, "thread-join!: missing join state");
-        return -1;
-    }
-
-    pthread_mutex_lock(&box->mu);
-    while (!box->finished) {
-        pthread_mutex_unlock(&box->mu);
-        if (vm->fiber_runtime) {
-            (void)ch_fiber_drive(vm);
-        }
-        struct timespec ts;
-        timespec_get(&ts, TIME_UTC);
-        ts.tv_nsec += 1000000L;
-        if (ts.tv_nsec >= 1000000000L) {
-            ts.tv_sec += 1;
-            ts.tv_nsec -= 1000000000L;
-        }
-        pthread_mutex_lock(&box->mu);
-        if (!box->finished) {
-            (void)pthread_cond_timedwait(&box->cv, &box->mu, &ts);
-        }
-    }
+/* Shared tail of ch_thread_join / ch_thread_join_timeout once box->finished
+ * is observed (box->mu held on entry; released before returning). */
+static int thread_join_finish(ChVM *vm, ChFiber *f, ChThreadJoinBox *box, ChValue *out_result) {
     int failed = box->failed;
     ChValue child_result = box->result;
     char errbuf[256];
@@ -322,6 +300,16 @@ int ch_thread_join(ChVM *vm, ChValue thread, ChValue *out_result) {
     if (tid_valid) {
         (void)pthread_join(tid, NULL);
         box->tid_valid = 0;
+    }
+
+    if (f->terminated) {
+        if (child_vm) {
+            child_vm_cleanup(child_vm);
+            box->child_vm = NULL;
+        }
+        f->os_state = CH_OS_THREAD_DONE;
+        set_error(vm, "thread-join!: terminated-thread-exception");
+        return -1;
     }
 
     if (failed) {
@@ -358,6 +346,161 @@ int ch_thread_join(ChVM *vm, ChValue thread, ChValue *out_result) {
     return 0;
 }
 
+int ch_thread_join(ChVM *vm, ChValue thread, ChValue *out_result) {
+    if (ch_eq(thread, ch_thread_current(vm))) {
+        set_error(vm, "thread-join!: cannot join current thread");
+        return -1;
+    }
+    if (ch_thread_check_owner(vm, thread, "thread-join!") != 0) {
+        return -1;
+    }
+    ChFiber *f = ch_as_fiber(thread);
+    if (f->os_state == CH_OS_THREAD_NONE) {
+        if (f->terminated && f->state != CH_FIBER_DONE) {
+            set_error(vm, "thread-join!: terminated-thread-exception");
+            return -1;
+        }
+        return ch_fiber_join(vm, thread, out_result);
+    }
+    if (f->os_state == CH_OS_THREAD_CREATED) {
+        if (f->terminated) {
+            set_error(vm, "thread-join!: terminated-thread-exception");
+            return -1;
+        }
+        set_error(vm, "thread-join!: thread has not been started");
+        return -1;
+    }
+    ChThreadJoinBox *box = (ChThreadJoinBox *)f->os_join;
+    if (!box) {
+        set_error(vm, "thread-join!: missing join state");
+        return -1;
+    }
+
+    pthread_mutex_lock(&box->mu);
+    while (!box->finished) {
+        pthread_mutex_unlock(&box->mu);
+        if (vm->fiber_runtime) {
+            (void)ch_fiber_drive(vm);
+        }
+        struct timespec ts;
+        timespec_get(&ts, TIME_UTC);
+        ts.tv_nsec += 1000000L;
+        if (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec += 1;
+            ts.tv_nsec -= 1000000000L;
+        }
+        pthread_mutex_lock(&box->mu);
+        if (!box->finished) {
+            (void)pthread_cond_timedwait(&box->cv, &box->mu, &ts);
+        }
+    }
+    return thread_join_finish(vm, f, box, out_result);
+}
+
+int ch_thread_join_timeout(ChVM *vm, ChValue thread, double timeout_seconds, int *timed_out,
+                           ChValue *out_result) {
+    if (timed_out) {
+        *timed_out = 0;
+    }
+    if (timeout_seconds < 0.0) {
+        return ch_thread_join(vm, thread, out_result);
+    }
+    if (ch_eq(thread, ch_thread_current(vm))) {
+        set_error(vm, "thread-join!: cannot join current thread");
+        return -1;
+    }
+    if (ch_thread_check_owner(vm, thread, "thread-join!") != 0) {
+        return -1;
+    }
+    ChFiber *f = ch_as_fiber(thread);
+    if (f->os_state == CH_OS_THREAD_NONE) {
+        if (f->terminated && f->state != CH_FIBER_DONE) {
+            set_error(vm, "thread-join!: terminated-thread-exception");
+            return -1;
+        }
+        return ch_fiber_join_timeout(vm, thread, timeout_seconds, out_result, timed_out);
+    }
+    if (f->os_state == CH_OS_THREAD_CREATED) {
+        /* Never started: the deadline can never be met by starting it here,
+         * so report a timeout (or terminated-thread-exception) immediately
+         * without starting the thread. */
+        if (f->terminated) {
+            set_error(vm, "thread-join!: terminated-thread-exception");
+            return -1;
+        }
+        if (timed_out) {
+            *timed_out = 1;
+        }
+        return -1;
+    }
+    ChThreadJoinBox *box = (ChThreadJoinBox *)f->os_join;
+    if (!box) {
+        set_error(vm, "thread-join!: missing join state");
+        return -1;
+    }
+
+    uint64_t deadline_ms = join_deadline_ms(timeout_seconds);
+    pthread_mutex_lock(&box->mu);
+    while (!box->finished) {
+        pthread_mutex_unlock(&box->mu);
+        if (vm->fiber_runtime) {
+            (void)ch_fiber_drive(vm);
+        }
+        uint64_t now_ms = ch_reactor_now_ms();
+        if (now_ms >= deadline_ms) {
+            if (timed_out) {
+                *timed_out = 1;
+            }
+            return -1;
+        }
+        uint64_t remain_ms = deadline_ms - now_ms;
+        uint64_t step_ms = remain_ms < 5 ? remain_ms : 5;
+        if (step_ms == 0) {
+            step_ms = 1;
+        }
+        struct timespec ts;
+        timespec_get(&ts, TIME_UTC);
+        ts.tv_nsec += (long)(step_ms * 1000000L);
+        while (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec += 1;
+            ts.tv_nsec -= 1000000000L;
+        }
+        pthread_mutex_lock(&box->mu);
+        if (!box->finished) {
+            (void)pthread_cond_timedwait(&box->cv, &box->mu, &ts);
+        }
+    }
+    return thread_join_finish(vm, f, box, out_result);
+}
+
+int ch_thread_terminate(ChVM *vm, ChValue thread) {
+    if (ch_thread_check_owner(vm, thread, "thread-terminate!") != 0) {
+        return -1;
+    }
+    ChFiber *f = ch_as_fiber(thread);
+    f->terminated = 1;
+    if (f->os_state == CH_OS_THREAD_NONE) {
+        if (f->state == CH_FIBER_READY || f->state == CH_FIBER_WAITING ||
+            f->state == CH_FIBER_IO_WAITING) {
+            ChValue msg = ch_gc_make_string_cstr(&vm->gc, "thread-terminate!: thread was terminated");
+            f->state = CH_FIBER_FAILED;
+            f->error = msg;
+            ch_gc_write_barrier(&vm->gc, &f->header, msg);
+        }
+        /* A currently-running cooperative fiber (self-terminate) cannot be
+         * safely unwound mid-instruction from here; it keeps running, but
+         * `terminated` still forces a terminated-thread-exception at join. */
+    } else if (f->os_state == CH_OS_THREAD_CREATED) {
+        f->os_state = CH_OS_THREAD_FAILED;
+    }
+    /* CH_OS_THREAD_RUNNING/DONE/FAILED: a live OS thread cannot be force-
+     * killed safely from C (no async-signal-safe way to unwind Scheme
+     * frames/GC state); it runs to completion, but ch_thread_join[_timeout]
+     * checks `terminated` and reports terminated-thread-exception instead of
+     * the real outcome. */
+    return 0;
+}
+
 ChValue ch_gc_make_mutex(ChGC *gc, ChValue name) {
     ch_gc_push(gc, &name);
     ChMutex *m = (ChMutex *)ch_gc_alloc(gc, sizeof(ChMutex), CH_TAG_MUTEX);
@@ -376,9 +519,14 @@ ChValue ch_gc_make_condvar(ChGC *gc, ChValue name) {
     ch_gc_pop(gc);
     c->signal_generation = 0;
     c->name = name;
+    c->specific = CH_FALSE;
     return ch_make_pointer(&c->header);
 }
 
+/* Returns 1 (locked), 0 (timed out), -1 (error, vm->error set), or -2 (the
+ * lock was abandoned by a since-terminated owner — vm->error carries a
+ * message an abandoned-mutex-exception? predicate can match; the mutex is
+ * left unlocked so a subsequent call can actually acquire it). */
 int ch_mutex_lock(ChVM *vm, ChValue mutex, double timeout_seconds) {
     if (!ch_is_mutex(mutex)) {
         set_error(vm, "mutex-lock!: expected mutex");
@@ -395,9 +543,22 @@ int ch_mutex_lock(ChVM *vm, ChValue mutex, double timeout_seconds) {
                             : start + (uint64_t)(timeout_seconds * 1000.0 + 0.5);
     ChValue self = ch_thread_current(vm);
     for (;;) {
-        if (!m->locked || m->abandoned) {
-            m->locked = 1;
+        if (m->locked && ch_is_fiber(m->owner)) {
+            ChFiber *owner_f = ch_as_fiber(m->owner);
+            if (owner_f->state == CH_FIBER_DONE || owner_f->state == CH_FIBER_FAILED) {
+                /* The owning thread/fiber died without unlocking. */
+                m->locked = 0;
+                m->abandoned = 1;
+                m->owner = CH_NIL;
+            }
+        }
+        if (m->abandoned) {
             m->abandoned = 0;
+            set_error(vm, "mutex-lock!: abandoned mutex");
+            return -2;
+        }
+        if (!m->locked) {
+            m->locked = 1;
             m->owner = self;
             ch_gc_write_barrier(&vm->gc, &m->header, self);
             return 1;

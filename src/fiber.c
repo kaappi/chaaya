@@ -95,6 +95,7 @@ static void channel_push(ChChannel *channel, ChValue value);
 static ChValue channel_pop(ChChannel *channel);
 static int channel_can_send(ChChannel *channel);
 static int run_next_ready_fiber(ChVM *vm);
+static int run_scheduler_step_until(ChVM *vm, uint64_t deadline_ms);
 
 static uint64_t timeout_deadline_ms(double timeout_seconds) {
     if (timeout_seconds <= 0.0) {
@@ -116,28 +117,22 @@ static int timeout_expired_ms(uint64_t deadline_ms) {
     return ch_reactor_now_ms() >= deadline_ms;
 }
 
-static uint64_t next_reactor_wait_ms(ChReactor *reactor) {
+/* O(1) via the reactor's timer heap root instead of scanning every slot. */
+static uint64_t next_reactor_wait_ms(const ChReactor *reactor) {
     if (!reactor) {
         return 0;
     }
-    uint64_t now = ch_reactor_now_ms();
-    uint64_t next = UINT64_MAX;
-    for (size_t i = 0; i < CH_REACTOR_MAX_TIMERS; i++) {
-        if (!reactor->timers[i].active) {
-            continue;
-        }
-        if (reactor->timers[i].due_ms <= now) {
-            return 0;
-        }
-        if (reactor->timers[i].due_ms < next) {
-            next = reactor->timers[i].due_ms;
-        }
-    }
-    if (next == UINT64_MAX) {
+    uint64_t due_ns = ch_reactor_earliest_due_ns(reactor);
+    if (due_ns == UINT64_MAX) {
+        /* No timers pending: fall back to a short poll interval when fd
+         * waiters exist (their readiness isn't known without polling). */
         return reactor->fd_count > 0 ? 50 : 0;
     }
-    uint64_t wait = next - now;
-    return wait == 0 ? 0 : wait;
+    uint64_t now_ns = ch_reactor_now_ns();
+    if (due_ns <= now_ns) {
+        return 0;
+    }
+    return (due_ns - now_ns) / 1000000ULL;
 }
 
 /* Poll reactor; wake any fiber payloads into the ready ring. Returns 1 if an
@@ -221,6 +216,7 @@ ChValue ch_gc_make_fiber(ChGC *gc, uint64_t id, ChValue thunk) {
     fiber->park_kind = CH_FIBER_PARK_NONE;
     fiber->queued = 0;
     fiber->os_state = CH_OS_THREAD_NONE;
+    fiber->terminated = 0;
     fiber->thunk = thunk;
     fiber->result = CH_UNDEFINED;
     fiber->error = CH_NIL;
@@ -617,17 +613,19 @@ int ch_fiber_drive(ChVM *vm) {
     if (!vm->fiber_runtime) {
         return 0;
     }
+    ChFiberRuntime *rt = vm->fiber_runtime;
     size_t idle = 0;
     for (;;) {
         (void)poll_reactor_wake(vm, 0);
-        if (vm->fiber_runtime->ready_count == 0) {
-            uint64_t wait_ms = next_reactor_wait_ms(&vm->fiber_runtime->reactor);
-            if (wait_ms == 0 && vm->fiber_runtime->reactor.timer_count == 0 &&
-                vm->fiber_runtime->reactor.fd_count == 0) {
+        if (rt->ready_count == 0) {
+            /* Nothing runnable and nothing left that could ever wake a
+             * fiber (no pending timers, no fd waiters): done, cleanly. */
+            if (ch_reactor_is_empty(&rt->reactor)) {
                 break;
             }
+            uint64_t wait_ms = next_reactor_wait_ms(&rt->reactor);
             (void)poll_reactor_wake(vm, wait_ms == 0 ? 1 : wait_ms);
-            if (vm->fiber_runtime->ready_count == 0) {
+            if (rt->ready_count == 0) {
                 idle++;
                 if (idle > CH_FIBER_READY_MAX * 4) {
                     break;
@@ -698,34 +696,81 @@ int ch_fiber_join(ChVM *vm, ChValue fiber_v, ChValue *out_result) {
 
     ch_gc_push(&vm->gc, &fiber_v);
     ChFiber *fiber = ch_as_fiber(fiber_v);
-    size_t spins = 0;
+    ChFiberRuntime *rt = vm->fiber_runtime;
     while (fiber->state != CH_FIBER_DONE && fiber->state != CH_FIBER_FAILED) {
         (void)poll_reactor_wake(vm, 0);
         int ran = 0;
-        if (vm->fiber_runtime->ready_count > 0) {
+        if (rt->ready_count > 0) {
             ran = run_next_ready_fiber(vm);
             if (ran < 0) {
                 ch_gc_pop(&vm->gc);
                 return -1;
             }
         }
-        if (ran == 0 && vm->fiber_runtime->ready_count == 0) {
-            uint64_t wait_ms = next_reactor_wait_ms(&vm->fiber_runtime->reactor);
-            if (wait_ms > 0 || vm->fiber_runtime->reactor.timer_count > 0 ||
-                vm->fiber_runtime->reactor.fd_count > 0) {
-                (void)poll_reactor_wake(vm, wait_ms == 0 ? 1 : wait_ms);
-                spins = 0;
-                continue;
-            }
-            spins++;
-            if (spins > CH_FIBER_READY_MAX * 16) {
+        if (ran == 0 && rt->ready_count == 0) {
+            /* Nothing runnable and nothing left that could ever wake the
+             * awaited fiber (or any other): this can never make progress. */
+            if (ch_reactor_is_empty(&rt->reactor)) {
                 snprintf(vm->error, sizeof(vm->error),
-                         "fiber-join: fiber did not complete (scheduler stalled)");
+                         "fiber-join: deadlock detected joining fiber %llu — no "
+                         "runnable fibers and no pending timers or I/O to wake one",
+                         (unsigned long long)fiber->id);
                 ch_gc_pop(&vm->gc);
                 return -1;
             }
-        } else {
-            spins = 0;
+            uint64_t wait_ms = next_reactor_wait_ms(&rt->reactor);
+            (void)poll_reactor_wake(vm, wait_ms == 0 ? 1 : wait_ms);
+        }
+    }
+
+    ch_gc_pop(&vm->gc);
+    if (fiber->state == CH_FIBER_DONE) {
+        if (out_result) {
+            *out_result = fiber->result;
+        }
+        return 0;
+    }
+
+    if (ch_is_string(fiber->error)) {
+        snprintf(vm->error, sizeof(vm->error), "%s", ch_as_string(fiber->error)->data);
+    } else {
+        snprintf(vm->error, sizeof(vm->error), "fiber-join: fiber failed");
+    }
+    return -1;
+}
+
+int ch_fiber_join_timeout(ChVM *vm, ChValue fiber_v, double timeout_seconds, ChValue *out_result,
+                          int *timed_out) {
+    if (timed_out) {
+        *timed_out = 0;
+    }
+    if (timeout_seconds < 0.0) {
+        return ch_fiber_join(vm, fiber_v, out_result);
+    }
+    if (!vm->fiber_runtime) {
+        snprintf(vm->error, sizeof(vm->error), "fiber-join: fiber runtime unavailable");
+        return -1;
+    }
+    if (!ch_is_fiber(fiber_v)) {
+        snprintf(vm->error, sizeof(vm->error), "fiber-join: expected fiber");
+        return -1;
+    }
+
+    ch_gc_push(&vm->gc, &fiber_v);
+    ChFiber *fiber = ch_as_fiber(fiber_v);
+    uint64_t deadline_ms = timeout_deadline_ms(timeout_seconds);
+    while (fiber->state != CH_FIBER_DONE && fiber->state != CH_FIBER_FAILED) {
+        if (timeout_expired_ms(deadline_ms)) {
+            if (timed_out) {
+                *timed_out = 1;
+            }
+            ch_gc_pop(&vm->gc);
+            return -1;
+        }
+        int ran = run_scheduler_step_until(vm, deadline_ms);
+        if (ran < 0) {
+            ch_gc_pop(&vm->gc);
+            return -1;
         }
     }
 
@@ -828,57 +873,46 @@ int ch_fiber_wait_fd(ChVM *vm, int fd, ChReactorInterest interest) {
         snprintf(vm->error, sizeof(vm->error), "fiber-wait-fd: invalid fd");
         return -1;
     }
+    /* Nested cooperative wait: block this C frame until the fd is ready while
+     * still driving sibling fibers. Snapshot-park is a poor fit for port
+     * natives that must retry the read/write after wake. */
     ChFiberRuntime *rt = vm->fiber_runtime;
-    if (!ch_is_fiber(rt->current)) {
-        /* Outside fiber: blocking poll via reactor. */
-        ChValue done = CH_TRUE;
-        if (ch_reactor_register_fd(&rt->reactor, fd, interest, done) != 0) {
-            snprintf(vm->error, sizeof(vm->error), "fiber-wait-fd: register failed");
-            return -1;
-        }
-        for (;;) {
-            ChValue payload = CH_UNDEFINED;
-            int r = ch_reactor_poll(&rt->reactor, 50, &payload);
-            if (r > 0) {
-                if (payload == done) {
-                    return 0;
-                }
-                if (ch_is_fiber(payload)) {
-                    ChFiber *f = ch_as_fiber(payload);
-                    if (f->state == CH_FIBER_WAITING || f->state == CH_FIBER_IO_WAITING) {
-                        f->state = CH_FIBER_READY;
-                        (void)enqueue_ready_fiber(rt, payload);
-                    }
-                }
-            }
-            while (rt->ready_count > 0) {
-                int ran = run_next_ready_fiber(vm);
-                if (ran < 0) {
-                    return -1;
-                }
-                if (ran == 0) {
-                    break;
-                }
-            }
-        }
-    }
-
-    ChValue fiber_v = rt->current;
-    if (ch_reactor_register_fd(&rt->reactor, fd, interest, fiber_v) != 0) {
+    ChValue done = CH_TRUE;
+    if (ch_reactor_register_fd(&rt->reactor, fd, interest, done) != 0) {
         snprintf(vm->error, sizeof(vm->error), "fiber-wait-fd: register failed");
         return -1;
     }
-    ChFiber *fiber = ch_as_fiber(fiber_v);
-    fiber->io_fd = fd;
-    fiber->io_interest = (uint8_t)interest;
-    fiber->state = CH_FIBER_IO_WAITING;
-    if (park_current_fiber(vm, CH_VOID, CH_FIBER_PARK_IO) != 0) {
-        (void)ch_reactor_unregister_fd(&rt->reactor, fd);
-        return -1;
+    for (;;) {
+        /* Drive siblings first so a peer can unblock this fd. */
+        while (rt->ready_count > 0) {
+            int ran = run_next_ready_fiber(vm);
+            if (ran < 0) {
+                (void)ch_reactor_unregister_fd(&rt->reactor, fd);
+                return -1;
+            }
+            if (ran == 0) {
+                break;
+            }
+        }
+        ChValue payload = CH_UNDEFINED;
+        uint64_t wait_ms = next_reactor_wait_ms(&rt->reactor);
+        if (wait_ms == 0) {
+            wait_ms = 50;
+        }
+        int r = ch_reactor_poll(&rt->reactor, wait_ms, &payload);
+        if (r > 0) {
+            if (payload == done) {
+                return 0;
+            }
+            if (ch_is_fiber(payload)) {
+                ChFiber *f = ch_as_fiber(payload);
+                if (f->state == CH_FIBER_WAITING || f->state == CH_FIBER_IO_WAITING) {
+                    f->state = CH_FIBER_READY;
+                    (void)enqueue_ready_fiber(rt, payload);
+                }
+            }
+        }
     }
-    /* park_current_fiber sets WAITING; keep IO_WAITING. */
-    fiber->state = CH_FIBER_IO_WAITING;
-    return 0;
 }
 
 static int channel_grow(ChChannel *channel) {
@@ -954,71 +988,118 @@ static int channel_check_owner(ChVM *vm, ChValue channel_v, const char *who) {
     return 0;
 }
 
+/* Bound on the reactor poll issued per would_park iteration of an untimed
+ * shared-channel wait, in milliseconds. Cross-thread progress wakes the
+ * poll immediately via the registered ChThreadNotifier (see
+ * ch_shared_channel_try_send/try_recv); this bound only sets how often a
+ * *local* sibling fiber unrelated to this channel gets a chance to run
+ * while we wait, and how quickly CH_SHARED_CHANNEL_MAX_IDLE_POLLS'
+ * no-progress ceiling below is reached. */
+#define CH_SHARED_CHANNEL_IDLE_POLL_MS 50
+/* Ceiling on consecutive idle (no local fiber ran, poll timed out) rounds
+ * before an untimed shared-channel wait gives up as a deadlock -- roughly
+ * CH_SHARED_CHANNEL_IDLE_POLL_MS * this many milliseconds of genuinely no
+ * progress from any thread. */
+#define CH_SHARED_CHANNEL_MAX_IDLE_POLLS 400
+
+/* would_park retry shape (KEP-0002 §5/§7, adapted): try the op; on a
+ * genuine would-block, drive local siblings once (a local fiber may free
+ * the very slot we're waiting on), then block this C frame in the
+ * reactor's poll -- woken either by a cross-thread ch_thread_notifier_notify
+ * (rung by the remote try_send/try_recv/close that observes our
+ * registration) or by the bounded fallback above. Always retries through
+ * the real try_send/try_recv on wake, never a bare peek: the drive step can
+ * consume this fiber's one-shot waiter registration via a sibling
+ * operation, so re-calling try_* is what re-registers if still blocked
+ * (#1489 shape -- see channel_send_shared_timeout's fuller comment). */
 static int channel_send_shared(ChVM *vm, ChChannel *channel, ChValue value) {
     ChSharedChannel *sc = (ChSharedChannel *)channel->shared;
     if (!vm->fiber_runtime || !ch_is_fiber(vm->fiber_runtime->current)) {
         return ch_shared_channel_send(sc, &vm->gc, value);
     }
-    size_t spins = 0;
+    ChFiberRuntime *rt = vm->fiber_runtime;
+    ChThreadNotifier *notifier = ch_reactor_notify_handle(&rt->reactor);
+    int result;
+    size_t idle = 0;
     for (;;) {
-        int rc = ch_shared_channel_try_send(sc, &vm->gc, value);
+        int rc = ch_shared_channel_try_send(sc, &vm->gc, value, notifier);
         if (rc == 0) {
-            return 0;
+            result = 0;
+            break;
         }
         if (rc < 0) {
             if (vm->error[0] == '\0') {
                 snprintf(vm->error, sizeof(vm->error), "channel-send: shared send failed");
             }
-            return -1;
+            result = -1;
+            break;
         }
         (void)poll_reactor_wake(vm, 0);
         int ran = run_next_ready_fiber(vm);
         if (ran < 0) {
-            return -1;
+            result = -1;
+            break;
         }
-        struct timespec nap = {0, 1000000L};
-        nanosleep(&nap, NULL);
-        spins++;
-        if (spins > CH_FIBER_READY_MAX * 64) {
+        if (ran > 0) {
+            idle = 0;
+            continue;
+        }
+        (void)poll_reactor_wake(vm, CH_SHARED_CHANNEL_IDLE_POLL_MS);
+        idle++;
+        if (idle > CH_SHARED_CHANNEL_MAX_IDLE_POLLS) {
             snprintf(vm->error, sizeof(vm->error),
                      "channel-send!: shared channel made no progress");
-            return -1;
+            result = -1;
+            break;
         }
     }
+    ch_thread_notifier_release(notifier);
+    return result;
 }
 
 static int channel_recv_shared(ChVM *vm, ChChannel *channel, ChValue *out_value) {
     ChSharedChannel *sc = (ChSharedChannel *)channel->shared;
-    size_t spins = 0;
+    if (!vm->fiber_runtime || !ch_is_fiber(vm->fiber_runtime->current)) {
+        return ch_shared_channel_recv(sc, &vm->gc, out_value);
+    }
+    ChFiberRuntime *rt = vm->fiber_runtime;
+    ChThreadNotifier *notifier = ch_reactor_notify_handle(&rt->reactor);
+    int result;
+    size_t idle = 0;
     for (;;) {
-        int rc = ch_shared_channel_try_recv(sc, &vm->gc, out_value);
+        int rc = ch_shared_channel_try_recv(sc, &vm->gc, out_value, notifier);
         if (rc == 0) {
-            return 0;
+            result = 0;
+            break;
         }
         if (rc < 0) {
             if (vm->error[0] == '\0') {
                 snprintf(vm->error, sizeof(vm->error), "channel-recv: shared receive failed");
             }
-            return -1;
+            result = -1;
+            break;
         }
-        if (vm->fiber_runtime && ch_is_fiber(vm->fiber_runtime->current)) {
-            (void)poll_reactor_wake(vm, 0);
-            int ran = run_next_ready_fiber(vm);
-            if (ran < 0) {
-                return -1;
-            }
-            struct timespec nap = {0, 1000000L};
-            nanosleep(&nap, NULL);
-            spins++;
-            if (spins > CH_FIBER_READY_MAX * 64) {
-                snprintf(vm->error, sizeof(vm->error),
-                         "channel-recv: shared channel made no progress");
-                return -1;
-            }
+        (void)poll_reactor_wake(vm, 0);
+        int ran = run_next_ready_fiber(vm);
+        if (ran < 0) {
+            result = -1;
+            break;
+        }
+        if (ran > 0) {
+            idle = 0;
             continue;
         }
-        return ch_shared_channel_recv(sc, &vm->gc, out_value);
+        (void)poll_reactor_wake(vm, CH_SHARED_CHANNEL_IDLE_POLL_MS);
+        idle++;
+        if (idle > CH_SHARED_CHANNEL_MAX_IDLE_POLLS) {
+            snprintf(vm->error, sizeof(vm->error),
+                     "channel-recv: shared channel made no progress");
+            result = -1;
+            break;
+        }
     }
+    ch_thread_notifier_release(notifier);
+    return result;
 }
 
 static int run_scheduler_step_until(ChVM *vm, uint64_t deadline_ms) {
@@ -1051,60 +1132,92 @@ static int run_scheduler_step_until(ChVM *vm, uint64_t deadline_ms) {
     return 0;
 }
 
+/* Timed counterpart of channel_send_shared's would_park loop. The notifier
+ * is obtained once (not re-fetched per iteration) and passed to every
+ * try_send call: on a would-block, try_send (re-)registers it in the
+ * channel's send_waiters ring (dedup makes repeated registration of the
+ * same notifier a no-op), so a remote try_recv/close rings it and wakes
+ * run_scheduler_step_until's reactor poll immediately instead of waiting
+ * out the full per-iteration bound. Always retries through a real
+ * try_send on wake rather than trusting a bare "is there room now" peek:
+ * a sibling's local drive can itself consume this fiber's admission and
+ * leave the channel full again before this loop gets back around (#1489
+ * shape) -- re-calling try_send is what re-observes and re-registers. */
 static int channel_send_shared_timeout(ChVM *vm, ChChannel *channel, ChValue value, uint64_t deadline_ms,
                                        int *timed_out) {
     ChSharedChannel *sc = (ChSharedChannel *)channel->shared;
+    ChThreadNotifier *notifier =
+        vm->fiber_runtime ? ch_reactor_notify_handle(&vm->fiber_runtime->reactor) : NULL;
+    int result;
     for (;;) {
-        int rc = ch_shared_channel_try_send(sc, &vm->gc, value);
+        int rc = ch_shared_channel_try_send(sc, &vm->gc, value, notifier);
         if (rc == 0) {
-            return 0;
+            result = 0;
+            break;
         }
         if (rc < 0) {
             if (vm->error[0] == '\0') {
                 snprintf(vm->error, sizeof(vm->error), "channel-send: shared send failed");
             }
-            return -1;
+            result = -1;
+            break;
         }
         if (timeout_expired_ms(deadline_ms)) {
             if (timed_out) {
                 *timed_out = 1;
             }
             snprintf(vm->error, sizeof(vm->error), "channel-send: timed out");
-            return -1;
+            result = -1;
+            break;
         }
         int ran = run_scheduler_step_until(vm, deadline_ms);
         if (ran < 0) {
-            return -1;
+            result = -1;
+            break;
         }
     }
+    ch_thread_notifier_release(notifier);
+    return result;
 }
 
+/* Timed counterpart of channel_recv_shared's would_park loop; see
+ * channel_send_shared_timeout's comment for the would_park/notifier/retry
+ * shape, mirrored here on the receive side. */
 static int channel_recv_shared_timeout(ChVM *vm, ChChannel *channel, ChValue *out_value,
                                        uint64_t deadline_ms, int *timed_out) {
     ChSharedChannel *sc = (ChSharedChannel *)channel->shared;
+    ChThreadNotifier *notifier =
+        vm->fiber_runtime ? ch_reactor_notify_handle(&vm->fiber_runtime->reactor) : NULL;
+    int result;
     for (;;) {
-        int rc = ch_shared_channel_try_recv(sc, &vm->gc, out_value);
+        int rc = ch_shared_channel_try_recv(sc, &vm->gc, out_value, notifier);
         if (rc == 0) {
-            return 0;
+            result = 0;
+            break;
         }
         if (rc < 0) {
             if (vm->error[0] == '\0') {
                 snprintf(vm->error, sizeof(vm->error), "channel-recv: shared receive failed");
             }
-            return -1;
+            result = -1;
+            break;
         }
         if (timeout_expired_ms(deadline_ms)) {
             if (timed_out) {
                 *timed_out = 1;
             }
             snprintf(vm->error, sizeof(vm->error), "channel-receive: timed out");
-            return -1;
+            result = -1;
+            break;
         }
         int ran = run_scheduler_step_until(vm, deadline_ms);
         if (ran < 0) {
-            return -1;
+            result = -1;
+            break;
         }
     }
+    ch_thread_notifier_release(notifier);
+    return result;
 }
 
 int ch_channel_send(ChVM *vm, ChValue channel_v, ChValue value) {

@@ -1375,16 +1375,29 @@ static ChValue list1(ChGC *gc, ChValue a) {
     return ch_gc_cons(gc, a, CH_NIL);
 }
 
+/* list2/list3/list4 build their tail via a nested allocating call, so the
+ * leading argument(s) must be rooted first: ch_gc_cons only protects the two
+ * arguments passed directly to it, not values still waiting in an outer
+ * frame while a nested list{1,2,3} call runs (and may trigger a minor GC). */
 static ChValue list2(ChGC *gc, ChValue a, ChValue b) {
-    return ch_gc_cons(gc, a, list1(gc, b));
+    ch_gc_push(gc, &a);
+    ChValue rest = list1(gc, b);
+    ch_gc_pop(gc);
+    return ch_gc_cons(gc, a, rest);
 }
 
 static ChValue list3(ChGC *gc, ChValue a, ChValue b, ChValue c) {
-    return ch_gc_cons(gc, a, list2(gc, b, c));
+    ch_gc_push(gc, &a);
+    ChValue rest = list2(gc, b, c);
+    ch_gc_pop(gc);
+    return ch_gc_cons(gc, a, rest);
 }
 
 static ChValue list4(ChGC *gc, ChValue a, ChValue b, ChValue c, ChValue d) {
-    return ch_gc_cons(gc, a, list3(gc, b, c, d));
+    ch_gc_push(gc, &a);
+    ChValue rest = list3(gc, b, c, d);
+    ch_gc_pop(gc);
+    return ch_gc_cons(gc, a, rest);
 }
 
 static ChValue append_one(ChGC *gc, ChValue list, ChValue item) {
@@ -1405,6 +1418,7 @@ static ChValue append_one(ChGC *gc, ChValue list, ChValue item) {
             tail = cell;
         } else {
             ch_set_cdr(tail, cell);
+            ch_gc_write_barrier(gc, ch_to_object(tail), cell);
             tail = cell;
         }
     }
@@ -1413,6 +1427,7 @@ static ChValue append_one(ChGC *gc, ChValue list, ChValue item) {
         head = cell;
     } else {
         ch_set_cdr(tail, cell);
+        ch_gc_write_barrier(gc, ch_to_object(tail), cell);
     }
     ch_gc_pop_n(gc, 4);
     return head;
@@ -1680,39 +1695,54 @@ static ChExpandStatus expand_define_record_type_r6rs(ChVM *vm, ChValue args, ChV
             body_args = append_one(gc, body_args, fs);
         }
         ChValue body = ch_gc_cons(gc, mr_sym, body_args);
+        ch_gc_push(gc, &body);
         ChValue lam = list3(gc, lambda_sym, params, body);
+        ch_gc_push(gc, &lam);
         ChValue let_expr = list3(gc, let_sym, list1(gc, list2(gc, rt_local, rt_name)), lam);
         forms = append_one(gc, forms, list3(gc, define_sym, ch_make_pointer(&ctor_sym->header), let_expr));
-        ch_gc_pop_n(gc, 2);
+        ch_gc_pop_n(gc, 4); /* body, lam, params, body_args */
     }
 
     /* predicate */
     {
         ChValue v_sym = ch_gc_intern_symbol_cstr(gc, "v");
+        ch_gc_push(gc, &v_sym);
         ChValue body = list3(gc, rp_sym, v_sym, rt_local);
+        ch_gc_push(gc, &body);
         ChValue lam = list3(gc, lambda_sym, list1(gc, v_sym), body);
+        ch_gc_push(gc, &lam);
         ChValue let_expr = list3(gc, let_sym, list1(gc, list2(gc, rt_local, rt_name)), lam);
         forms = append_one(gc, forms, list3(gc, define_sym, ch_make_pointer(&pred_sym->header), let_expr));
+        ch_gc_pop_n(gc, 3); /* v_sym, body, lam */
     }
 
     for (size_t fi = 0; fi < nfields; fi++) {
         ChValue p_sym = ch_gc_intern_symbol_cstr(gc, "p");
+        ch_gc_push(gc, &p_sym);
         ChValue idx = ch_make_fixnum((int64_t)parent_n + (int64_t)fi);
+        ch_gc_push(gc, &idx);
         ChValue body = list4(gc, rr_sym, p_sym, idx, rt_local);
+        ch_gc_push(gc, &body);
         ChValue lam = list3(gc, lambda_sym, list1(gc, p_sym), body);
+        ch_gc_push(gc, &lam);
         ChValue let_expr = list3(gc, let_sym, list1(gc, list2(gc, rt_local, rt_name)), lam);
         forms = append_one(gc, forms, list3(gc, define_sym, ch_make_pointer(&acc_syms[fi]->header), let_expr));
         if (mut_syms[fi]) {
             ChValue v_sym = ch_gc_intern_symbol_cstr(gc, "v");
+            ch_gc_push(gc, &v_sym);
             ChValue set_body = list1(gc, p_sym);
+            ch_gc_push(gc, &set_body);
             set_body = append_one(gc, set_body, idx);
             set_body = append_one(gc, set_body, v_sym);
             set_body = append_one(gc, set_body, rt_local);
             set_body = ch_gc_cons(gc, rs_sym, set_body);
             ChValue set_lam = list3(gc, lambda_sym, list2(gc, p_sym, v_sym), set_body);
+            ch_gc_push(gc, &set_lam);
             ChValue set_let = list3(gc, let_sym, list1(gc, list2(gc, rt_local, rt_name)), set_lam);
             forms = append_one(gc, forms, list3(gc, define_sym, ch_make_pointer(&mut_syms[fi]->header), set_let));
+            ch_gc_pop_n(gc, 3); /* v_sym, set_body, set_lam */
         }
+        ch_gc_pop_n(gc, 4); /* p_sym, idx, body, lam */
     }
 
     *out = ch_gc_cons(gc, begin_sym, forms);
@@ -1828,51 +1858,75 @@ static ChExpandStatus expand_define_record_type(ChVM *vm, ChValue args, ChValue 
             body_args = append_one(gc, body_args, arg);
         }
         ChValue body = ch_gc_cons(gc, mr_sym, body_args);
+        ch_gc_push(gc, &body);
         ChValue lam = list3(gc, lambda_sym, params, body);
+        ch_gc_push(gc, &lam);
         ChValue binding = list2(gc, rt_local, rt_name);
+        ch_gc_push(gc, &binding);
         ChValue bindings = list1(gc, binding);
+        ch_gc_push(gc, &bindings);
         ChValue let_expr = list3(gc, let_sym, bindings, lam);
+        ch_gc_push(gc, &let_expr);
         ChValue ctor_name = ch_make_pointer(&ctor_sym->header);
         ChValue def = list3(gc, define_sym, ctor_name, let_expr);
         forms = append_one(gc, forms, def);
-        ch_gc_pop(gc);
+        ch_gc_pop_n(gc, 6); /* body, lam, binding, bindings, let_expr, body_args */
     }
 
     /* predicate */
     {
         ChValue v_sym = ch_gc_intern_symbol_cstr(gc, "v");
+        ch_gc_push(gc, &v_sym);
         ChValue body = list3(gc, rp_sym, v_sym, rt_local);
+        ch_gc_push(gc, &body);
         ChValue lam = list3(gc, lambda_sym, list1(gc, v_sym), body);
+        ch_gc_push(gc, &lam);
         ChValue binding = list2(gc, rt_local, rt_name);
+        ch_gc_push(gc, &binding);
         ChValue let_expr = list3(gc, let_sym, list1(gc, binding), lam);
+        ch_gc_push(gc, &let_expr);
         ChValue def = list3(gc, define_sym, ch_make_pointer(&pred_sym->header), let_expr);
         forms = append_one(gc, forms, def);
+        ch_gc_pop_n(gc, 5); /* v_sym, body, lam, binding, let_expr */
     }
 
     for (size_t fi = 0; fi < nfields; fi++) {
         ChValue p_sym = ch_gc_intern_symbol_cstr(gc, "p");
+        ch_gc_push(gc, &p_sym);
         ChValue idx = ch_make_fixnum((int64_t)fi);
+        ch_gc_push(gc, &idx);
         ChValue body = list4(gc, rr_sym, p_sym, idx, rt_local);
+        ch_gc_push(gc, &body);
         ChValue lam = list3(gc, lambda_sym, list1(gc, p_sym), body);
+        ch_gc_push(gc, &lam);
         ChValue binding = list2(gc, rt_local, rt_name);
+        ch_gc_push(gc, &binding);
         ChValue let_expr = list3(gc, let_sym, list1(gc, binding), lam);
+        ch_gc_push(gc, &let_expr);
         ChValue def = list3(gc, define_sym, ch_make_pointer(&acc_syms[fi]->header), let_expr);
         forms = append_one(gc, forms, def);
 
         if (mut_syms[fi]) {
             ChValue v_sym = ch_gc_intern_symbol_cstr(gc, "v");
+            ch_gc_push(gc, &v_sym);
             ChValue set_body = list1(gc, p_sym);
+            ch_gc_push(gc, &set_body);
             set_body = append_one(gc, set_body, idx);
             set_body = append_one(gc, set_body, v_sym);
             set_body = append_one(gc, set_body, rt_local);
             set_body = ch_gc_cons(gc, rs_sym, set_body);
             ChValue params = list2(gc, p_sym, v_sym);
+            ch_gc_push(gc, &params);
             ChValue set_lam = list3(gc, lambda_sym, params, set_body);
+            ch_gc_push(gc, &set_lam);
             ChValue set_let = list3(gc, let_sym, list1(gc, list2(gc, rt_local, rt_name)), set_lam);
+            ch_gc_push(gc, &set_let);
             ChValue set_def =
                 list3(gc, define_sym, ch_make_pointer(&mut_syms[fi]->header), set_let);
             forms = append_one(gc, forms, set_def);
+            ch_gc_pop_n(gc, 5); /* v_sym, set_body, params, set_lam, set_let */
         }
+        ch_gc_pop_n(gc, 6); /* p_sym, idx, body, lam, binding, let_expr */
     }
 
     *out = ch_gc_cons(gc, begin_sym, forms);
