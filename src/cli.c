@@ -3,10 +3,13 @@
 #include "chaaya/cache.h"
 #include "chaaya/compiler.h"
 #include "chaaya/coverage.h"
+#include "chaaya/diagnostics.h"
 #include "chaaya/disasm.h"
+#include "chaaya/doctor.h"
 #include "chaaya/eval.h"
 #include "chaaya/expander.h"
 #include "chaaya/features.h"
+#include "chaaya/fmt.h"
 #include "chaaya/ffi.h"
 #include "chaaya/ir.h"
 #include "chaaya/library.h"
@@ -19,6 +22,7 @@
 #include "chaaya/repl.h"
 #include "chaaya/runtime_exports.h"
 #include "chaaya/sandbox.h"
+#include "chaaya/test_runner.h"
 #include "chaaya/timings.h"
 #include "chaaya/value.h"
 #include "chaaya/version.h"
@@ -68,7 +72,7 @@ void ch_cli_print_help(const char *argv0) {
     printf("       %s check <file.scm>\n", argv0);
     printf("       %s explain <code>\n", argv0);
     printf("       %s features [--json]\n", argv0);
-    printf("       %s test [--json] [-j N] [--seed N] [paths...]\n", argv0);
+    printf("       %s test [--json] [-j N] [--seed N] [--changed] [paths...]\n", argv0);
     printf("       %s ast|expand|ir <file.scm>\n", argv0);
     printf("       %s doctor [--json]\n", argv0);
     printf("       %s lsp\n", argv0);
@@ -79,9 +83,9 @@ void ch_cli_print_help(const char *argv0) {
     printf("Commands:\n");
     printf("  compile <file>     Compile to native binary via LLVM\n");
     printf("  check <file>       Compile-only static analysis (no execution)\n");
-    printf("  explain <code>     Explain a diagnostic code (e.g. CH3001)\n");
+    printf("  explain <code>     Explain a diagnostic code (e.g. CH3001); --all\n");
     printf("  features           Report this build's capabilities; --json\n");
-    printf("  test [paths...]    Run SRFI-64 suites\n");
+    printf("  test [paths...]    Run SRFI-64 suites; --json/--seed/-j/--changed\n");
     printf("  ast <file>         Print post-read datums (read + write)\n");
     printf("  expand <file>      Print the program after full macro expansion\n");
     printf("  ir <file> [--no-opt]  Print the IR tree\n");
@@ -116,6 +120,9 @@ void ch_cli_print_help(const char *argv0) {
     printf("  --max-memory <n>   Maximum heap memory in bytes\n");
     printf("  -j, --jobs <n>     (test) Run up to N tests in parallel\n");
     printf("  --seed <n>         (test) Set and report deterministic test seed\n");
+    printf("  --changed          (test) Run suites affected by git changes\n");
+    printf("  --list-affected    (test) List affected suites without running\n");
+    printf("  --since <rev>      (test) Git revision for --changed (default HEAD)\n");
     printf("  --completions <sh> Output completion script (bash, zsh, fish)\n");
     printf("\n");
     printf("Environment variables:\n");
@@ -427,6 +434,26 @@ int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
             out->test_seed_set = 1;
             continue;
         }
+        if (strcmp(a, "--changed") == 0 && out->command == CH_CMD_TEST) {
+            out->test_changed = 1;
+            continue;
+        }
+        if (strcmp(a, "--list-affected") == 0 && out->command == CH_CMD_TEST) {
+            out->test_list_affected = 1;
+            continue;
+        }
+        if (strcmp(a, "--since") == 0 && out->command == CH_CMD_TEST) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "--since requires a revision\n");
+                return CH_EXIT_USAGE;
+            }
+            out->test_since = argv[++i];
+            continue;
+        }
+        if (strcmp(a, "--all") == 0 && out->command == CH_CMD_EXPLAIN) {
+            out->explain_all = 1;
+            continue;
+        }
         if (strcmp(a, "--check") == 0) {
             if (out->command == CH_CMD_FMT) {
                 out->flag_fmt_check = 1;
@@ -481,260 +508,11 @@ static int not_implemented(const char *what) {
     return CH_EXIT_ERROR;
 }
 
-static pid_t spawn_test_subprocess(const char *argv0, ChCliOptions *opts, const char *path) {
-    char exe[1024];
-    if (realpath(argv0, exe) == NULL) {
-        if (snprintf(exe, sizeof(exe), "%s", argv0) >= (int)sizeof(exe)) {
-            fprintf(stderr, "test: argv0 path too long\n");
-            return -1;
-        }
-    }
-
-    char dir_copy[1024];
-    char file_copy[1024];
-    if (snprintf(dir_copy, sizeof(dir_copy), "%s", path) >= (int)sizeof(dir_copy) ||
-        snprintf(file_copy, sizeof(file_copy), "%s", path) >= (int)sizeof(file_copy)) {
-        fprintf(stderr, "test: path too long: %s\n", path);
-        return -1;
-    }
-    char *dir = dirname(dir_copy);
-    const char *file = basename(file_copy);
-
-    char lib_abs[CH_VM_MAX_LIB_PATHS][1024];
-    const char *resolved_libs[CH_VM_MAX_LIB_PATHS];
-    for (size_t i = 0; i < opts->lib_path_count; i++) {
-        if (realpath(opts->lib_paths[i], lib_abs[i]) != NULL) {
-            resolved_libs[i] = lib_abs[i];
-        } else {
-            resolved_libs[i] = opts->lib_paths[i];
-        }
-    }
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        fprintf(stderr, "test: fork failed for %s\n", path);
-        return -1;
-    }
-    if (pid == 0) {
-        if (chdir(dir) != 0) {
-            _exit(127);
-        }
-        if (opts->test_json) {
-            (void)freopen("/dev/null", "w", stdout);
-            (void)freopen("/dev/null", "w", stderr);
-        }
-        char **child_argv = NULL;
-        size_t argc = 0;
-        size_t cap = 16;
-        child_argv = (char **)calloc(cap, sizeof(char *));
-        if (!child_argv) {
-            _exit(127);
-        }
-        child_argv[argc++] = exe;
-        for (size_t i = 0; i < opts->lib_path_count; i++) {
-            if (argc + 2 >= cap) {
-                cap *= 2;
-                char **n = (char **)realloc(child_argv, cap * sizeof(char *));
-                if (!n) {
-                    free(child_argv);
-                    _exit(127);
-                }
-                child_argv = n;
-            }
-            child_argv[argc++] = (char *)"--lib-path";
-            child_argv[argc++] = (char *)resolved_libs[i];
-        }
-        if (argc + 2 >= cap) {
-            cap += 2;
-            char **n = (char **)realloc(child_argv, cap * sizeof(char *));
-            if (!n) {
-                free(child_argv);
-                _exit(127);
-            }
-            child_argv = n;
-        }
-        child_argv[argc++] = (char *)file;
-        child_argv[argc] = NULL;
-        execv(exe, child_argv);
-        free(child_argv);
-        _exit(127);
-    }
-    return pid;
-}
-
-static int wait_test_subprocess(pid_t pid) {
-    int status = 0;
-    if (waitpid(pid, &status, 0) < 0) {
-        return -1;
-    }
-    if (WIFEXITED(status)) {
-        return WEXITSTATUS(status) == 0 ? 0 : -1;
-    }
-    return -1;
-}
-
-static int run_test_subprocess(const char *argv0, ChCliOptions *opts, const char *path) {
-    pid_t pid = spawn_test_subprocess(argv0, opts, path);
-    if (pid < 0) {
-        return -1;
-    }
-    return wait_test_subprocess(pid);
-}
-
-static void print_json_escaped(FILE *out, const char *s) {
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
-        switch (*p) {
-        case '"':
-            fputs("\\\"", out);
-            break;
-        case '\\':
-            fputs("\\\\", out);
-            break;
-        case '\n':
-            fputs("\\n", out);
-            break;
-        case '\r':
-            fputs("\\r", out);
-            break;
-        case '\t':
-            fputs("\\t", out);
-            break;
-        default:
-            if (*p < 0x20) {
-                fprintf(out, "\\u%04x", (unsigned)*p);
-            } else {
-                fputc(*p, out);
-            }
-            break;
-        }
-    }
-}
-
-static void print_test_result_line(const ChCliOptions *opts, const char *path, int pass) {
-    if (opts->test_json) {
-        fputs("{\"name\":\"", stdout);
-        print_json_escaped(stdout, path);
-        fprintf(stdout, "\",\"status\":\"%s\"}\n", pass ? "pass" : "fail");
-        return;
-    }
-    if (pass) {
-        printf("PASS %s\n", path);
-    } else {
-        fprintf(stderr, "FAIL %s\n", path);
-    }
-}
-
 static int cmd_test(const char *argv0, ChCliOptions *opts) {
-    if (!opts->file) {
-        fprintf(stderr, "test: missing test file (pass one or more .scm paths)\n");
-        fprintf(stderr, "Usage: %s test [--lib-path ./lib] file.scm [more...]\n", argv0);
-        return CH_EXIT_USAGE;
+    if (!opts->test_since) {
+        opts->test_since = "HEAD";
     }
-
-    size_t path_count = 1 + opts->script_arg_count;
-    const char *paths[1 + CH_VM_MAX_SCRIPT_ARGS];
-    paths[0] = opts->file;
-    for (size_t i = 0; i < opts->script_arg_count; i++) {
-        paths[i + 1] = opts->script_args[i];
-    }
-
-    if (opts->test_seed_set) {
-        if (opts->test_json) {
-            printf("{\"seed\":%u}\n", opts->test_seed);
-        } else {
-            printf("test: seed=%u\n", opts->test_seed);
-        }
-        fflush(stdout);
-    }
-
-    int failed = 0;
-
-    if (opts->test_jobs <= 1 || path_count <= 1) {
-        for (size_t i = 0; i < path_count; i++) {
-            const char *path = paths[i];
-            int pass = run_test_subprocess(argv0, opts, path) == 0;
-            print_test_result_line(opts, path, pass);
-            if (!pass) {
-                failed++;
-            }
-        }
-    } else {
-        typedef struct ChRunningTest {
-            pid_t pid;
-            const char *path;
-        } ChRunningTest;
-
-        size_t jobs = (size_t)opts->test_jobs;
-        if (jobs > path_count) {
-            jobs = path_count;
-        }
-        ChRunningTest *running = (ChRunningTest *)calloc(jobs, sizeof(ChRunningTest));
-        if (!running) {
-            fprintf(stderr, "test: out of memory\n");
-            return CH_EXIT_ERROR;
-        }
-
-        size_t next = 0;
-        size_t active = 0;
-        while (next < path_count || active > 0) {
-            while (next < path_count && active < jobs) {
-                pid_t pid = spawn_test_subprocess(argv0, opts, paths[next]);
-                if (pid < 0) {
-                    print_test_result_line(opts, paths[next], 0);
-                    failed++;
-                    next++;
-                    continue;
-                }
-                running[active].pid = pid;
-                running[active].path = paths[next];
-                active++;
-                next++;
-            }
-
-            if (active == 0) {
-                continue;
-            }
-
-            int status = 0;
-            pid_t done = waitpid(-1, &status, 0);
-            if (done < 0) {
-                fprintf(stderr, "test: waitpid failed\n");
-                failed += (int)active;
-                break;
-            }
-
-            size_t idx = 0;
-            while (idx < active && running[idx].pid != done) {
-                idx++;
-            }
-            if (idx == active) {
-                continue;
-            }
-
-            int pass = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-            print_test_result_line(opts, running[idx].path, pass);
-            if (!pass) {
-                failed++;
-            }
-            running[idx] = running[active - 1];
-            active--;
-        }
-
-        free(running);
-    }
-
-    if (failed > 0) {
-        if (opts->test_json) {
-            fprintf(stderr, "test: %d/%zu file(s) failed\n", failed, path_count);
-        } else {
-            fprintf(stderr, "test: %d/%zu file(s) failed\n", failed, path_count);
-        }
-        return CH_EXIT_ERROR;
-    }
-    if (!opts->test_json) {
-        printf("test: %zu file(s) passed\n", path_count);
-    }
-    return CH_EXIT_OK;
+    return ch_test_run(argv0, opts);
 }
 
 static int cmd_wasm_stub(void) {
@@ -841,263 +619,6 @@ static int cmd_features(ChCliOptions *opts) {
     return CH_EXIT_OK;
 }
 
-static int path_writable_dir(const char *dir) {
-    struct stat st;
-    if (stat(dir, &st) != 0) {
-        return 0;
-    }
-    return S_ISDIR(st.st_mode) && access(dir, W_OK) == 0;
-}
-
-static int resolve_cli_cache_dir(char *out, size_t out_len) {
-    const char *base = getenv("CHAAYA_HOME");
-    if (base && base[0] != '\0') {
-        return snprintf(out, out_len, "%s/cache", base) < (int)out_len ? 0 : -1;
-    }
-    const char *home = getenv("HOME");
-    if (!home || home[0] == '\0') {
-        return -1;
-    }
-    return snprintf(out, out_len, "%s/.chaaya/cache", home) < (int)out_len ? 0 : -1;
-}
-
-static int path_has_executable(const char *name) {
-    const char *path_env = getenv("PATH");
-    if (!path_env || !path_env[0]) {
-        return 0;
-    }
-    char *copy = strdup(path_env);
-    if (!copy) {
-        return 0;
-    }
-    int found = 0;
-    char *save = NULL;
-    for (char *dir = strtok_r(copy, ":", &save); dir; dir = strtok_r(NULL, ":", &save)) {
-        if (!dir[0]) {
-            continue;
-        }
-        char probe[PATH_MAX];
-        if (snprintf(probe, sizeof(probe), "%s/%s", dir, name) >= (int)sizeof(probe)) {
-            continue;
-        }
-        if (access(probe, X_OK) == 0) {
-            found = 1;
-            break;
-        }
-    }
-    free(copy);
-    return found;
-}
-
-static int cmd_doctor(ChCliOptions *opts) {
-    int fails = 0;
-    int warns = 0;
-    char home[512];
-    const char *env = getenv("CHAAYA_HOME");
-    if (env && env[0]) {
-        snprintf(home, sizeof(home), "%s", env);
-    } else {
-        const char *h = getenv("HOME");
-        if (!h) {
-            h = "";
-        }
-        snprintf(home, sizeof(home), "%s/.chaaya", h);
-    }
-
-    if (opts->json) {
-        printf("{\n  \"checks\": [\n");
-    }
-
-#define DOCTOR_EMIT(status, name, detail)                                                          \
-    do {                                                                                           \
-        if (opts->json) {                                                                          \
-            printf("    {\"status\": \"%s\", \"name\": \"%s\", \"detail\": \"%s\"},\n", status,   \
-                   name, detail);                                                                  \
-        } else {                                                                                   \
-            printf("%s  %s — %s\n", status, name, detail);                                         \
-        }                                                                                          \
-    } while (0)
-
-    DOCTOR_EMIT("PASS", "binary", "chaaya executable is running");
-
-#ifdef CHAAYA_HAS_LINENOISE
-    DOCTOR_EMIT("PASS", "linenoise", "built with linenoise");
-#else
-    DOCTOR_EMIT("WARN", "linenoise", "built without linenoise (plain REPL)");
-    warns++;
-#endif
-
-    if (isatty(STDIN_FILENO)) {
-        DOCTOR_EMIT("PASS", "tty", "stdin is a TTY");
-    } else {
-        DOCTOR_EMIT("WARN", "tty", "stdin is not a TTY");
-        warns++;
-    }
-
-    if (path_writable_dir(home) || (getenv("HOME") && getenv("HOME")[0])) {
-        /* home may not exist yet — warn only if CHAAYA_HOME set and missing */
-        if (env && env[0] && !path_writable_dir(home)) {
-            DOCTOR_EMIT("WARN", "chaaya_home", "CHAAYA_HOME is not a writable directory");
-            warns++;
-        } else {
-            DOCTOR_EMIT("PASS", "chaaya_home", home);
-        }
-    } else {
-        DOCTOR_EMIT("FAIL", "home", "HOME is unset");
-        fails++;
-    }
-
-    for (size_t i = 0; i < opts->lib_path_count; i++) {
-        char buf[640];
-        snprintf(buf, sizeof(buf), "%s", opts->lib_paths[i]);
-        if (path_writable_dir(opts->lib_paths[i]) || access(opts->lib_paths[i], R_OK) == 0) {
-            DOCTOR_EMIT("PASS", "lib-path", buf);
-        } else {
-            DOCTOR_EMIT("WARN", "lib-path", buf);
-            warns++;
-        }
-    }
-
-    {
-        ChVM probe_vm;
-        ch_vm_init(&probe_vm);
-#if defined(__APPLE__)
-        const char *libc_probe = "libc.dylib";
-#elif defined(__linux__)
-        const char *libc_probe = "libc.so.6";
-#else
-        const char *libc_probe = NULL;
-#endif
-        if (!libc_probe) {
-            DOCTOR_EMIT("WARN", "ffi", "ffi probe skipped on this platform");
-            warns++;
-        } else {
-            ChValue lib = CH_UNDEFINED;
-            if (ch_ffi_open_library(&probe_vm, libc_probe, &lib) == 0) {
-                (void)ch_ffi_close_library(&probe_vm, lib);
-                DOCTOR_EMIT("PASS", "ffi", libc_probe);
-            } else {
-                char detail[256];
-                snprintf(detail, sizeof(detail), "%s", ch_vm_error(&probe_vm));
-                DOCTOR_EMIT("WARN", "ffi", detail);
-                warns++;
-            }
-        }
-        ch_vm_deinit(&probe_vm);
-    }
-
-    {
-        if (!ch_rt_native_arch_supported()) {
-            DOCTOR_EMIT("WARN", "native-backend",
-                        "unsupported architecture (aarch64/x86_64 only)");
-            warns++;
-        } else {
-            const char *native_cc = getenv("CHAAYA_LLVM_CC");
-            const char *cc = NULL;
-            if (native_cc && native_cc[0] && path_has_executable(native_cc)) {
-                cc = native_cc;
-            } else if (path_has_executable("clang")) {
-                cc = "clang";
-            } else if (path_has_executable("cc")) {
-                cc = "cc";
-            }
-            char rt_lib[PATH_MAX];
-            int have_rt = 0;
-            const char *lib_dir = getenv("CHAAYA_LIB_DIR");
-            if (lib_dir && lib_dir[0]) {
-                snprintf(rt_lib, sizeof(rt_lib), "%s/libchaaya_rt.a", lib_dir);
-                have_rt = access(rt_lib, R_OK) == 0;
-            }
-#ifndef CHAAYA_BUILD_DIR
-#define CHAAYA_BUILD_DIR "."
-#endif
-            if (!have_rt) {
-                snprintf(rt_lib, sizeof(rt_lib), "%s/libchaaya_rt.a", CHAAYA_BUILD_DIR);
-                have_rt = access(rt_lib, R_OK) == 0;
-            }
-            if (!have_rt) {
-                snprintf(rt_lib, sizeof(rt_lib), "%s/build/libchaaya_rt.a", CHAAYA_SOURCE_DIR);
-                have_rt = access(rt_lib, R_OK) == 0;
-            }
-            if (!cc) {
-                DOCTOR_EMIT("WARN", "native-backend", "no C/LLVM compiler in PATH");
-                warns++;
-            } else if (!have_rt) {
-                DOCTOR_EMIT("WARN", "native-backend",
-                            "libchaaya_rt.a not found (build chaaya_rt or set CHAAYA_LIB_DIR)");
-                warns++;
-            } else {
-                char src_path[PATH_MAX];
-                char bin_path[PATH_MAX];
-                snprintf(src_path, sizeof(src_path), "/tmp/chaaya-doctor-rt-%d.c", (int)getpid());
-                snprintf(bin_path, sizeof(bin_path), "/tmp/chaaya-doctor-rt-%d", (int)getpid());
-                FILE *sf = fopen(src_path, "w");
-                int smoke_ok = 0;
-                if (sf) {
-                    fputs("#include <stdint.h>\n"
-                          "uint64_t ch_rt_fixnum_add(uint64_t, uint64_t);\n"
-                          "int main(void) {\n"
-                          "  uint64_t a = 0xFFFD000000000001ULL;\n"
-                          "  uint64_t b = 0xFFFD000000000002ULL;\n"
-                          "  uint64_t r = ch_rt_fixnum_add(a, b);\n"
-                          "  return (r == 0xFFFD000000000003ULL) ? 0 : 1;\n"
-                          "}\n",
-                          sf);
-                    fclose(sf);
-                    char cmd[2048];
-#if defined(__APPLE__)
-                    snprintf(cmd, sizeof(cmd), "%s -O0 -o \"%s\" \"%s\" \"%s\"", cc, bin_path,
-                             src_path, rt_lib);
-#else
-                    snprintf(cmd, sizeof(cmd), "%s -O0 -o \"%s\" \"%s\" \"%s\" -lpthread -ldl -lm",
-                             cc, bin_path, src_path, rt_lib);
-#endif
-                    if (system(cmd) == 0) {
-                        int st = system(bin_path);
-                        smoke_ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
-                    }
-                    unlink(src_path);
-                    unlink(bin_path);
-                }
-                if (smoke_ok) {
-                    DOCTOR_EMIT("PASS", "native-backend", "libchaaya_rt smoke-link ok");
-                } else {
-                    DOCTOR_EMIT("WARN", "native-backend", "libchaaya_rt smoke-link failed");
-                    warns++;
-                }
-            }
-        }
-    }
-
-    if (path_has_executable("thottam")) {
-        DOCTOR_EMIT("PASS", "thottam", "found in PATH");
-    } else {
-        DOCTOR_EMIT("WARN", "thottam", "use Kaappi thottam via --lib-path (not bundled)");
-        warns++;
-    }
-
-    {
-        char cache_dir[PATH_MAX];
-        if (resolve_cli_cache_dir(cache_dir, sizeof(cache_dir)) == 0) {
-            DOCTOR_EMIT("PASS", "cache-dir", cache_dir);
-        } else {
-            DOCTOR_EMIT("WARN", "cache-dir", "could not resolve cache directory");
-            warns++;
-        }
-    }
-
-    if (opts->json) {
-        printf("    {\"status\": \"INFO\", \"name\": \"summary\", \"detail\": \"fails=%d "
-               "warns=%d\"}\n",
-               fails, warns);
-        printf("  ]\n}\n");
-    } else {
-        printf("\n%d fail(s), %d warning(s)\n", fails, warns);
-    }
-#undef DOCTOR_EMIT
-    return fails ? CH_EXIT_ERROR : CH_EXIT_OK;
-}
-
 static ChReadStatus read_cli_datum(ChVM *vm, ChReader *reader, ChValue *out) {
     /* Globals/macros/libraries are marked during GC; no sticky root flood. */
     (void)vm;
@@ -1191,200 +712,8 @@ static int cmd_expand(const char *path, const ChCliOptions *opts) {
     return CH_EXIT_OK;
 }
 
-static int write_fmt_output(const char *path, const char *buf, size_t len) {
-    FILE *f = fopen(path, "wb");
-    if (!f) {
-        fprintf(stderr, "fmt: cannot write '%s'\n", path);
-        return CH_EXIT_ERROR;
-    }
-    if (len > 0 && fwrite(buf, 1, len, f) != len) {
-        fclose(f);
-        fprintf(stderr, "fmt: write error on '%s'\n", path);
-        return CH_EXIT_ERROR;
-    }
-    fclose(f);
-    return CH_EXIT_OK;
-}
-
-static int append_value_array(ChValue **values, size_t *count, size_t *cap, ChValue value) {
-    if (*count >= *cap) {
-        size_t next_cap = *cap ? (*cap * 2) : 16;
-        ChValue *next = (ChValue *)realloc(*values, next_cap * sizeof(ChValue));
-        if (!next) {
-            return -1;
-        }
-        *values = next;
-        *cap = next_cap;
-    }
-    (*values)[(*count)++] = value;
-    return 0;
-}
-
 static int cmd_fmt(const char *path, const ChCliOptions *opts) {
-    size_t src_len = 0;
-    char *src = ch_read_file(path, &src_len);
-    if (!src) {
-        fprintf(stderr, "Error opening file '%s'\n", path);
-        return CH_EXIT_ERROR;
-    }
-
-    ChVM vm;
-    ch_vm_init(&vm);
-    ch_vm_register_primitives(&vm);
-    vm.script_path = path;
-    for (size_t i = 0; i < opts->lib_path_count; i++) {
-        vm.lib_paths[vm.lib_path_count++] = opts->lib_paths[i];
-    }
-
-    char *out_buf = NULL;
-    size_t out_len = 0;
-    FILE *mem = open_memstream(&out_buf, &out_len);
-    if (!mem) {
-        free(src);
-        ch_vm_deinit(&vm);
-        return CH_EXIT_ERROR;
-    }
-
-    ChReader reader;
-    ch_reader_init(&reader, &vm.gc, src, src_len);
-    int rc = CH_EXIT_OK;
-    ChValue *expanded_values = NULL;
-    size_t expanded_count = 0;
-    size_t expanded_cap = 0;
-    ChValue expanded_roots = CH_NIL;
-    ch_gc_push(&vm.gc, &expanded_roots);
-    for (;;) {
-        ChValue v = CH_NIL;
-        ch_gc_push(&vm.gc, &v);
-        ChReadStatus st = read_cli_datum(&vm, &reader, &v);
-        if (st == CH_READ_EOF) {
-            ch_gc_pop(&vm.gc);
-            break;
-        }
-        if (st != CH_READ_OK) {
-            fprintf(stderr, "read error: %s\n", ch_reader_error(&reader));
-            ch_gc_pop(&vm.gc);
-            rc = CH_EXIT_ERROR;
-            break;
-        }
-
-        ChValue expanded = CH_NIL;
-        ch_gc_push(&vm.gc, &expanded);
-        char err[256];
-        if (ch_expand_toplevel(&vm, v, &expanded, err, sizeof(err)) != CH_EXPAND_OK) {
-            fprintf(stderr, "fmt error: %s\n", err);
-            ch_gc_pop_n(&vm.gc, 2);
-            rc = CH_EXIT_ERROR;
-            break;
-        }
-        if (expanded != CH_VOID) {
-            if (append_value_array(&expanded_values, &expanded_count, &expanded_cap, expanded) != 0) {
-                fprintf(stderr, "fmt: out of memory while collecting expanded values\n");
-                ch_gc_pop_n(&vm.gc, 2);
-                rc = CH_EXIT_ERROR;
-                break;
-            }
-            ChValue keep = expanded;
-            ch_gc_push(&vm.gc, &keep);
-            expanded_roots = ch_gc_cons(&vm.gc, keep, expanded_roots);
-            ch_gc_pop(&vm.gc);
-            ch_print_value(mem, expanded, false);
-            fputc('\n', mem);
-        }
-        ch_gc_pop_n(&vm.gc, 2);
-    }
-    fclose(mem);
-
-    if (rc == CH_EXIT_OK) {
-        ChValue *reparsed_values = NULL;
-        size_t reparsed_count = 0;
-        size_t reparsed_cap = 0;
-        ChValue reparsed_roots = CH_NIL;
-        ch_gc_push(&vm.gc, &reparsed_roots);
-
-        ChReader out_reader;
-        ch_reader_init(&out_reader, &vm.gc, out_buf ? out_buf : "", out_len);
-        for (;;) {
-            ChValue v = CH_NIL;
-            ch_gc_push(&vm.gc, &v);
-            ChReadStatus st = read_cli_datum(&vm, &out_reader, &v);
-            if (st == CH_READ_EOF) {
-                ch_gc_pop(&vm.gc);
-                break;
-            }
-            if (st != CH_READ_OK) {
-                fprintf(stderr, "fmt: formatted output is not readable: %s\n", ch_reader_error(&out_reader));
-                ch_gc_pop(&vm.gc);
-                rc = CH_EXIT_ERROR;
-                break;
-            }
-            if (append_value_array(&reparsed_values, &reparsed_count, &reparsed_cap, v) != 0) {
-                fprintf(stderr, "fmt: out of memory while re-reading formatted output\n");
-                ch_gc_pop(&vm.gc);
-                rc = CH_EXIT_ERROR;
-                break;
-            }
-            ChValue keep = v;
-            ch_gc_push(&vm.gc, &keep);
-            reparsed_roots = ch_gc_cons(&vm.gc, keep, reparsed_roots);
-            ch_gc_pop(&vm.gc);
-            ch_gc_pop(&vm.gc);
-        }
-
-        if (rc == CH_EXIT_OK) {
-            if (expanded_count != reparsed_count) {
-                fprintf(stderr,
-                        "fmt: round-trip mismatch for %s (expanded=%zu, reparsed=%zu)\n",
-                        path, expanded_count, reparsed_count);
-                rc = CH_EXIT_ERROR;
-            } else {
-                for (size_t i = 0; i < expanded_count; i++) {
-                    if (!ch_equal(expanded_values[i], reparsed_values[i])) {
-                        fprintf(stderr, "fmt: round-trip mismatch for %s\n", path);
-                        rc = CH_EXIT_ERROR;
-                        break;
-                    }
-                }
-            }
-        }
-
-        ch_gc_pop(&vm.gc);
-        free(reparsed_values);
-    }
-
-    if (rc == CH_EXIT_OK) {
-        if (opts->flag_fmt_check) {
-            size_t compare_len = src_len;
-            while (compare_len > 0 && (src[compare_len - 1] == '\n' || src[compare_len - 1] == '\r')) {
-                compare_len--;
-            }
-            size_t formatted_len = out_len;
-            while (formatted_len > 0 &&
-                   (out_buf[formatted_len - 1] == '\n' || out_buf[formatted_len - 1] == '\r')) {
-                formatted_len--;
-            }
-            if (compare_len != formatted_len || memcmp(src, out_buf, compare_len) != 0) {
-                fprintf(stderr, "fmt: %s would be reformatted\n", path);
-                rc = CH_EXIT_ERROR;
-            } else {
-                printf("fmt: ok %s\n", path);
-            }
-        } else if (opts->output) {
-            rc = write_fmt_output(opts->output, out_buf, out_len);
-        } else {
-            rc = write_fmt_output(path, out_buf, out_len);
-            if (rc == CH_EXIT_OK) {
-                printf("fmt: wrote %s\n", path);
-            }
-        }
-    }
-
-    ch_gc_pop(&vm.gc);
-    free(expanded_values);
-    free(out_buf);
-    free(src);
-    ch_vm_deinit(&vm);
-    return rc;
+    return ch_fmt_file(path, opts->flag_fmt_check, opts->output);
 }
 
 static void report_reader_diag(const char *path, const char *src, size_t len, const ChReader *reader) {
@@ -2235,7 +1564,7 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
     case CH_CMD_FEATURES:
         return cmd_features(opts);
     case CH_CMD_DOCTOR:
-        return cmd_doctor(opts);
+        return ch_doctor_run(opts);
     case CH_CMD_LSP:
         return ch_lsp_run_stdio();
     case CH_CMD_WASM:
@@ -2262,6 +1591,9 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
         }
         return cmd_check(opts->file, opts);
     case CH_CMD_EXPLAIN:
+        if (opts->explain_all) {
+            return ch_diag_explain_all(opts->json);
+        }
         if (!opts->explain_code) {
             fprintf(stderr, "explain: missing diagnostic code\n");
             usage_hint(argv0);
@@ -2326,7 +1658,17 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
     }
 
     int rc;
-    if (opts->file) {
+    const char *emit_path = ch_test_worker_emit_path();
+    if (emit_path && opts->file) {
+        /* Auto-add bundled lib/ when worker has no --lib-path (SRFI-64). */
+        if (opts->lib_path_count == 0) {
+            static const char *bundled_lib = CHAAYA_SOURCE_DIR "/lib";
+            opts->lib_paths[0] = bundled_lib;
+            opts->lib_path_count = 1;
+            apply_opts_to_vm(&vm, opts);
+        }
+        rc = ch_test_run_worker_file(&vm, opts->file, emit_path);
+    } else if (opts->file) {
         rc = run_file(&vm, opts, opts->file);
     } else if (isatty(STDIN_FILENO)) {
         rc = ch_repl_run(&vm);

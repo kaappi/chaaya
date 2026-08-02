@@ -1,5 +1,8 @@
 #include "chaaya/vm.h"
 
+#include "chaaya/coverage.h"
+#include "chaaya/profile.h"
+
 #include "chaaya/features.h"
 #include "chaaya/fiber.h"
 #include "chaaya/ffi.h"
@@ -1039,9 +1042,16 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
         vm->native_was_tail = was_tail;
         vm->continuation_invoked = false;
         vm->has_pending_call = false;
+        if (n->name) {
+            ch_profile_enter(n->name);
+            ch_coverage_hit("native", n->name);
+        }
         size_t roots = push_gc_roots(vm);
         ChValue result = n->fn(vm, args, nargs);
         pop_gc_roots_n(vm, roots);
+        if (n->name) {
+            ch_profile_leave(n->name);
+        }
         vm->native_was_tail = saved_native_was_tail;
         if (vm->fiber_parked) {
             vm->has_pending_call = false;
@@ -1194,6 +1204,19 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
 
     ChClosure *cl = ch_as_closure(callee);
     ChFunction *fn = cl->fn;
+    if (ch_profile_enabled() || ch_coverage_enabled()) {
+        const char *cname = "<lambda>";
+        for (size_t g = 0; g < vm->global_count; g++) {
+            if (vm->globals[g].defined && ch_eqv(vm->globals[g].value, callee)) {
+                cname = vm->globals[g].name->name;
+                break;
+            }
+        }
+        ch_profile_enter(cname);
+        ch_coverage_hit("scheme", cname);
+        /* Leave is approximate: profile depth tracks nested calls of same name. */
+        ch_profile_leave(cname);
+    }
     int fixed = fn->arity;
     if (fn->variadic) {
         if (nargs < fixed) {

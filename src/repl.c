@@ -138,7 +138,8 @@ static void print_comma_help(void) {
     puts("  ,apropos <text>   Search global bindings");
     puts("  ,describe <name>  Describe a global binding");
     puts("");
-    puts("Other Kaappi comma-commands (,profile, …) are not implemented yet.");
+    puts("Other: ,condition <id> <expr> sets a breakpoint condition by id.");
+    puts(",profile is not implemented yet (use CLI --profile).");
 }
 
 static int g_debug_continue = 0;
@@ -352,8 +353,13 @@ static int debug_break_hook(ChVM *vm, const char *name) {
         return 0;
     }
 
+    vm->debug_inspect_frame = 0;
     if (name && name[0]) {
-        printf("; paused at %s\n", name);
+        if (vm->script_path && vm->error_line > 0) {
+            printf("; paused at %s (%s:%d)\n", name, vm->script_path, vm->error_line);
+        } else {
+            printf("; paused at %s\n", name);
+        }
     }
     debug_print_watches(vm);
 
@@ -442,8 +448,23 @@ static int debug_break_hook(ChVM *vm, const char *name) {
             if (vm->frame_count == 0) {
                 puts("; no frames");
             } else {
-                ChCallFrame *fr = &vm->frames[vm->frame_count - 1];
-                printf("; frame regs=%u base=%zu\n", (unsigned)fr->num_regs, fr->reg_base);
+                if (vm->debug_inspect_frame >= vm->frame_count) {
+                    vm->debug_inspect_frame = 0;
+                }
+                size_t idx = vm->frame_count - 1 - vm->debug_inspect_frame;
+                ChCallFrame *fr = &vm->frames[idx];
+                const char *fname = "<thunk>";
+                if (fr->closure && fr->closure->fn) {
+                    ChValue clv = ch_make_pointer(&fr->closure->header);
+                    for (size_t g = 0; g < vm->global_count; g++) {
+                        if (vm->globals[g].defined && ch_eqv(vm->globals[g].value, clv)) {
+                            fname = vm->globals[g].name->name;
+                            break;
+                        }
+                    }
+                }
+                printf("; frame #%zu %s regs=%u base=%zu\n", vm->debug_inspect_frame, fname,
+                       (unsigned)fr->num_regs, fr->reg_base);
                 for (uint8_t r = 0; r < fr->num_regs && r < 16; r++) {
                     printf(";   r%u = ", (unsigned)r);
                     ch_print_value(stdout, vm->regs[fr->reg_base + r], false);
@@ -452,8 +473,26 @@ static int debug_break_hook(ChVM *vm, const char *name) {
             }
             continue;
         }
-        if (strcmp(cmd, ",up") == 0 || strcmp(cmd, ",down") == 0) {
-            puts("; frame navigation: use ,backtrace (single-frame focus MVP)");
+        if (strcmp(cmd, ",up") == 0) {
+            if (vm->frame_count == 0) {
+                puts("; no frames");
+            } else if (vm->debug_inspect_frame + 1 >= vm->frame_count) {
+                puts("; already at outermost frame");
+            } else {
+                vm->debug_inspect_frame++;
+                printf("; frame #%zu\n", vm->debug_inspect_frame);
+            }
+            continue;
+        }
+        if (strcmp(cmd, ",down") == 0) {
+            if (vm->frame_count == 0) {
+                puts("; no frames");
+            } else if (vm->debug_inspect_frame == 0) {
+                puts("; already at innermost frame");
+            } else {
+                vm->debug_inspect_frame--;
+                printf("; frame #%zu\n", vm->debug_inspect_frame);
+            }
             continue;
         }
         if (strcmp(cmd, ",quit") == 0 || strcmp(cmd, ",abort") == 0) {
@@ -921,8 +960,39 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
         return 0;
     }
 
+    if (strncmp(cmd, ",condition", 10) == 0 && (cmd[10] == '\0' || cmd[10] == ' ')) {
+        char *rest = trim_left(cmd + 10);
+        if (!rest[0]) {
+            fprintf(stderr, ",condition: usage ,condition <id> <expr>\n");
+            return 0;
+        }
+        char *endptr = NULL;
+        long id = strtol(rest, &endptr, 10);
+        if (!endptr || endptr == rest || id <= 0) {
+            fprintf(stderr, ",condition: expected breakpoint id\n");
+            return 0;
+        }
+        char *expr = trim_left(endptr);
+        if (!expr[0]) {
+            fprintf(stderr, ",condition: missing expression\n");
+            return 0;
+        }
+        size_t idx = (size_t)(id - 1);
+        if (idx >= vm->breakpoint_count) {
+            fprintf(stderr, ",condition: no breakpoint %ld\n", id);
+            return 0;
+        }
+        if (snprintf(g_break_conditions[idx], CH_REPL_MAX_BREAK_COND, "%s", expr) >=
+            CH_REPL_MAX_BREAK_COND) {
+            fprintf(stderr, ",condition: expression too long\n");
+            return 0;
+        }
+        printf("; breakpoint %ld condition: %s\n", id, expr);
+        return 0;
+    }
+
     /* Known Kaappi commands not yet supported */
-    static const char *nyi[] = {",condition", ",profile", NULL};
+    static const char *nyi[] = {",profile", NULL};
     for (int i = 0; nyi[i]; i++) {
         size_t n = strlen(nyi[i]);
         if (strncmp(cmd, nyi[i], n) == 0 && (cmd[n] == '\0' || cmd[n] == ' ')) {

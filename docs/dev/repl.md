@@ -31,20 +31,26 @@ The variable `_` holds the last non-void result.
 | `,gc` | Object count / collections |
 | `,env [prefix]` | List defined globals |
 | `,time <expr>` | Eval and print elapsed ms |
+| `,type <expr>` | Print value type name |
 | `,expand <expr>` | Macro-expand and print |
 | `,import <lib>` | Import a library (e.g. `,import (srfi 64)`) |
 | `,dis <expr>` | Disassemble a procedure's bytecode |
-| `,break <name>` | Break when calling named procedure (pauses at `debug>`) |
+| `,apropos <text>` | Search global bindings |
+| `,describe <name>` | Describe a global binding |
+| `,break <name> [if <expr>]` | Break on named procedure (optional condition) |
+| `,condition <id> <expr>` | Set/update breakpoint condition by id |
 | `,breakpoints` | List breakpoints |
 | `,delete <name>` | Remove breakpoint |
+| `,watch <expr>` / `,unwatch` | Debugger watch expressions |
 | `,step <expr>` | Eval; pause on next call |
 | `,continue` / `,backtrace` / `,locals` | Debugger commands at `debug>` |
+| `,up` / `,down` | Navigate call frames at `debug>` |
 
 At a breakpoint the REPL enters a nested `debug>` prompt (`,continue`, `,step`,
-`,next`, `,finish`, `,backtrace`, `,locals`, `,quit`).
+`,next`, `,finish`, `,backtrace`, `,locals`, `,up`, `,down`, `,watch`, `,quit`).
+Pause banners include `source:line` when available.
 
-Other Kaappi comma-commands (`,profile`, `,describe`, `,apropos`, …) print a
-not-implemented message.
+`,profile` is still not implemented (use CLI `--profile`).
 
 ## Key files
 

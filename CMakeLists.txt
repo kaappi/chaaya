@@ -34,6 +34,7 @@ add_library(chaaya_core STATIC
   src/library.c
   src/features.c
   src/diagnostics.c
+  src/doctor.c
   src/fiber.c
   src/reactor.c
   src/thread.c
@@ -74,6 +75,8 @@ add_library(chaaya_core STATIC
   src/cache.c
   src/disasm.c
   src/timings.c
+  src/test_runner.c
+  src/fmt.c
   src/cli.c
   src/repl.c
   src/sandbox.c
@@ -624,6 +627,15 @@ add_test(NAME cli_fmt_check
     -DCHAAYA=$<TARGET_FILE:chaaya>
     -DINPUT=${CMAKE_SOURCE_DIR}/tests/cli/fmt_ok.scm
     -P ${CMAKE_SOURCE_DIR}/tests/cli/run_fmt_check.cmake
+)
+
+add_test(NAME cli_test_json
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -DLIB_PATH=${CMAKE_SOURCE_DIR}/lib
+    -DPASS_FILE=${CMAKE_SOURCE_DIR}/tests/cli/test_srfi64_pass.scm
+    -DFAIL_FILE=${CMAKE_SOURCE_DIR}/tests/cli/test_srfi64_fail.scm
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/run_test_json.cmake
 )
 
 add_test(NAME cli_compile_mvp

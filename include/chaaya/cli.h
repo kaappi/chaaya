@@ -71,6 +71,10 @@ typedef struct ChCliOptions {
     int test_seed_set;
     unsigned test_seed;
     int test_json;
+    int test_changed;
+    int test_list_affected;
+    const char *test_since; /* default HEAD when selecting */
+    int explain_all;        /* explain --all */
     const char *nyi_flag; /* first not-yet-implemented flag name seen */
 } ChCliOptions;
 

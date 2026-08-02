@@ -114,6 +114,9 @@ void ch_diag_report_simple(FILE *out, const char *file, int line, int column, Ch
 /* chaaya explain <code> — static, no VM. Returns process exit code. */
 int ch_diag_explain(const char *code_or_name, int json);
 
+/* chaaya explain --all [--json] — dump the full diagnostic registry. */
+int ch_diag_explain_all(int json);
+
 /* Classify a free-form runtime/compiler message into a best-effort code. */
 ChDiagCode ch_diag_classify_message(const char *msg, ChDiagStage fallback_stage);
 

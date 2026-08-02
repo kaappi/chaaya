@@ -149,6 +149,13 @@ typedef struct ChVM {
     int (*debug_break_hook)(struct ChVM *vm, const char *name);
     /* Step modes after a pause: 0=none, 1=step into next call. */
     int debug_step_mode;
+    /* Frame inspection cursor for ,up/,down (0 = innermost). */
+    size_t debug_inspect_frame;
+
+    /* `chaaya test` worker: swallow (exit) so results can still be emitted. */
+    bool suppress_exit;
+    bool exit_requested;
+    uint8_t exit_code;
 } ChVM;
 
 void ch_vm_init(ChVM *vm);

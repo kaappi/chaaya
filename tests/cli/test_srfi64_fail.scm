@@ -1,0 +1,5 @@
+(import (scheme base) (srfi 64))
+(test-begin "cli-srfi64-fail")
+(test-eq "intentional-fail" 2 (+ 1 0))
+(test-end "cli-srfi64-fail")
+(exit 1)

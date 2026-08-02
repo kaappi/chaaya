@@ -1,6 +1,7 @@
 #include "chaaya/library.h"
 
 #include "chaaya/compiler.h"
+#include "chaaya/coverage.h"
 #include "chaaya/eval.h"
 #include "chaaya/expander.h"
 #include "chaaya/features.h"
@@ -45,14 +46,22 @@ int ch_library_register(ChLibraryRegistry *reg, ChLibrary *lib) {
                 free(existing->runtime_env);
                 free(existing);
                 reg->libs[i] = lib;
-                return 0;
+                break;
+            }
+        }
+    } else {
+        if (reg->count >= CH_LIB_MAX_LIBS) {
+            return -1;
+        }
+        reg->libs[reg->count++] = lib;
+    }
+    if (ch_coverage_enabled() && lib) {
+        for (size_t i = 0; i < lib->export_count; i++) {
+            if (lib->export_names[i]) {
+                ch_coverage_register(lib->name, lib->export_names[i]->name);
             }
         }
     }
-    if (reg->count >= CH_LIB_MAX_LIBS) {
-        return -1;
-    }
-    reg->libs[reg->count++] = lib;
     return 0;
 }
 

@@ -440,3 +440,28 @@ int ch_diag_explain(const char *code_or_name, int json) {
     printf("  example:    %s\n", info->example);
     return CH_EXIT_OK;
 }
+
+int ch_diag_explain_all(int json) {
+    if (json) {
+        printf("{\"diagnostics\":[\n");
+        for (int i = 0; i < CH_DIAG_REGISTRY_LEN; i++) {
+            char codebuf[16];
+            snprintf(codebuf, sizeof(codebuf), "CH%04d", (int)g_registry[i].code);
+            if (i) {
+                fputs(",\n", stdout);
+            }
+            printf("  {\"code\":\"%s\",\"name\":\"%s\",\"severity\":\"%s\",\"message\":\"%s\"}",
+                   codebuf, g_registry[i].name,
+                   g_registry[i].severity == CH_DIAG_SEVERITY_WARNING ? "warning" : "error",
+                   g_registry[i].message);
+        }
+        printf("\n]}\n");
+        return CH_EXIT_OK;
+    }
+    for (int i = 0; i < CH_DIAG_REGISTRY_LEN; i++) {
+        char codebuf[16];
+        snprintf(codebuf, sizeof(codebuf), "CH%04d", (int)g_registry[i].code);
+        printf("%s  %s  %s\n", codebuf, g_registry[i].name, g_registry[i].message);
+    }
+    return CH_EXIT_OK;
+}

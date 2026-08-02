@@ -17,7 +17,9 @@ Open bugs belong in the issue tracker.
 | [architecture.md](architecture.md) | Pipeline, values, GC, bytecode VM, source layout, roadmap seams |
 | [backends.md](backends.md) | LLVM `--native` stub, WASM target option (`CHAAYA_WASM`), current backend limits |
 | [c23.md](c23.md) | C23 standard policy, features vs C17, patterns to leverage |
-| [cli.md](cli.md) | CLI help shape, exit codes, implemented vs stubbed commands |
+| [cli.md](cli.md) | CLI help shape, exit codes, implemented tooling |
+| [test.md](test.md) | `chaaya test` SRFI-64 runner, JSON worker protocol |
+| [fmt.md](fmt.md) | Comment-preserving CST formatter |
 | [diagnostics.md](diagnostics.md) | Stable `CH` codes, `--diagnostics`, `explain` |
 | [ir.md](ir.md) | Tree IR: node kinds, lower/analyze/optimize/emit, safety gates |
 | [repl.md](repl.md) | REPL prompts, multiline, comma-commands, history |

@@ -782,7 +782,6 @@ static ChValue prim_boolean_eq(ChVM *vm, ChValue *args, int nargs) {
 }
 
 static ChValue prim_exit(ChVM *vm, ChValue *args, int nargs) {
-    (void)vm;
     int code = 0;
     if (nargs >= 1) {
         if (ch_is_fixnum(args[0])) {
@@ -792,6 +791,11 @@ static ChValue prim_exit(ChVM *vm, ChValue *args, int nargs) {
         } else if (args[0] != CH_TRUE) {
             code = 1;
         }
+    }
+    if (vm->suppress_exit) {
+        vm->exit_requested = true;
+        vm->exit_code = (uint8_t)(code & 0xFF);
+        return CH_VOID;
     }
     exit(code);
     return CH_VOID; /* unreachable */
