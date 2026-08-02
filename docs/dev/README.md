@@ -25,6 +25,7 @@ Open bugs belong in the issue tracker.
 | [repl.md](repl.md) | REPL prompts, multiline, comma-commands, history |
 | [scheme-tests.md](scheme-tests.md) | Bootstrap suites, probes, deferred Kaappi/R7RS |
 | [srfi-import-audit.md](srfi-import-audit.md) | Portable `lib/srfi/*.sld` import probe results |
+| [TODO.md](../TODO.md) | Remaining unwired smokes, SRFI import failures, Phase 11+ backlog |
 | [thottam.md](thottam.md) | How to use sibling Kaappi thottam with Chaaya `--lib-path` |
 
 ## Design decisions

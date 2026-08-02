@@ -107,6 +107,7 @@ Contributor documentation lives in [docs/dev/](docs/dev/):
 - [CLI](docs/dev/cli.md) — help shape, exit codes, stubs
 - [REPL](docs/dev/repl.md) — prompts, comma-commands, history
 - [Scheme tests](docs/dev/scheme-tests.md) — bootstrap suites, probes, deferred Kaappi/R7RS
+- [TODO](docs/TODO.md) — remaining unwired smokes, SRFI import failures, Phase 11+ backlog
 - [Thottam](docs/dev/thottam.md) — using sibling Kaappi thottam with Chaaya
 
 ## License
