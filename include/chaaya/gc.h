@@ -56,6 +56,8 @@ typedef struct ChGC {
     ChValue *extra_roots;
     size_t extra_root_count;
     size_t extra_root_cap;
+    /* >0 suppresses automatic collection (deep-copy walks, etc.). */
+    unsigned no_collect;
 } ChGC;
 
 void ch_gc_init(ChGC *gc);

@@ -357,6 +357,13 @@ ChValue ch_vm_raise(ChVM *vm, ChValue obj, int continuable) {
         return CH_UNDEFINED;
     }
     if (vm->handler_count == 0) {
+        /* Preserve the original condition on the running fiber so fiber-join
+         * can re-raise it in the joiner's handler context (#564). */
+        if (vm->fiber_runtime && ch_is_fiber(vm->fiber_runtime->current)) {
+            ChFiber *fiber = ch_as_fiber(vm->fiber_runtime->current);
+            fiber->error = obj;
+            ch_gc_write_barrier(&vm->gc, &fiber->header, obj);
+        }
         char *printed = ch_value_to_string(obj, false);
         snprintf(vm->error, sizeof(vm->error), "uncaught exception: %s",
                  printed ? printed : "#<unknown>");
@@ -1518,7 +1525,15 @@ ChVMStatus ch_vm_apply(ChVM *vm, ChValue proc, ChValue *args, int nargs, ChValue
         }
         break;
     }
-    *out = vm->regs[base];
+    /* Top-level RETURN (frame_count hit 0) stores into vm->result and does not
+     * write regs[base]. Prefer that when the apply window is empty — otherwise
+     * multi-local returns (e.g. second formal) are lost and OS-thread joins
+     * see the wrong value (#801 / named-let across thread-start!). */
+    if (vm->frame_count == 0) {
+        *out = vm->result;
+    } else {
+        *out = vm->regs[base];
+    }
     vm->reg_top = compute_reg_top(vm);
     vm->native_reentry_depth--;
     return CH_VM_OK;

@@ -657,6 +657,9 @@ chaaya_kaappi_deferred_test(smoke_percent_name_user_library_1856 tests/scheme/ka
 # Batch 14 smoke (growable handler/wind stacks + escape-only call/ec)
 chaaya_kaappi_deferred_test(smoke_handler_wind_depth_1886 tests/scheme/kaappi-deferred/smoke/handler-wind-depth-1886.scm)
 chaaya_kaappi_deferred_test(smoke_gc_rooting_safety tests/scheme/kaappi-deferred/smoke/gc-rooting-safety.scm)
+# Batch 15 smoke (fiber error isolation + deep-copy GC pause — 2026-08-02)
+chaaya_kaappi_deferred_test(smoke_fiber_error_handling tests/scheme/kaappi-deferred/smoke/fiber-error-handling.scm)
+chaaya_kaappi_deferred_test(smoke_deep_copy_list_801 tests/scheme/kaappi-deferred/smoke/deep-copy-list-801.scm)
 # nested-wait-under-sleep-dirty-snapshot-1490.scm: passes in isolation but
 # times out under parallel ctest load (contended scheduler timing) — a
 # cross-thread scheduler race, not a quick fix; left unwired (see

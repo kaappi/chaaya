@@ -10,23 +10,28 @@ Sources: [scheme-tests.md](dev/scheme-tests.md),
 
 ---
 
-## Unwired kaappi-deferred smokes (21)
+## Unwired kaappi-deferred smokes (19)
 
-Non-backend corpus is **236/257** wired (~92%). Wire only after local green +
+Non-backend corpus is **238/257** wired (~93%). Wire only after local green +
 `make test`. Permanently skipped: `jit-*.scm` / `llvm-*.scm` (no JIT/LLVM
 backend in Chaaya).
 
-### Fiber / thread scheduler races & capacity (15)
+### Fiber / thread scheduler races & capacity (13)
 
 Deep scheduler/dispatch work — not quick fixes. Prefer isolation green before
 CTest; `nested-wait-under-sleep-dirty-snapshot-1490` passes alone but times
 out under parallel `ctest -j`.
 
+Batch 15 wired `fiber-error-handling` (isolate joiner handlers during fiber
+run; stash/re-raise conditions on join — #564/#565; natives via #1155
+trampoline) and `deep-copy-list-801` (`ChGC.no_collect` around deep-copy walk
++ `ch_vm_apply` top-level `vm->result` delivery).
+
 - [ ] `fiber-blocked-exit`
 - [ ] `fiber-channel-receive-waits-out-peer-sleep`
 - [ ] `fiber-channel-rendezvous`
-- [ ] `fiber-dispatch-blocked-siblings`
-- [ ] `fiber-error-handling`
+- [ ] `fiber-dispatch-blocked-siblings` — locally green in isolation; left
+  unwired pending parallel `ctest -j` soak (sibling of other race-prone files)
 - [ ] `fiber-many-waiters-one-object-1530`
 - [ ] `fiber-pipeline`
 - [ ] `fiber-thread-join-deadline-cleared-after-resolve`
@@ -36,7 +41,8 @@ out under parallel `ctest -j`.
 - [ ] `nested-wait-under-sleep-dirty-snapshot-1490`
 - [ ] `thread-foreign-owner-1484`
 - [ ] `thread-port-isolation`
-- [ ] `deep-copy-list-801`
+- [x] `fiber-error-handling` — Batch 15
+- [x] `deep-copy-list-801` — Batch 15
 
 ### SRFI-170 POSIX primitives (0 remaining)
 

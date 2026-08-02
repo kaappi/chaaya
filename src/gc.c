@@ -1007,7 +1007,7 @@ void ch_gc_promote_to_old(ChGC *gc, ChObject *obj) {
 }
 
 void *ch_gc_alloc(ChGC *gc, size_t size, ChObjectTag tag) {
-    if (gc->alloc_count >= gc->threshold) {
+    if (gc->no_collect == 0 && gc->alloc_count >= gc->threshold) {
         ch_gc_collect_minor(gc);
         if (gc->major_interval != 0 &&
             (gc->minor_collections % (size_t)gc->major_interval) == 0) {

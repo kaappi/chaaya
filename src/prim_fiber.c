@@ -263,10 +263,40 @@ static ChValue prim_channel_p(ChVM *vm, ChValue *args, int nargs) {
     return ch_is_channel(args[0]) ? CH_TRUE : CH_FALSE;
 }
 
+/* Re-raise a failed fiber's stashed condition in the joiner's handler
+ * context (#564). Strings become error-objects so guard/error-object?
+ * see a proper condition. */
+static ChValue raise_fiber_join_error(ChVM *vm, ChFiber *fiber) {
+    ChValue err = fiber->error;
+    if (ch_is_error_object(err)) {
+        vm->error[0] = '\0';
+        return ch_vm_raise(vm, err, 0);
+    }
+    if (ch_is_string(err)) {
+        ch_gc_push(&vm->gc, &err);
+        ChValue obj = ch_gc_make_error_object(&vm->gc, err, CH_NIL, 0);
+        ch_gc_pop(&vm->gc);
+        vm->error[0] = '\0';
+        return ch_vm_raise(vm, obj, 0);
+    }
+    if (err != CH_NIL && err != CH_UNDEFINED) {
+        vm->error[0] = '\0';
+        return ch_vm_raise(vm, err, 0);
+    }
+    if (vm->error[0] == '\0') {
+        snprintf(vm->error, sizeof(vm->error), "fiber-join: fiber failed");
+    }
+    return CH_UNDEFINED;
+}
+
 static ChValue prim_fiber_join(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
+    ChValue fiber_v = args[0];
     ChValue result = CH_UNDEFINED;
-    if (ch_fiber_join(vm, args[0], &result) != 0) {
+    if (ch_fiber_join(vm, fiber_v, &result) != 0) {
+        if (ch_is_fiber(fiber_v) && ch_as_fiber(fiber_v)->state == CH_FIBER_FAILED) {
+            return raise_fiber_join_error(vm, ch_as_fiber(fiber_v));
+        }
         return CH_UNDEFINED;
     }
     return result;
@@ -294,8 +324,12 @@ static ChValue prim_thread_start(ChVM *vm, ChValue *args, int nargs) {
 
 static ChValue prim_thread_join(ChVM *vm, ChValue *args, int nargs) {
     if (nargs <= 1) {
+        ChValue thread = args[0];
         ChValue result = CH_UNDEFINED;
-        if (ch_thread_join(vm, args[0], &result) != 0) {
+        if (ch_thread_join(vm, thread, &result) != 0) {
+            if (ch_is_fiber(thread) && ch_as_fiber(thread)->state == CH_FIBER_FAILED) {
+                return raise_fiber_join_error(vm, ch_as_fiber(thread));
+            }
             return CH_UNDEFINED;
         }
         return result;

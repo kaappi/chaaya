@@ -692,7 +692,11 @@ ChValue ch_gc_deep_copy(ChGC *dest, ChValue src) {
         return dc_reject(dest, "deep-copy: out of memory");
     }
 
+    /* In-progress dest objects are not on the root stack; suppress GC for the
+     * walk so a long list spine cannot be collected mid-copy (#801). */
+    dest->no_collect++;
     ChValue out = dc_copy_value(dest, src, &vis);
+    dest->no_collect--;
     dc_visited_deinit(&vis);
     return out;
 }

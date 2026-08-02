@@ -2,6 +2,7 @@
 
 #include "fiber_internal.h"
 
+#include "chaaya/opcode.h"
 #include "chaaya/shared_channel.h"
 #include "chaaya/vm.h"
 
@@ -33,6 +34,98 @@ static void free_snapshot(ChFiberSnapshot *snap) {
     free(snap->parameter_bindings);
     free(snap->open_uvs);
     memset(snap, 0, sizeof(*snap));
+}
+
+/* Joiner's dynamic stacks, saved around a nested fiber dispatch so the
+ * fiber cannot see (or escape into) the joiner's exception handlers. */
+typedef struct ParentDynamic {
+    ChExceptionHandler *handlers;
+    size_t handler_count;
+    ChWindRecord *winds;
+    size_t wind_count;
+    ChParameterBinding *params;
+    size_t param_count;
+    int active;
+} ParentDynamic;
+
+static void parent_dynamic_clear(ParentDynamic *p) {
+    if (!p) {
+        return;
+    }
+    free(p->handlers);
+    free(p->winds);
+    free(p->params);
+    memset(p, 0, sizeof(*p));
+}
+
+static int parent_dynamic_save(ChVM *vm, ParentDynamic *out) {
+    memset(out, 0, sizeof(*out));
+    out->handler_count = vm->handler_count;
+    out->wind_count = vm->wind_count;
+    out->param_count = vm->parameter_count;
+    if (out->handler_count > 0) {
+        out->handlers =
+            (ChExceptionHandler *)alloc_or_abort(out->handler_count, sizeof(ChExceptionHandler));
+        memcpy(out->handlers, vm->handler_stack,
+               out->handler_count * sizeof(ChExceptionHandler));
+    }
+    if (out->wind_count > 0) {
+        out->winds = (ChWindRecord *)alloc_or_abort(out->wind_count, sizeof(ChWindRecord));
+        memcpy(out->winds, vm->wind_stack, out->wind_count * sizeof(ChWindRecord));
+    }
+    if (out->param_count > 0) {
+        out->params =
+            (ChParameterBinding *)alloc_or_abort(out->param_count, sizeof(ChParameterBinding));
+        memcpy(out->params, vm->parameter_stack,
+               out->param_count * sizeof(ChParameterBinding));
+    }
+    out->active = 1;
+    return 0;
+}
+
+static int parent_dynamic_restore(ChVM *vm, ParentDynamic *saved) {
+    if (!saved || !saved->active) {
+        return 0;
+    }
+    if (ch_vm_ensure_handler_capacity(vm, saved->handler_count) != 0 ||
+        ch_vm_ensure_wind_capacity(vm, saved->wind_count) != 0) {
+        parent_dynamic_clear(saved);
+        return -1;
+    }
+    if (saved->param_count > CH_VM_MAX_PARAMETER_BINDINGS) {
+        parent_dynamic_clear(saved);
+        return -1;
+    }
+    if (saved->handler_count > 0) {
+        memcpy(vm->handler_stack, saved->handlers,
+               saved->handler_count * sizeof(ChExceptionHandler));
+    }
+    vm->handler_count = saved->handler_count;
+    if (saved->wind_count > 0) {
+        memcpy(vm->wind_stack, saved->winds, saved->wind_count * sizeof(ChWindRecord));
+    }
+    vm->wind_count = saved->wind_count;
+    if (saved->param_count > 0) {
+        memcpy(vm->parameter_stack, saved->params,
+               saved->param_count * sizeof(ChParameterBinding));
+    }
+    vm->parameter_count = saved->param_count;
+    parent_dynamic_clear(saved);
+    return 0;
+}
+
+/* Mark fiber failed; keep a condition already stashed by ch_vm_raise. */
+static void fiber_mark_failed(ChVM *vm, ChFiber *fiber, const char *fallback_msg) {
+    fiber->state = CH_FIBER_FAILED;
+    fiber->result = CH_UNDEFINED;
+    if (fiber->error == CH_NIL || fiber->error == CH_UNDEFINED) {
+        const char *msg = (vm->error[0] != '\0') ? vm->error : fallback_msg;
+        fiber->error = ch_gc_make_string_cstr(&vm->gc, msg);
+        ch_gc_write_barrier(&vm->gc, &fiber->header, fiber->error);
+    }
+    /* Joiner re-raises from fiber->error; clear C-level error so the
+     * failure is not treated as an uncatchable scheduler abort. */
+    vm->error[0] = '\0';
 }
 
 int enqueue_ready_fiber(ChFiberRuntime *runtime, ChValue fiber_v) {
@@ -425,6 +518,8 @@ static int run_fiber_to_park_or_done(ChVM *vm, ChValue fiber_v) {
 
     ChValue result = CH_VOID;
     ChVMStatus st;
+    ParentDynamic parent = {0};
+    int rc = 1;
 
     if (fiber->snapshot.valid) {
         ChValue inject = CH_UNDEFINED;
@@ -455,11 +550,13 @@ static int run_fiber_to_park_or_done(ChVM *vm, ChValue fiber_v) {
             ChValue payload = fiber->park_payload;
             fiber->park_payload = CH_UNDEFINED;
             if (ch->closed) {
-                /* Raise inside the fiber so (guard ...) can catch it. */
+                /* Isolate joiner handlers before restore/raise (#564). */
+                (void)parent_dynamic_save(vm, &parent);
                 if (ch_fiber_restore_snapshot(vm, fiber, CH_UNDEFINED) != 0) {
-                    fiber->state = CH_FIBER_FAILED;
+                    fiber_mark_failed(vm, fiber, "fiber: restore failed");
+                    (void)parent_dynamic_restore(vm, &parent);
                     runtime->current = previous_current;
-                    return -1;
+                    return 1;
                 }
                 ChValue msg = ch_gc_make_string_cstr(
                     &vm->gc, "channel-send: send on closed channel");
@@ -496,11 +593,12 @@ static int run_fiber_to_park_or_done(ChVM *vm, ChValue fiber_v) {
             inject = CH_VOID;
         }
 
+        (void)parent_dynamic_save(vm, &parent);
         if (ch_fiber_restore_snapshot(vm, fiber, inject) != 0) {
-            fiber->state = CH_FIBER_FAILED;
-            fiber->error = ch_gc_make_string_cstr(&vm->gc, "fiber: restore failed");
+            fiber_mark_failed(vm, fiber, "fiber: restore failed");
+            (void)parent_dynamic_restore(vm, &parent);
             runtime->current = previous_current;
-            return -1;
+            return 1;
         }
         st = ch_vm_run_fiber_resume(vm, runtime->entry_frames);
     after_resume:
@@ -508,26 +606,24 @@ static int run_fiber_to_park_or_done(ChVM *vm, ChValue fiber_v) {
             vm->fiber_parked = false;
             vm->frame_count = runtime->entry_frames;
             vm->reg_top = runtime->entry_reg_top;
+            (void)parent_dynamic_restore(vm, &parent);
             runtime->current = previous_current;
             return 0;
         }
         if (st == CH_VM_CONTINUATION_INVOKED) {
-            fiber->state = CH_FIBER_FAILED;
-            fiber->error = ch_gc_make_string_cstr(
-                &vm->gc, "fiber: continuations across scheduler are unsupported");
-            ch_gc_write_barrier(&vm->gc, &fiber->header, fiber->error);
+            fiber->error = CH_NIL;
             snprintf(vm->error, sizeof(vm->error),
                      "fiber: continuations across scheduler are unsupported");
+            fiber_mark_failed(vm, fiber, "fiber: continuations across scheduler are unsupported");
+            (void)parent_dynamic_restore(vm, &parent);
             runtime->current = previous_current;
-            return -1;
+            return 1;
         }
         if (st != CH_VM_OK) {
-            fiber->state = CH_FIBER_FAILED;
-            const char *msg = vm->error[0] ? vm->error : "fiber failed";
-            fiber->error = ch_gc_make_string_cstr(&vm->gc, msg);
-            ch_gc_write_barrier(&vm->gc, &fiber->header, fiber->error);
+            fiber_mark_failed(vm, fiber, "fiber failed");
+            (void)parent_dynamic_restore(vm, &parent);
             runtime->current = previous_current;
-            return -1;
+            return 1;
         }
         /* Thunk return lives in the apply base register (entry_reg_top). */
         result = (runtime->entry_reg_top < CH_VM_MAX_REGS)
@@ -538,9 +634,16 @@ static int run_fiber_to_park_or_done(ChVM *vm, ChValue fiber_v) {
         fiber->error = CH_NIL;
         ch_gc_write_barrier(&vm->gc, &fiber->header, fiber->result);
         free_snapshot(&fiber->snapshot);
+        (void)parent_dynamic_restore(vm, &parent);
         runtime->current = previous_current;
         return 1;
     }
+
+    /* Fresh fiber: isolate from joiner's handlers/winds (#564). Parameters
+     * stay inherited for dynamic binding; save/restore prevents leaks. */
+    (void)parent_dynamic_save(vm, &parent);
+    vm->handler_count = 0;
+    vm->wind_count = 0;
 
     runtime->entry_frames = vm->frame_count;
     runtime->entry_reg_top = vm->reg_top;
@@ -550,6 +653,7 @@ static int run_fiber_to_park_or_done(ChVM *vm, ChValue fiber_v) {
         /* Snapshot already saved; unwind to entry. */
         vm->frame_count = runtime->entry_frames;
         vm->reg_top = runtime->entry_reg_top;
+        (void)parent_dynamic_restore(vm, &parent);
         runtime->current = previous_current;
         return 0;
     }
@@ -559,28 +663,21 @@ static int run_fiber_to_park_or_done(ChVM *vm, ChValue fiber_v) {
         fiber->error = CH_NIL;
         ch_gc_write_barrier(&vm->gc, &fiber->header, fiber->result);
         free_snapshot(&fiber->snapshot);
+        rc = 1;
     } else if (st == CH_VM_CONTINUATION_INVOKED) {
-        fiber->state = CH_FIBER_FAILED;
-        fiber->result = CH_UNDEFINED;
-        fiber->error = ch_gc_make_string_cstr(
-            &vm->gc, "fiber: continuations across scheduler are unsupported");
-        ch_gc_write_barrier(&vm->gc, &fiber->header, fiber->error);
+        fiber->error = CH_NIL;
         snprintf(vm->error, sizeof(vm->error),
                  "fiber: continuations across scheduler are unsupported");
-        runtime->current = previous_current;
-        return -1;
+        fiber_mark_failed(vm, fiber, "fiber: continuations across scheduler are unsupported");
+        rc = 1;
     } else {
-        fiber->state = CH_FIBER_FAILED;
-        fiber->result = CH_UNDEFINED;
-        const char *msg = vm->error[0] ? vm->error : "fiber failed";
-        fiber->error = ch_gc_make_string_cstr(&vm->gc, msg);
-        ch_gc_write_barrier(&vm->gc, &fiber->header, fiber->error);
-        runtime->current = previous_current;
-        return -1;
+        fiber_mark_failed(vm, fiber, "fiber failed");
+        rc = 1;
     }
 
+    (void)parent_dynamic_restore(vm, &parent);
     runtime->current = previous_current;
-    return 1;
+    return rc;
 }
 
 int run_next_ready_fiber(ChVM *vm) {
@@ -646,6 +743,51 @@ int ch_fiber_drive(ChVM *vm) {
     return 0;
 }
 
+/* Wrap a non-closure procedure in a zero-arg bytecode trampoline so spawn
+ * can park/resume it like any other fiber thunk (#1155). Bytecode:
+ *   get_upvalue 1, 0 ; call 1, 0 ; return 1 */
+static ChValue wrap_fiber_thunk(ChVM *vm, ChValue proc) {
+    static const uint8_t code_bytes[] = {
+        (uint8_t)CH_OP_GET_UPVALUE, 1, 0, (uint8_t)CH_OP_CALL, 1, 0, (uint8_t)CH_OP_RETURN, 1,
+    };
+
+    ch_gc_push(&vm->gc, &proc);
+    ChValue fn_v = ch_gc_make_function(&vm->gc);
+    ch_gc_push(&vm->gc, &fn_v);
+    ChFunction *fn = ch_as_function(fn_v);
+    fn->code = (uint8_t *)malloc(sizeof(code_bytes));
+    if (!fn->code) {
+        ch_gc_pop_n(&vm->gc, 2);
+        snprintf(vm->error, sizeof(vm->error), "spawn-fiber: out of memory");
+        return CH_UNDEFINED;
+    }
+    memcpy(fn->code, code_bytes, sizeof(code_bytes));
+    fn->code_len = sizeof(code_bytes);
+    fn->arity = 0;
+    fn->variadic = 0;
+    fn->num_regs = 2;
+    fn->num_upvalues = 1;
+
+    ChUpvalue **uvs = (ChUpvalue **)calloc(1, sizeof(ChUpvalue *));
+    ChUpvalue *uv = (ChUpvalue *)calloc(1, sizeof(ChUpvalue));
+    if (!uvs || !uv) {
+        free(uvs);
+        free(uv);
+        ch_gc_pop_n(&vm->gc, 2);
+        snprintf(vm->error, sizeof(vm->error), "spawn-fiber: out of memory");
+        return CH_UNDEFINED;
+    }
+    uv->is_closed = true;
+    uv->closed_value = proc;
+    uv->location = &uv->closed_value;
+    uvs[0] = uv;
+
+    ChValue cl_v = ch_gc_make_closure(&vm->gc, fn, uvs);
+    ch_gc_write_barrier(&vm->gc, &ch_as_closure(cl_v)->header, proc);
+    ch_gc_pop_n(&vm->gc, 2);
+    return cl_v;
+}
+
 int ch_fiber_spawn(ChVM *vm, ChValue thunk, ChValue *out_fiber) {
     if (!ch_is_procedure(thunk)) {
         snprintf(vm->error, sizeof(vm->error), "spawn-fiber: expected procedure");
@@ -655,8 +797,18 @@ int ch_fiber_spawn(ChVM *vm, ChValue thunk, ChValue *out_fiber) {
         snprintf(vm->error, sizeof(vm->error), "spawn-fiber: fiber runtime unavailable");
         return -1;
     }
+    /* Natives/continuations/etc. need a resumable closure frame (#1155). */
+    ChValue spawn_thunk = thunk;
+    if (!ch_is_closure(thunk)) {
+        spawn_thunk = wrap_fiber_thunk(vm, thunk);
+        if (spawn_thunk == CH_UNDEFINED) {
+            return -1;
+        }
+    }
+    ch_gc_push(&vm->gc, &spawn_thunk);
     ChFiberRuntime *runtime = vm->fiber_runtime;
-    ChValue fiber = ch_gc_make_fiber(&vm->gc, runtime->next_id++, thunk);
+    ChValue fiber = ch_gc_make_fiber(&vm->gc, runtime->next_id++, spawn_thunk);
+    ch_gc_pop(&vm->gc);
     if (enqueue_ready_fiber(runtime, fiber) != 0) {
         snprintf(vm->error, sizeof(vm->error), "spawn-fiber: run queue full");
         return -1;
@@ -728,9 +880,11 @@ int ch_fiber_join(ChVM *vm, ChValue fiber_v, ChValue *out_result) {
         return 0;
     }
 
-    if (ch_is_string(fiber->error)) {
-        snprintf(vm->error, sizeof(vm->error), "%s", ch_as_string(fiber->error)->data);
-    } else {
+    /* FAILED: leave fiber->error for the primitive to re-raise (#564). */
+    if (out_result) {
+        *out_result = CH_UNDEFINED;
+    }
+    if (fiber->error == CH_NIL || fiber->error == CH_UNDEFINED) {
         snprintf(vm->error, sizeof(vm->error), "fiber-join: fiber failed");
     }
     return -1;
@@ -779,9 +933,11 @@ int ch_fiber_join_timeout(ChVM *vm, ChValue fiber_v, double timeout_seconds, ChV
         return 0;
     }
 
-    if (ch_is_string(fiber->error)) {
-        snprintf(vm->error, sizeof(vm->error), "%s", ch_as_string(fiber->error)->data);
-    } else {
+    /* FAILED: leave fiber->error for the primitive to re-raise (#564). */
+    if (out_result) {
+        *out_result = CH_UNDEFINED;
+    }
+    if (fiber->error == CH_NIL || fiber->error == CH_UNDEFINED) {
         snprintf(vm->error, sizeof(vm->error), "fiber-join: fiber failed");
     }
     return -1;

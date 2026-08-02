@@ -1,13 +1,19 @@
 ;; Regression tests for fiber error handling
-;; Issues: #565 (fiber limit error), #564 (error propagation), #551 (native proc rejection)
+;; Issues: #565 (fiber limit error), #564 (error propagation)
+;; #551 (native reject) was superseded by #1155 (native trampoline).
 
 (import (scheme base) (scheme write) (kaappi fibers))
 
-;; --- #551: spawn rejects native procedures ---
-(display "test-native-reject: ")
-(guard (exn (#t (display "ok") (newline)))
-  (spawn random-real)
-  (display "FAIL - should have raised") (newline))
+;; --- #1155: spawn accepts zero-arg natives via trampoline ---
+(display "test-native-trampoline: ")
+(guard (exn (#t
+  (display "raised: ")
+  (display (if (error-object? exn) (error-object-message exn) exn))
+  (newline)))
+  (let ((f (spawn list)))
+    (if (null? (fiber-join f))
+      (begin (display "ok") (newline))
+      (begin (display "bad-result") (newline)))))
 
 ;; --- #564: errors in fibers propagate via fiber-join ---
 (display "test-fiber-error-propagate: ")

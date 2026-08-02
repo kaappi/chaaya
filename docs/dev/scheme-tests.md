@@ -94,9 +94,9 @@ Wired in CTest as `kaappi_deferred_smoke_*`. Enable with:
 ctest --output-on-failure -R kaappi_deferred_smoke
 ```
 
-**Status as of 2026-08-02 (Batch 14):** 236 of 257 non-backend smoke
-files wired (**236/257**, ~92%). "Non-backend" excludes the 8 permanently
-skipped `jit-*.scm`/`llvm-*.scm` files (see below); 21 remain unwired.
+**Status as of 2026-08-02 (Batch 15):** 238 of 257 non-backend smoke
+files wired (**238/257**, ~93%). "Non-backend" excludes the 8 permanently
+skipped `jit-*.scm`/`llvm-*.scm` files (see below); 19 remain unwired.
 
 **Wired:** language-surface fixes (`case-lambda-fixes`, `expt-negative-base-1725`,
 `equal-dag`, `circular-list-terminate`) plus a large batch of locally green
@@ -147,11 +147,11 @@ smoke covers are wired and green: `kaappi-parallel-map`,
 |------|--------|
 | `jit-*.scm`, `llvm-*.scm` | JIT/LLVM backend not in Chaaya |
 
-**Remaining unwired (21), grouped by blocker:**
+**Remaining unwired (19), grouped by blocker:**
 
 | Blocker | Files | Notes |
 |---------|------:|-------|
-| Fiber/thread scheduler races & cross-thread capacity limits | 15 | `fiber-blocked-exit`, `fiber-channel-receive-waits-out-peer-sleep`, `fiber-channel-rendezvous`, `fiber-dispatch-blocked-siblings`, `fiber-error-handling`, `fiber-many-waiters-one-object-1530`, `fiber-pipeline`, `fiber-thread-join-deadline-cleared-after-resolve`, `fiber-timed-mutex-lock-not-starved-by-busy-sibling`, `mutex-nested-dispatch-dirty-snapshot-1487`, `mutex-timeout`, `nested-wait-under-sleep-dirty-snapshot-1490`, `thread-foreign-owner-1484`, `thread-port-isolation`, `deep-copy-list-801`. Deep scheduler/dispatch work, not quick fixes; `nested-wait-under-sleep-dirty-snapshot-1490` in particular passes in isolation but times out under parallel `ctest -j` load — a genuine contention-sensitive race, left unwired rather than wired flaky. |
+| Fiber/thread scheduler races & cross-thread capacity limits | 13 | `fiber-blocked-exit`, `fiber-channel-receive-waits-out-peer-sleep`, `fiber-channel-rendezvous`, `fiber-dispatch-blocked-siblings`, `fiber-many-waiters-one-object-1530`, `fiber-pipeline`, `fiber-thread-join-deadline-cleared-after-resolve`, `fiber-timed-mutex-lock-not-starved-by-busy-sibling`, `mutex-nested-dispatch-dirty-snapshot-1487`, `mutex-timeout`, `nested-wait-under-sleep-dirty-snapshot-1490`, `thread-foreign-owner-1484`, `thread-port-isolation`. Deep scheduler/dispatch work, not quick fixes; `nested-wait-under-sleep-dirty-snapshot-1490` in particular passes in isolation but times out under parallel `ctest -j` load — a genuine contention-sensitive race, left unwired rather than wired flaky. `fiber-dispatch-blocked-siblings` is locally green alone but kept unwired pending a parallel soak. |
 | Fixed compiler limits (register file is `uint8_t`-indexed) | 5 | `apply-large-arglist`, `call-arg-limit`, `case-large-clauses`, `large-form-body-791`, `vector-large-arglist` — all hit an intentional ~200–256 argument/clause/register ceiling; raising it is a register-file width change, not a quick fix. |
 | GC / heap-layout sensitivity (latent) | — | Batch 11: registering the new SRFI-170 natives shifted heap layout enough to break `bootstrap_macros`, `r7rs-thin-forms-gaps`, and `exact-prefix-856` depending on exact native count. Expanding the same SRFI-170 user/group cluster (`user-uid` / `user-effective-*` / `user-supplementary-gids`) stabilized the suite; root cause still looks like a GC/expander marking bug worth a dedicated investigation. |
 
@@ -159,7 +159,16 @@ smoke covers are wired and green: `kaappi-parallel-map`,
 growable handler/wind stacks (initial 64, hard cap 32768) and escape-only
 `call/ec` / `call-with-escape-continuation` (extent-checked). `guard` still
 uses `call/cc` (call/ec + fiber park/restore still misfires on some clause
-shapes). Non-backend corpus **236/257** (~92%).
+shapes).
+
+**Batch 15 (2026-08-02):** `fiber-error-handling` + `deep-copy-list-801` —
+fiber runs isolate joiner exception handlers/winds; uncaught conditions are
+stashed on the fiber and re-raised by `fiber-join` (#564/#565). Non-closure
+thunks are wrapped in a zero-arg bytecode trampoline (#1155; supersedes the
+old #551 native-reject expectation in this smoke). Deep-copy bumps
+`ChGC.no_collect` for the walk; `ch_vm_apply` delivers `vm->result` when the
+apply window unwinds to `frame_count == 0`. Non-backend corpus **238/257**
+(~93%).
 
 See `docs/dev/srfi-import-audit.md` for the separate, lower-level audit of
 which `lib/srfi/*.sld` files import cleanly (165 probed, 122 pass, 43 fail) —
