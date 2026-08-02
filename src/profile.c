@@ -33,6 +33,10 @@ void ch_profile_enable(void) {
     memset(g_entries, 0, sizeof(g_entries));
 }
 
+void ch_profile_disable(void) {
+    g_enabled = 0;
+}
+
 int ch_profile_enabled(void) {
     return g_enabled;
 }

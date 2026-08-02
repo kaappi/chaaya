@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 void ch_profile_enable(void);
+void ch_profile_disable(void);
 int ch_profile_enabled(void);
 void ch_profile_enter(const char *name);
 void ch_profile_leave(const char *name);

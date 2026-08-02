@@ -5,6 +5,7 @@
 #include "chaaya/expander.h"
 #include "chaaya/library.h"
 #include "chaaya/printer.h"
+#include "chaaya/profile.h"
 #include "chaaya/reader.h"
 #include "chaaya/version.h"
 
@@ -112,34 +113,40 @@ static int history_path(char *buf, size_t buflen) {
 }
 
 static void print_comma_help(void) {
-    puts("Comma commands:");
+    puts("Commands:");
     puts("  ,help             Show this message");
     puts("  ,quit / ,exit     Exit the REPL");
-    puts("  ,version          Show Chaaya version");
-    puts("  ,load <file>      Load and evaluate a Scheme file");
-    puts("  ,expand <expr>    Expand expression and print transformed form");
-    puts("  ,import <lib>     Import a library (e.g. ,import (srfi 64))");
+    puts("");
+    puts(" -- Evaluation:");
+    puts("  ,time <expr>      Measure execution time");
+    puts("  ,type <expr>      Show result type");
+    puts("  ,expand <expr>    Show macro expansion");
+    puts("  ,profile <expr>   Profile timing and calls");
     puts("  ,dis <expr>       Disassemble a procedure");
+    puts("");
+    puts(" -- Inspection:");
+    puts("  ,describe <sym>   Show procedure arity and type");
+    puts("  ,apropos <str>    Search bindings by substring");
+    puts("  ,env [prefix]     List bindings (optionally filtered by prefix)");
+    puts("");
+    puts(" -- Debugging:");
     puts("  ,break <name> [if <expr>]  Break on call; optional condition");
     puts("  ,breakpoints      List active breakpoints");
-    puts("  ,delete <name>    Remove a breakpoint");
+    puts("  ,delete <name|all>  Remove a breakpoint (or all)");
+    puts("  ,step <expr>      Evaluate with single-stepping");
+    puts("  ,condition <id> <expr>  Set breakpoint condition");
     puts("  ,watch <expr>     Add a debugger watch expression");
     puts("  ,watch            List watch expressions");
     puts("  ,unwatch [n|expr] Remove watch by index/expression (none = all)");
-    puts("  ,step <expr>      Evaluate; pause on next call (interactive debugger)");
-    puts("  ,continue         Resume from a breakpoint (debug> prompt)");
-    puts("  ,next / ,finish   Step/finish from a breakpoint");
-    puts("  ,backtrace        Show VM call frames at a breakpoint");
-    puts("  ,locals           Show current frame register count");
-    puts("  ,gc               Show GC statistics");
-    puts("  ,env [prefix]     List defined globals");
-    puts("  ,time <expr>      Evaluate and print elapsed milliseconds");
-    puts("  ,type <expr>      Evaluate and print result type");
-    puts("  ,apropos <text>   Search global bindings");
-    puts("  ,describe <name>  Describe a global binding");
+    puts("  At debug>: ,continue ,next ,finish ,backtrace ,locals ,up ,down");
     puts("");
-    puts("Other: ,condition <id> <expr> sets a breakpoint condition by id.");
-    puts(",profile is not implemented yet (use CLI --profile).");
+    puts(" -- System:");
+    puts("  ,gc               Show GC statistics");
+    puts("  ,version          Show Chaaya version");
+    puts("  ,load <file>      Load and run a Scheme file");
+    puts("  ,import <lib>     Import a library (e.g. ,import (srfi 1))");
+    puts("");
+    puts("The variable _ holds the last result.");
 }
 
 static int g_debug_continue = 0;
@@ -500,8 +507,20 @@ static int debug_break_hook(ChVM *vm, const char *name) {
             break;
         }
         if (strcmp(cmd, ",help") == 0) {
-            puts("debug commands: ,continue ,step ,next ,finish ,backtrace ,locals "
-                 ",watch ,unwatch ,quit");
+            puts("Debug commands:");
+            puts(" -- Continue / Step:");
+            puts("  ,continue / ,c    Resume execution");
+            puts("  ,step             Step into next call");
+            puts("  ,next / ,n        Step over");
+            puts("  ,finish / ,out    Run until current frame returns");
+            puts(" -- Inspect:");
+            puts("  ,backtrace        Show call frames");
+            puts("  ,locals           Show current frame registers");
+            puts("  ,up / ,down       Navigate call frames");
+            puts(" -- Watches:");
+            puts("  ,watch <expr>     Add watch; ,watch lists them");
+            puts("  ,unwatch [n|expr] Remove watch (none = all)");
+            puts("  ,quit / ,abort    Abort debugging");
             continue;
         }
         fprintf(stderr, "debug: unknown command (try ,help)\n");
@@ -881,6 +900,15 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
             fprintf(stderr, ",delete: missing name\n");
             return 0;
         }
+        if (strcmp(name, "all") == 0) {
+            vm->breakpoint_count = 0;
+            vm->debug_mode = false;
+            for (size_t i = 0; i < CH_VM_MAX_BREAKPOINTS; i++) {
+                g_break_conditions[i][0] = '\0';
+            }
+            puts("; cleared all breakpoints");
+            return 0;
+        }
         for (size_t i = 0; i < vm->breakpoint_count; i++) {
             if (strcmp(vm->breakpoints[i], name) == 0) {
                 memmove(&vm->breakpoints[i], &vm->breakpoints[i + 1],
@@ -899,6 +927,18 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
             }
         }
         fprintf(stderr, ",delete: no breakpoint named '%s'\n", name);
+        return 0;
+    }
+    if (strncmp(cmd, ",profile", 8) == 0 && (cmd[8] == '\0' || cmd[8] == ' ')) {
+        const char *expr = trim_left(cmd + 8);
+        if (!expr[0]) {
+            fprintf(stderr, ",profile: missing expression\n");
+            return 0;
+        }
+        ch_profile_enable();
+        (void)ch_eval_source(vm, expr, strlen(expr), 1);
+        ch_profile_report_text(stdout);
+        ch_profile_disable();
         return 0;
     }
     if (strncmp(cmd, ",step ", 6) == 0) {
@@ -991,27 +1031,19 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
         return 0;
     }
 
-    /* Known Kaappi commands not yet supported */
-    static const char *nyi[] = {",profile", NULL};
-    for (int i = 0; nyi[i]; i++) {
-        size_t n = strlen(nyi[i]);
-        if (strncmp(cmd, nyi[i], n) == 0 && (cmd[n] == '\0' || cmd[n] == ' ')) {
-            fprintf(stderr, "chaaya: '%s' is not implemented yet (bootstrap)\n", nyi[i]);
-            return 0;
-        }
-    }
-
     fprintf(stderr, "unknown command: %s\nType ,help for available commands.\n", cmd);
     return 0;
 }
 
 #ifdef CHAAYA_HAS_LINENOISE
 static void completion_callback(const char *buf, linenoiseCompletions *lc) {
-    static const char *cmds[] = {",help",     ",quit", ",exit", ",version", ",load ", ",expand ",
-                                 ",import ", ",dis ",   ",break ", ",breakpoints", ",delete ",
-                                 ",watch ", ",unwatch ", ",step ", ",continue", ",backtrace",
-                                 ",locals", ",gc", ",env", ",time ", ",type ", ",apropos ",
-                                 ",describe ", NULL};
+    static const char *cmds[] = {
+        ",help",       ",quit",        ",exit",      ",version",   ",load ",
+        ",expand ",    ",import ",     ",dis ",      ",profile ",  ",break ",
+        ",breakpoints", ",delete ",    ",condition ", ",watch ",   ",unwatch ",
+        ",step ",      ",continue",    ",next",      ",finish",    ",backtrace",
+        ",locals",     ",up",          ",down",      ",gc",        ",env",
+        ",time ",      ",type ",       ",apropos ",  ",describe ", NULL};
     if (buf[0] == ',') {
         for (int i = 0; cmds[i]; i++) {
             if (strncmp(cmds[i], buf, strlen(buf)) == 0) {

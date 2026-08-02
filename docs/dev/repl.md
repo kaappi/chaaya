@@ -22,35 +22,51 @@ The variable `_` holds the last non-void result.
 
 ## Comma commands
 
+Type `,help` in the REPL for the authoritative list.
+
+**General:** `,help`, `,quit` (also `,exit`)
+
+**Evaluation:**
+
 | Command | Effect |
 |---------|--------|
-| `,help` | Show command list |
-| `,quit` / `,exit` | Leave the REPL |
-| `,version` | Print version banner |
-| `,load <file>` | Evaluate a Scheme file |
-| `,gc` | Object count / collections |
-| `,env [prefix]` | List defined globals |
-| `,time <expr>` | Eval and print elapsed ms |
-| `,type <expr>` | Print value type name |
-| `,expand <expr>` | Macro-expand and print |
-| `,import <lib>` | Import a library (e.g. `,import (srfi 64)`) |
+| `,time <expr>` | Measure execution time |
+| `,type <expr>` | Show result type |
+| `,expand <expr>` | Show macro expansion without evaluating |
+| `,profile <expr>` | Profile timing and calls |
 | `,dis <expr>` | Disassemble a procedure's bytecode |
-| `,apropos <text>` | Search global bindings |
-| `,describe <name>` | Describe a global binding |
+
+**Inspection:**
+
+| Command | Effect |
+|---------|--------|
+| `,describe <sym>` | Show procedure arity and type |
+| `,apropos <str>` | Search bindings by substring |
+| `,env [prefix]` | List bindings, optionally filtered by prefix |
+
+**Debugging:**
+
+| Command | Effect |
+|---------|--------|
 | `,break <name> [if <expr>]` | Break on named procedure (optional condition) |
-| `,condition <id> <expr>` | Set/update breakpoint condition by id |
 | `,breakpoints` | List breakpoints |
-| `,delete <name>` | Remove breakpoint |
-| `,watch <expr>` / `,unwatch` | Debugger watch expressions |
+| `,delete <name>` / `,delete all` | Remove a breakpoint, or clear all |
+| `,condition <id> <expr>` | Set/update breakpoint condition by id |
 | `,step <expr>` | Eval; pause on next call |
-| `,continue` / `,backtrace` / `,locals` | Debugger commands at `debug>` |
-| `,up` / `,down` | Navigate call frames at `debug>` |
+| `,watch <expr>` / `,unwatch` | Debugger watch expressions |
 
 At a breakpoint the REPL enters a nested `debug>` prompt (`,continue`, `,step`,
 `,next`, `,finish`, `,backtrace`, `,locals`, `,up`, `,down`, `,watch`, `,quit`).
 Pause banners include `source:line` when available.
 
-`,profile` is still not implemented (use CLI `--profile`).
+**System:**
+
+| Command | Effect |
+|---------|--------|
+| `,gc` | Show GC statistics |
+| `,version` | Show Chaaya version |
+| `,load <file>` | Load and run a Scheme file |
+| `,import <lib>` | Import a library (e.g. `,import (srfi 1)`) |
 
 ## Key files
 
