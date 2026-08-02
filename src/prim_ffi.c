@@ -3,6 +3,7 @@
 #include "chaaya/bignum.h"
 #include "chaaya/ffi.h"
 #include "chaaya/ffi_callback.h"
+#include "chaaya/sandbox.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -17,6 +18,11 @@ static void define_prim(ChVM *vm, const char *name, ChNativeFn fn, int arity, in
 
 static ChValue prim_open_foreign_library(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
+    if (ch_sandbox_deny_ffi()) {
+        snprintf(vm->error, sizeof(vm->error), "open-foreign-library: denied by sandbox");
+        return CH_UNDEFINED;
+    }
+
     const char *path = NULL;
     if (args[0] != CH_FALSE) {
         if (!ch_is_string(args[0])) {

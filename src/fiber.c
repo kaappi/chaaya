@@ -94,6 +94,27 @@ static int channel_grow(ChChannel *channel);
 static void channel_push(ChChannel *channel, ChValue value);
 static ChValue channel_pop(ChChannel *channel);
 static int channel_can_send(ChChannel *channel);
+static int run_next_ready_fiber(ChVM *vm);
+
+static uint64_t timeout_deadline_ms(double timeout_seconds) {
+    if (timeout_seconds <= 0.0) {
+        return ch_reactor_now_ms();
+    }
+    double ms_f = timeout_seconds * 1000.0;
+    if (ms_f >= (double)UINT64_MAX) {
+        return UINT64_MAX;
+    }
+    uint64_t delta = (uint64_t)(ms_f + 0.5);
+    uint64_t now = ch_reactor_now_ms();
+    if (UINT64_MAX - now < delta) {
+        return UINT64_MAX;
+    }
+    return now + delta;
+}
+
+static int timeout_expired_ms(uint64_t deadline_ms) {
+    return ch_reactor_now_ms() >= deadline_ms;
+}
 
 static uint64_t next_reactor_wait_ms(ChReactor *reactor) {
     if (!reactor) {
@@ -1000,6 +1021,92 @@ static int channel_recv_shared(ChVM *vm, ChChannel *channel, ChValue *out_value)
     }
 }
 
+static int run_scheduler_step_until(ChVM *vm, uint64_t deadline_ms) {
+    if (!vm || !vm->fiber_runtime) {
+        struct timespec nap = {0, 1000000L};
+        nanosleep(&nap, NULL);
+        return 0;
+    }
+
+    ChFiberRuntime *rt = vm->fiber_runtime;
+    (void)poll_reactor_wake(vm, 0);
+    if (rt->ready_count > 0) {
+        return run_next_ready_fiber(vm);
+    }
+
+    if (timeout_expired_ms(deadline_ms)) {
+        return 0;
+    }
+
+    uint64_t now = ch_reactor_now_ms();
+    uint64_t remain = deadline_ms > now ? deadline_ms - now : 0;
+    uint64_t wait_ms = next_reactor_wait_ms(&rt->reactor);
+    if (wait_ms == 0 || wait_ms > remain) {
+        wait_ms = remain;
+    }
+    (void)poll_reactor_wake(vm, wait_ms == 0 ? 1 : wait_ms);
+    if (rt->ready_count > 0) {
+        return run_next_ready_fiber(vm);
+    }
+    return 0;
+}
+
+static int channel_send_shared_timeout(ChVM *vm, ChChannel *channel, ChValue value, uint64_t deadline_ms,
+                                       int *timed_out) {
+    ChSharedChannel *sc = (ChSharedChannel *)channel->shared;
+    for (;;) {
+        int rc = ch_shared_channel_try_send(sc, &vm->gc, value);
+        if (rc == 0) {
+            return 0;
+        }
+        if (rc < 0) {
+            if (vm->error[0] == '\0') {
+                snprintf(vm->error, sizeof(vm->error), "channel-send: shared send failed");
+            }
+            return -1;
+        }
+        if (timeout_expired_ms(deadline_ms)) {
+            if (timed_out) {
+                *timed_out = 1;
+            }
+            snprintf(vm->error, sizeof(vm->error), "channel-send: timed out");
+            return -1;
+        }
+        int ran = run_scheduler_step_until(vm, deadline_ms);
+        if (ran < 0) {
+            return -1;
+        }
+    }
+}
+
+static int channel_recv_shared_timeout(ChVM *vm, ChChannel *channel, ChValue *out_value,
+                                       uint64_t deadline_ms, int *timed_out) {
+    ChSharedChannel *sc = (ChSharedChannel *)channel->shared;
+    for (;;) {
+        int rc = ch_shared_channel_try_recv(sc, &vm->gc, out_value);
+        if (rc == 0) {
+            return 0;
+        }
+        if (rc < 0) {
+            if (vm->error[0] == '\0') {
+                snprintf(vm->error, sizeof(vm->error), "channel-recv: shared receive failed");
+            }
+            return -1;
+        }
+        if (timeout_expired_ms(deadline_ms)) {
+            if (timed_out) {
+                *timed_out = 1;
+            }
+            snprintf(vm->error, sizeof(vm->error), "channel-receive: timed out");
+            return -1;
+        }
+        int ran = run_scheduler_step_until(vm, deadline_ms);
+        if (ran < 0) {
+            return -1;
+        }
+    }
+}
+
 int ch_channel_send(ChVM *vm, ChValue channel_v, ChValue value) {
     if (channel_check_owner(vm, channel_v, "channel-send!") != 0) {
         return -1;
@@ -1082,6 +1189,68 @@ int ch_channel_send(ChVM *vm, ChValue channel_v, ChValue value) {
     return 0;
 }
 
+int ch_channel_send_timeout(ChVM *vm, ChValue channel_v, ChValue value, double timeout_seconds,
+                            int *timed_out) {
+    if (timed_out) {
+        *timed_out = 0;
+    }
+    if (timeout_seconds < 0.0) {
+        return ch_channel_send(vm, channel_v, value);
+    }
+    if (channel_check_owner(vm, channel_v, "channel-send!") != 0) {
+        return -1;
+    }
+    if (value == CH_EOF_OBJ) {
+        snprintf(vm->error, sizeof(vm->error),
+                 "channel-send: cannot send an eof-object on a channel; use "
+                 "channel-close! to end the stream");
+        return -1;
+    }
+    ChChannel *channel = ch_as_channel(channel_v);
+    uint64_t deadline_ms = timeout_deadline_ms(timeout_seconds);
+    if (channel->shared) {
+        return channel_send_shared_timeout(vm, channel, value, deadline_ms, timed_out);
+    }
+
+    for (;;) {
+        if (channel->closed) {
+            snprintf(vm->error, sizeof(vm->error), "channel-send: send on closed channel");
+            return -1;
+        }
+        if (channel_can_send(channel) &&
+            !(channel->capacity > 0 && !channel->rendezvous && channel->count >= channel->capacity)) {
+            if (channel->capacity == 0 && !channel->rendezvous &&
+                channel->count >= channel->storage_cap) {
+                if (channel_grow(channel) != 0) {
+                    snprintf(vm->error, sizeof(vm->error), "channel-send!: out of memory");
+                    return -1;
+                }
+            }
+            if (channel->rendezvous && channel->count >= channel->storage_cap) {
+                if (channel_grow(channel) != 0) {
+                    snprintf(vm->error, sizeof(vm->error), "channel-send!: out of memory");
+                    return -1;
+                }
+            }
+            channel_push(channel, value);
+            ch_gc_write_barrier(&vm->gc, &channel->header, value);
+            wake_waiter_list(vm->fiber_runtime, channel->recv_waiters, &channel->recv_waiter_count);
+            return 0;
+        }
+        if (timeout_expired_ms(deadline_ms)) {
+            if (timed_out) {
+                *timed_out = 1;
+            }
+            snprintf(vm->error, sizeof(vm->error), "channel-send: timed out");
+            return -1;
+        }
+        int ran = run_scheduler_step_until(vm, deadline_ms);
+        if (ran < 0) {
+            return -1;
+        }
+    }
+}
+
 int ch_channel_recv(ChVM *vm, ChValue channel_v, ChValue *out_value) {
     if (channel_check_owner(vm, channel_v, "channel-recv") != 0) {
         return -1;
@@ -1133,6 +1302,53 @@ int ch_channel_recv(ChVM *vm, ChValue channel_v, ChValue *out_value) {
     }
     wake_waiter_list(vm->fiber_runtime, channel->send_waiters, &channel->send_waiter_count);
     return 0;
+}
+
+int ch_channel_recv_timeout(ChVM *vm, ChValue channel_v, double timeout_seconds, ChValue *out_value,
+                            int *timed_out) {
+    if (timed_out) {
+        *timed_out = 0;
+    }
+    if (timeout_seconds < 0.0) {
+        return ch_channel_recv(vm, channel_v, out_value);
+    }
+    if (channel_check_owner(vm, channel_v, "channel-recv") != 0) {
+        return -1;
+    }
+    ChChannel *channel = ch_as_channel(channel_v);
+    uint64_t deadline_ms = timeout_deadline_ms(timeout_seconds);
+    if (channel->shared) {
+        return channel_recv_shared_timeout(vm, channel, out_value, deadline_ms, timed_out);
+    }
+
+    for (;;) {
+        if (channel->count > 0) {
+            if (out_value) {
+                *out_value = channel_pop(channel);
+            } else {
+                (void)channel_pop(channel);
+            }
+            wake_waiter_list(vm->fiber_runtime, channel->send_waiters, &channel->send_waiter_count);
+            return 0;
+        }
+        if (channel->closed) {
+            if (out_value) {
+                *out_value = CH_EOF_OBJ;
+            }
+            return 0;
+        }
+        if (timeout_expired_ms(deadline_ms)) {
+            if (timed_out) {
+                *timed_out = 1;
+            }
+            snprintf(vm->error, sizeof(vm->error), "channel-receive: timed out");
+            return -1;
+        }
+        int ran = run_scheduler_step_until(vm, deadline_ms);
+        if (ran < 0) {
+            return -1;
+        }
+    }
 }
 
 int ch_channel_close(ChVM *vm, ChValue channel_v) {

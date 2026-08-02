@@ -250,6 +250,8 @@ static ChValue prim_call_with_values(ChVM *vm, ChValue *args, int nargs) {
     if (st != CH_VM_OK) {
         return CH_UNDEFINED;
     }
+    /* Producer delivered values (possibly via continuation barrier landing). */
+    vm->continuation_invoked = false;
 
     ChValue cargs[CH_VM_MAX_PENDING_ARGS];
     int cnargs = 0;

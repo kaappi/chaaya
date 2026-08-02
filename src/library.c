@@ -276,7 +276,8 @@ int ch_register_builtin_libraries(ChVM *vm) {
     static const char *const chaaya_fibers_exports[] = {
         "spawn-fiber", "spawn", "fiber-yield", "yield", "fiber?", "fiber-join",
         "make-channel", "channel?", "channel-send!", "channel-send", "channel-recv",
-        "channel-receive", "channel-close!", "channel-closed?"};
+        "channel-receive", "channel-get", "channel-close!", "channel-closed?",
+        "channel-timeout-exception?"};
     static const char *const chaaya_ffi_exports[] = {"open-foreign-library",
                                                       "close-foreign-library!",
                                                       "foreign-library?",

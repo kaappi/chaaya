@@ -3,6 +3,7 @@
 #include "chaaya/fiber.h"
 #include "chaaya/printer.h"
 #include "chaaya/reader.h"
+#include "chaaya/sandbox.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -463,7 +464,13 @@ static const char *require_path(ChVM *vm, ChValue v, const char *who) {
         snprintf(vm->error, sizeof(vm->error), "%s: expected string path", who);
         return NULL;
     }
-    return ch_as_string(v)->data;
+    const char *path = ch_as_string(v)->data;
+    if (ch_sandbox_deny_fs(path)) {
+        snprintf(vm->error, sizeof(vm->error),
+                 "%s: denied by sandbox for path '%s'", who, path);
+        return NULL;
+    }
+    return path;
 }
 
 static ChValue raise_typed_error(ChVM *vm, const char *message, int error_type, ChValue irritant) {

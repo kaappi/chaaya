@@ -219,27 +219,41 @@ static ChValue prim_string_contains(ChVM *vm, ChValue *args, int nargs) {
     }
     ChString *s = ch_as_string(args[0]);
     ChString *pat = ch_as_string(args[1]);
-    if (pat->len == 0) {
-        return ch_make_fixnum(0);
+    size_t cp_len = 0;
+    if (utf8_count_codepoints(vm, s, "string-contains", &cp_len) != 0) {
+        return CH_UNDEFINED;
     }
-    if (pat->len > s->len) {
+    size_t start = 0;
+    size_t end = cp_len;
+    if (parse_optional_range(vm, args, nargs, 2, cp_len, "string-contains", &start, &end) != 0) {
+        return CH_UNDEFINED;
+    }
+    if (pat->len == 0) {
+        return ch_make_fixnum((int64_t)start);
+    }
+    size_t start_byte = 0;
+    size_t end_byte = 0;
+    if (utf8_offset_for_index(vm, s, start, "string-contains", &start_byte) != 0 ||
+        utf8_offset_for_index(vm, s, end, "string-contains", &end_byte) != 0) {
+        return CH_UNDEFINED;
+    }
+    if (pat->len > (end_byte - start_byte)) {
         return CH_FALSE;
     }
-    for (size_t i = 0; i + pat->len <= s->len; i++) {
-        if (memcmp(s->data + i, pat->data, pat->len) == 0) {
-            size_t cp_idx = 0;
-            size_t pos = 0;
-            while (pos < i) {
-                uint32_t cp = 0;
-                size_t next = 0;
-                if (!utf8_decode_next(s->data, s->len, pos, &cp, &next)) {
-                    break;
-                }
-                pos = next;
-                cp_idx++;
-            }
+    size_t cp_idx = start;
+    for (size_t pos = start_byte; pos + pat->len <= end_byte;) {
+        if (memcmp(s->data + pos, pat->data, pat->len) == 0) {
             return ch_make_fixnum((int64_t)cp_idx);
         }
+        uint32_t cp = 0;
+        size_t next = 0;
+        if (!utf8_decode_next(s->data, s->len, pos, &cp, &next)) {
+            snprintf(vm->error, sizeof(vm->error), "string-contains: invalid UTF-8");
+            return CH_UNDEFINED;
+        }
+        (void)cp;
+        pos = next;
+        cp_idx++;
     }
     return CH_FALSE;
 }

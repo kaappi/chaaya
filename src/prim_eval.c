@@ -4,6 +4,7 @@
 #include "chaaya/environment.h"
 #include "chaaya/eval.h"
 #include "chaaya/library.h"
+#include "chaaya/sandbox.h"
 
 #include <limits.h>
 #include <math.h>
@@ -46,6 +47,11 @@ static int import_library_into_env(ChVM *vm, ChEnvironment *env, const char *a, 
 }
 
 static ChValue prim_eval(ChVM *vm, ChValue *args, int nargs) {
+    if (ch_sandbox_deny_eval()) {
+        snprintf(vm->error, sizeof(vm->error), "eval: denied by sandbox");
+        return CH_UNDEFINED;
+    }
+
     ChValue env = (nargs >= 2) ? args[1] : CH_VOID;
     ChValue result = CH_VOID;
     if (ch_eval_datum(vm, args[0], env, &result) != 0) {
@@ -114,6 +120,11 @@ static ChValue prim_scheme_report_environment(ChVM *vm, ChValue *args, int nargs
 }
 
 static ChValue prim_load(ChVM *vm, ChValue *args, int nargs) {
+    if (ch_sandbox_deny_eval()) {
+        snprintf(vm->error, sizeof(vm->error), "load: denied by sandbox");
+        return CH_UNDEFINED;
+    }
+
     if (nargs > 2) {
         snprintf(vm->error, sizeof(vm->error), "load: expected 1 or 2 arguments");
         return CH_UNDEFINED;

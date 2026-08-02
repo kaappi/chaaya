@@ -22,6 +22,10 @@ int ch_cache_try_load(ChVM *vm, const char *path, const char *source, size_t sou
 int ch_cache_store(ChVM *vm, const char *path, const char *source, size_t source_len,
                    ChFunction **fns, size_t count);
 
+/* Store compiled top-level functions to an explicit .chbc file path. */
+int ch_cache_write_file(const char *out_path, ChVM *vm, const char *source_path,
+                        const char *source, size_t source_len, ChFunction **fns, size_t count);
+
 #ifdef __cplusplus
 }
 #endif

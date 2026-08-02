@@ -71,9 +71,26 @@ int main(void) {
         return 1;
     }
 
-    char *argv_nyi[] = {"chaaya", "--sandbox", NULL};
-    if (ch_cli_parse(2, argv_nyi, &opts) != CH_EXIT_OK || !opts.nyi_flag) {
-        fprintf(stderr, "expected nyi flag for --sandbox\n");
+    char *argv_sandbox[] = {"chaaya", "--sandbox", NULL};
+    if (ch_cli_parse(2, argv_sandbox, &opts) != CH_EXIT_OK || !opts.flag_sandbox || opts.nyi_flag) {
+        fprintf(stderr, "parse --sandbox failed\n");
+        return 1;
+    }
+
+    char *argv_timings[] = {"chaaya", "--timings=json", NULL};
+    if (ch_cli_parse(2, argv_timings, &opts) != CH_EXIT_OK || !opts.flag_timings ||
+        !opts.timings_json) {
+        fprintf(stderr, "parse --timings=json failed\n");
+        return 1;
+    }
+
+    char *argv_test_flags[] = {"chaaya", "test", "--json", "-j", "4", "--seed", "123", "a.scm",
+                               "b.scm",  NULL};
+    if (ch_cli_parse(9, argv_test_flags, &opts) != CH_EXIT_OK || opts.command != CH_CMD_TEST ||
+        !opts.test_json || opts.test_jobs != 4 || !opts.test_seed_set || opts.test_seed != 123 ||
+        !opts.file || strcmp(opts.file, "a.scm") != 0 || opts.script_arg_count != 1 ||
+        strcmp(opts.script_args[0], "b.scm") != 0) {
+        fprintf(stderr, "parse test flags failed\n");
         return 1;
     }
 

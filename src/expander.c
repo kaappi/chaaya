@@ -1391,12 +1391,14 @@ static ChValue append_one(ChGC *gc, ChValue list, ChValue item) {
     if (ch_is_nil(list)) {
         return list1(gc, item);
     }
+    ChValue list_root = list;
     ChValue head = CH_NIL;
     ChValue tail = CH_NIL;
+    ch_gc_push(gc, &list_root);
     ch_gc_push(gc, &head);
     ch_gc_push(gc, &tail);
     ch_gc_push(gc, &item);
-    for (ChValue p = list; ch_is_pair(p); p = ch_cdr(p)) {
+    for (ChValue p = list_root; ch_is_pair(p); p = ch_cdr(p)) {
         ChValue cell = ch_gc_cons(gc, ch_car(p), CH_NIL);
         if (ch_is_nil(head)) {
             head = cell;
@@ -1412,7 +1414,7 @@ static ChValue append_one(ChGC *gc, ChValue list, ChValue item) {
     } else {
         ch_set_cdr(tail, cell);
     }
-    ch_gc_pop_n(gc, 3);
+    ch_gc_pop_n(gc, 4);
     return head;
 }
 

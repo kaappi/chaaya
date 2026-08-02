@@ -8,6 +8,7 @@
 #include "chaaya/reader.h"
 #include "chaaya/version.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,9 @@
 #endif
 
 #define CH_HISTORY_MAX 1000
+#define CH_REPL_MAX_WATCHES 32
+#define CH_REPL_MAX_WATCH_EXPR 256
+#define CH_REPL_MAX_BREAK_COND 256
 
 static ChVM *g_repl_vm = NULL; /* for completion callback */
 
@@ -116,9 +120,12 @@ static void print_comma_help(void) {
     puts("  ,expand <expr>    Expand expression and print transformed form");
     puts("  ,import <lib>     Import a library (e.g. ,import (srfi 64))");
     puts("  ,dis <expr>       Disassemble a procedure");
-    puts("  ,break <name>     Break when calling the named procedure");
+    puts("  ,break <name> [if <expr>]  Break on call; optional condition");
     puts("  ,breakpoints      List active breakpoints");
     puts("  ,delete <name>    Remove a breakpoint");
+    puts("  ,watch <expr>     Add a debugger watch expression");
+    puts("  ,watch            List watch expressions");
+    puts("  ,unwatch [n|expr] Remove watch by index/expression (none = all)");
     puts("  ,step <expr>      Evaluate; pause on next call (interactive debugger)");
     puts("  ,continue         Resume from a breakpoint (debug> prompt)");
     puts("  ,next / ,finish   Step/finish from a breakpoint");
@@ -128,12 +135,17 @@ static void print_comma_help(void) {
     puts("  ,env [prefix]     List defined globals");
     puts("  ,time <expr>      Evaluate and print elapsed milliseconds");
     puts("  ,type <expr>      Evaluate and print result type");
+    puts("  ,apropos <text>   Search global bindings");
+    puts("  ,describe <name>  Describe a global binding");
     puts("");
-    puts("Other Kaappi comma-commands (,profile, ,apropos, …) are not implemented yet.");
+    puts("Other Kaappi comma-commands (,profile, …) are not implemented yet.");
 }
 
 static int g_debug_continue = 0;
 static int g_debug_abort = 0;
+static char g_debug_watches[CH_REPL_MAX_WATCHES][CH_REPL_MAX_WATCH_EXPR];
+static size_t g_debug_watch_count = 0;
+static char g_break_conditions[CH_VM_MAX_BREAKPOINTS][CH_REPL_MAX_BREAK_COND];
 
 static void debug_print_backtrace(ChVM *vm) {
     printf("; backtrace (%zu frame%s):\n", vm->frame_count, vm->frame_count == 1 ? "" : "s");
@@ -155,8 +167,196 @@ static void debug_print_backtrace(ChVM *vm) {
     }
 }
 
+static int vm_lookup_global_value(ChVM *vm, const char *name, ChValue *out) {
+    if (!vm || !name) {
+        return 0;
+    }
+    for (size_t i = 0; i < vm->global_count; i++) {
+        if (!vm->globals[i].defined) {
+            continue;
+        }
+        if (strcmp(vm->globals[i].name->name, name) == 0) {
+            if (out) {
+                *out = vm->globals[i].value;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int repl_eval_expr_quiet(ChVM *vm, const char *expr, ChValue *out) {
+    bool saved_debug = vm->debug_mode;
+    bool saved_step_trace = vm->step_trace;
+    int saved_step_mode = vm->debug_step_mode;
+    int (*saved_hook)(ChVM *, const char *) = vm->debug_break_hook;
+
+    vm->debug_mode = false;
+    vm->step_trace = false;
+    vm->debug_step_mode = 0;
+    vm->debug_break_hook = NULL;
+
+    int rc = ch_eval_source(vm, expr, strlen(expr), 0);
+
+    vm->debug_break_hook = saved_hook;
+    vm->debug_mode = saved_debug;
+    vm->step_trace = saved_step_trace;
+    vm->debug_step_mode = saved_step_mode;
+
+    if (rc != 0) {
+        return -1;
+    }
+    if (out) {
+        if (!vm_lookup_global_value(vm, "_", out)) {
+            *out = CH_VOID;
+        }
+    }
+    return 0;
+}
+
+static int repl_strcasestr(const char *haystack, const char *needle) {
+    if (!needle || !needle[0]) {
+        return 1;
+    }
+    if (!haystack) {
+        return 0;
+    }
+    size_t nlen = strlen(needle);
+    size_t hlen = strlen(haystack);
+    if (nlen > hlen) {
+        return 0;
+    }
+    for (size_t i = 0; i + nlen <= hlen; i++) {
+        size_t j = 0;
+        while (j < nlen) {
+            unsigned char hc = (unsigned char)haystack[i + j];
+            unsigned char nc = (unsigned char)needle[j];
+            if (tolower(hc) != tolower(nc)) {
+                break;
+            }
+            j++;
+        }
+        if (j == nlen) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int debug_add_watch_expr(const char *expr) {
+    if (!expr || !expr[0]) {
+        return -1;
+    }
+    for (size_t i = 0; i < g_debug_watch_count; i++) {
+        if (strcmp(g_debug_watches[i], expr) == 0) {
+            return 1; /* duplicate */
+        }
+    }
+    if (g_debug_watch_count >= CH_REPL_MAX_WATCHES) {
+        return -2;
+    }
+    if (snprintf(g_debug_watches[g_debug_watch_count], CH_REPL_MAX_WATCH_EXPR, "%s", expr) >=
+        CH_REPL_MAX_WATCH_EXPR) {
+        return -3;
+    }
+    g_debug_watch_count++;
+    return 0;
+}
+
+static void debug_list_watches(void) {
+    if (g_debug_watch_count == 0) {
+        puts("; no watches");
+        return;
+    }
+    for (size_t i = 0; i < g_debug_watch_count; i++) {
+        printf("; watch %zu: %s\n", i + 1, g_debug_watches[i]);
+    }
+}
+
+static int debug_remove_watch_index(size_t idx) {
+    if (idx >= g_debug_watch_count) {
+        return -1;
+    }
+    memmove(&g_debug_watches[idx], &g_debug_watches[idx + 1],
+            (g_debug_watch_count - idx - 1) * sizeof(g_debug_watches[0]));
+    g_debug_watch_count--;
+    return 0;
+}
+
+static int debug_remove_watch_expr(const char *expr) {
+    for (size_t i = 0; i < g_debug_watch_count; i++) {
+        if (strcmp(g_debug_watches[i], expr) == 0) {
+            return debug_remove_watch_index(i);
+        }
+    }
+    return -1;
+}
+
+static int debug_should_pause_for_name(ChVM *vm, const char *name) {
+    if (!name) {
+        return 1;
+    }
+    int matched = 0;
+    int has_condition = 0;
+    for (size_t i = 0; i < vm->breakpoint_count; i++) {
+        if (strcmp(vm->breakpoints[i], name) != 0) {
+            continue;
+        }
+        matched = 1;
+        const char *cond = g_break_conditions[i];
+        if (!cond[0]) {
+            return 1;
+        }
+        has_condition = 1;
+        ChValue cond_value = CH_FALSE;
+        if (repl_eval_expr_quiet(vm, cond, &cond_value) != 0) {
+            fprintf(stderr, "; breakpoint condition error for %s: %s\n", name,
+                    vm->error[0] ? vm->error : "evaluation failed");
+            vm->error[0] = '\0';
+            return 1;
+        }
+        if (ch_is_true_value(cond_value)) {
+            return 1;
+        }
+    }
+    if (!matched) {
+        return 1;
+    }
+    if (has_condition) {
+        return 0;
+    }
+    return 1;
+}
+
+static void debug_print_watches(ChVM *vm) {
+    if (g_debug_watch_count == 0) {
+        return;
+    }
+    puts("; watches:");
+    for (size_t i = 0; i < g_debug_watch_count; i++) {
+        ChValue value = CH_UNDEFINED;
+        int rc = repl_eval_expr_quiet(vm, g_debug_watches[i], &value);
+        printf(";   [%zu] %s => ", i + 1, g_debug_watches[i]);
+        if (rc != 0) {
+            printf("<error: %s>\n", vm->error[0] ? vm->error : "evaluation failed");
+            vm->error[0] = '\0';
+            continue;
+        }
+        ch_print_value(stdout, value, false);
+        fputc('\n', stdout);
+    }
+}
+
 static int debug_break_hook(ChVM *vm, const char *name) {
-    (void)name;
+    if (!debug_should_pause_for_name(vm, name)) {
+        return 0;
+    }
+
+    if (name && name[0]) {
+        printf("; paused at %s\n", name);
+    }
+    debug_print_watches(vm);
+
     g_debug_continue = 0;
     g_debug_abort = 0;
     while (!g_debug_continue && !g_debug_abort) {
@@ -196,6 +396,48 @@ static int debug_break_hook(ChVM *vm, const char *name) {
             debug_print_backtrace(vm);
             continue;
         }
+        if (strcmp(cmd, ",watch") == 0 || strcmp(cmd, ",watches") == 0) {
+            debug_list_watches();
+            continue;
+        }
+        if (strncmp(cmd, ",watch ", 7) == 0) {
+            const char *expr = trim_left(cmd + 7);
+            int rc = debug_add_watch_expr(expr);
+            if (rc == 0) {
+                printf("; watch added: %s\n", expr);
+            } else if (rc == 1) {
+                printf("; watch already exists: %s\n", expr);
+            } else if (rc == -2) {
+                fprintf(stderr, "; watch limit reached (%d)\n", CH_REPL_MAX_WATCHES);
+            } else if (rc == -3) {
+                fprintf(stderr, "; watch expression too long\n");
+            } else {
+                fprintf(stderr, "; watch: missing expression\n");
+            }
+            continue;
+        }
+        if (strcmp(cmd, ",unwatch") == 0) {
+            g_debug_watch_count = 0;
+            puts("; cleared watches");
+            continue;
+        }
+        if (strncmp(cmd, ",unwatch ", 9) == 0) {
+            char *arg = trim_left(cmd + 9);
+            char *endptr = NULL;
+            long idx = strtol(arg, &endptr, 10);
+            if (endptr && *trim_left(endptr) == '\0' && idx > 0) {
+                if (debug_remove_watch_index((size_t)(idx - 1)) == 0) {
+                    printf("; removed watch %ld\n", idx);
+                } else {
+                    fprintf(stderr, "; unwatch: index out of range\n");
+                }
+            } else if (debug_remove_watch_expr(arg) == 0) {
+                printf("; removed watch: %s\n", arg);
+            } else {
+                fprintf(stderr, "; unwatch: no such watch\n");
+            }
+            continue;
+        }
         if (strcmp(cmd, ",locals") == 0) {
             if (vm->frame_count == 0) {
                 puts("; no frames");
@@ -219,7 +461,8 @@ static int debug_break_hook(ChVM *vm, const char *name) {
             break;
         }
         if (strcmp(cmd, ",help") == 0) {
-            puts("debug commands: ,continue ,step ,next ,finish ,backtrace ,locals ,quit");
+            puts("debug commands: ,continue ,step ,next ,finish ,backtrace ,locals "
+                 ",watch ,unwatch ,quit");
             continue;
         }
         fprintf(stderr, "debug: unknown command (try ,help)\n");
@@ -359,6 +602,51 @@ static int repl_expand_expr(ChVM *vm, const char *expr_src) {
     return 0;
 }
 
+static void repl_describe_binding(ChVM *vm, const char *name) {
+    ChValue value = CH_UNDEFINED;
+    if (!vm_lookup_global_value(vm, name, &value)) {
+        fprintf(stderr, ",describe: no binding named '%s'\n", name);
+        return;
+    }
+    printf("%s\n", name);
+    printf("  type: %s\n", ch_value_type_name(value));
+    if (ch_is_native(value)) {
+        ChNative *nat = ch_as_native(value);
+        if (nat->arity >= 0) {
+            printf("  procedure: native (%d args)\n", nat->arity);
+        } else {
+            printf("  procedure: native (variadic, min %d)\n", nat->min_arity);
+        }
+    } else if (ch_is_closure(value)) {
+        ChFunction *fn = ch_as_closure(value)->fn;
+        printf("  procedure: closure (%u arg%s%s)\n", (unsigned)fn->arity,
+               fn->arity == 1 ? "" : "s", fn->variadic ? "+rest" : "");
+    }
+    printf("  value: ");
+    ch_print_value(stdout, value, false);
+    fputc('\n', stdout);
+}
+
+static void repl_apropos(ChVM *vm, const char *needle) {
+    size_t hits = 0;
+    for (size_t i = 0; i < vm->global_count; i++) {
+        if (!vm->globals[i].defined) {
+            continue;
+        }
+        const char *name = vm->globals[i].name->name;
+        if (!repl_strcasestr(name, needle)) {
+            continue;
+        }
+        puts(name);
+        hits++;
+    }
+    if (hits == 0) {
+        puts("; no matches");
+    } else {
+        printf("; %zu match%s\n", hits, hits == 1 ? "" : "es");
+    }
+}
+
 static int handle_comma(ChVM *vm, char *line, int *should_exit) {
     char *cmd = trim_left(line);
     *should_exit = 0;
@@ -392,6 +680,50 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
             }
             puts(name);
         }
+        return 0;
+    }
+    if (strcmp(cmd, ",watch") == 0 || strcmp(cmd, ",watches") == 0) {
+        debug_list_watches();
+        return 0;
+    }
+    if (strncmp(cmd, ",watch ", 7) == 0) {
+        const char *expr = trim_left(cmd + 7);
+        int rc = debug_add_watch_expr(expr);
+        if (rc == 0) {
+            printf("; watch added: %s\n", expr);
+        } else if (rc == 1) {
+            printf("; watch already exists: %s\n", expr);
+        } else if (rc == -2) {
+            fprintf(stderr, ",watch: limit reached (%d)\n", CH_REPL_MAX_WATCHES);
+        } else if (rc == -3) {
+            fprintf(stderr, ",watch: expression too long\n");
+        } else {
+            fprintf(stderr, ",watch: missing expression\n");
+        }
+        return 0;
+    }
+    if (strcmp(cmd, ",unwatch") == 0) {
+        g_debug_watch_count = 0;
+        puts("; cleared watches");
+        return 0;
+    }
+    if (strncmp(cmd, ",unwatch ", 9) == 0) {
+        char *arg = trim_left(cmd + 9);
+        char *endptr = NULL;
+        long idx = strtol(arg, &endptr, 10);
+        if (endptr && *trim_left(endptr) == '\0' && idx > 0) {
+            if (debug_remove_watch_index((size_t)(idx - 1)) == 0) {
+                printf("; removed watch %ld\n", idx);
+            } else {
+                fprintf(stderr, ",unwatch: index out of range\n");
+            }
+            return 0;
+        }
+        if (debug_remove_watch_expr(arg) == 0) {
+            printf("; removed watch: %s\n", arg);
+            return 0;
+        }
+        fprintf(stderr, ",unwatch: no such watch\n");
         return 0;
     }
     if (strncmp(cmd, ",load ", 6) == 0) {
@@ -438,8 +770,27 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
         return 0;
     }
     if (strncmp(cmd, ",break ", 7) == 0) {
-        const char *name = trim_left(cmd + 7);
-        if (!name[0]) {
+        char *spec = trim_left(cmd + 7);
+        if (!spec[0]) {
+            fprintf(stderr, ",break: missing name\n");
+            return 0;
+        }
+        char *if_kw = strstr(spec, " if ");
+        char *cond = NULL;
+        if (if_kw) {
+            *if_kw = '\0';
+            cond = trim_left(if_kw + 4);
+            if (!cond[0]) {
+                fprintf(stderr, ",break: missing condition after 'if'\n");
+                return 0;
+            }
+        }
+        char *name = spec;
+        size_t name_len = strlen(name);
+        while (name_len > 0 && (name[name_len - 1] == ' ' || name[name_len - 1] == '\t')) {
+            name[--name_len] = '\0';
+        }
+        if (name_len == 0) {
             fprintf(stderr, ",break: missing name\n");
             return 0;
         }
@@ -452,9 +803,22 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
             fprintf(stderr, ",break: name too long\n");
             return 0;
         }
+        if (cond) {
+            if (snprintf(g_break_conditions[vm->breakpoint_count], CH_REPL_MAX_BREAK_COND, "%s", cond) >=
+                CH_REPL_MAX_BREAK_COND) {
+                fprintf(stderr, ",break: condition too long\n");
+                return 0;
+            }
+        } else {
+            g_break_conditions[vm->breakpoint_count][0] = '\0';
+        }
         vm->breakpoint_count++;
         vm->debug_mode = true;
-        printf("; breakpoint set on %s\n", name);
+        if (cond) {
+            printf("; breakpoint set on %s if %s\n", name, cond);
+        } else {
+            printf("; breakpoint set on %s\n", name);
+        }
         return 0;
     }
     if (strcmp(cmd, ",breakpoints") == 0) {
@@ -463,7 +827,12 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
             return 0;
         }
         for (size_t i = 0; i < vm->breakpoint_count; i++) {
-            printf("; breakpoint %zu: %s\n", i + 1, vm->breakpoints[i]);
+            if (g_break_conditions[i][0]) {
+                printf("; breakpoint %zu: %s if %s\n", i + 1, vm->breakpoints[i],
+                       g_break_conditions[i]);
+            } else {
+                printf("; breakpoint %zu: %s\n", i + 1, vm->breakpoints[i]);
+            }
         }
         return 0;
     }
@@ -477,7 +846,12 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
             if (strcmp(vm->breakpoints[i], name) == 0) {
                 memmove(&vm->breakpoints[i], &vm->breakpoints[i + 1],
                         (vm->breakpoint_count - i - 1) * sizeof(vm->breakpoints[0]));
+                memmove(&g_break_conditions[i], &g_break_conditions[i + 1],
+                        (vm->breakpoint_count - i - 1) * sizeof(g_break_conditions[0]));
                 vm->breakpoint_count--;
+                if (vm->breakpoint_count < CH_VM_MAX_BREAKPOINTS) {
+                    g_break_conditions[vm->breakpoint_count][0] = '\0';
+                }
                 printf("; deleted breakpoint %s\n", name);
                 if (vm->breakpoint_count == 0) {
                     vm->debug_mode = false;
@@ -516,25 +890,39 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
     if (strncmp(cmd, ",type ", 6) == 0) {
         const char *expr = trim_left(cmd + 6);
         /* Eval without printing; read last `_` or evaluate into temp */
-        size_t before = vm->global_count;
-        (void)before;
         int rc = ch_eval_source(vm, expr, strlen(expr), 0);
         if (rc != 0) {
             return 0;
         }
-        /* Find `_` */
-        for (size_t i = 0; i < vm->global_count; i++) {
-            if (vm->globals[i].defined && strcmp(vm->globals[i].name->name, "_") == 0) {
-                printf("%s\n", ch_value_type_name(vm->globals[i].value));
-                return 0;
-            }
+        ChValue value = CH_VOID;
+        if (vm_lookup_global_value(vm, "_", &value)) {
+            printf("%s\n", ch_value_type_name(value));
+            return 0;
         }
         puts("void");
         return 0;
     }
+    if (strncmp(cmd, ",apropos", 8) == 0 && (cmd[8] == '\0' || cmd[8] == ' ')) {
+        const char *needle = trim_left(cmd + 8);
+        if (!needle[0]) {
+            fprintf(stderr, ",apropos: missing search text\n");
+            return 0;
+        }
+        repl_apropos(vm, needle);
+        return 0;
+    }
+    if (strncmp(cmd, ",describe", 9) == 0 && (cmd[9] == '\0' || cmd[9] == ' ')) {
+        const char *name = trim_left(cmd + 9);
+        if (!name[0]) {
+            fprintf(stderr, ",describe: missing symbol name\n");
+            return 0;
+        }
+        repl_describe_binding(vm, name);
+        return 0;
+    }
 
     /* Known Kaappi commands not yet supported */
-    static const char *nyi[] = {",condition", ",profile", ",describe", ",apropos", NULL};
+    static const char *nyi[] = {",condition", ",profile", NULL};
     for (int i = 0; nyi[i]; i++) {
         size_t n = strlen(nyi[i]);
         if (strncmp(cmd, nyi[i], n) == 0 && (cmd[n] == '\0' || cmd[n] == ' ')) {
@@ -550,9 +938,10 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
 #ifdef CHAAYA_HAS_LINENOISE
 static void completion_callback(const char *buf, linenoiseCompletions *lc) {
     static const char *cmds[] = {",help",     ",quit", ",exit", ",version", ",load ", ",expand ",
-                                 ",import ", ",dis ",   ",break ",   ",breakpoints", ",delete ",
-                                 ",step ", ",continue", ",backtrace", ",locals", ",gc", ",env",
-                                 ",time ", ",type ", NULL};
+                                 ",import ", ",dis ",   ",break ", ",breakpoints", ",delete ",
+                                 ",watch ", ",unwatch ", ",step ", ",continue", ",backtrace",
+                                 ",locals", ",gc", ",env", ",time ", ",type ", ",apropos ",
+                                 ",describe ", NULL};
     if (buf[0] == ',') {
         for (int i = 0; cmds[i]; i++) {
             if (strncmp(cmds[i], buf, strlen(buf)) == 0) {

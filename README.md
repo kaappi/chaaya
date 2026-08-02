@@ -72,25 +72,23 @@ See [docs/dev/cli.md](docs/dev/cli.md) and [docs/dev/repl.md](docs/dev/repl.md).
 | 7 | Full R7RS-small surface (**R7RS CTest green**; kaappi-deferred compliance/smoke batches in progress) |
 | 8 | IR/opts, generational GC, CLI tooling (`check`, `expand`, `fmt`, cache) (**MVP done**) |
 | 9 | Portable SRFI subset + import resolution (**partial**: ~192 vendored under `lib/srfi/`) |
-| 10 | Fibers + FFI + reactor (**MVP done**; SRFI-18 threads NYI) |
-| 11 | LLVM / WASM / LSP / thottam integration (**stubs + docs**; see backlog below) |
+| 10 | Fibers + FFI + reactor + SRFI-18 MVP (**done**) |
+| 11 | LLVM / WASM / LSP / thottam integration (**MVP in progress**; see backlog below) |
 
-### Phase 11+ backlog (not yet implemented)
-
-These items are tracked for future work; current tree ships honest stubs only.
+### Phase 11+ backlog
 
 | Item | Current state | Next milestones |
 |------|---------------|-----------------|
-| **LLVM native** | `chaaya --native` → NYI in [`src/llvm_backend.c`](src/llvm_backend.c) | IR → LLVM IR lowering, C ABI runtime bridge, object link |
-| **WASM** | `CHAAYA_WASM` CMake target; host builds use [`src/wasm_stub.c`](src/wasm_stub.c) | wasm32-wasi CI matrix, WASI syscall shims, browser playground binary |
-| **LSP** | [`src/lsp.c`](src/lsp.c) MVP (initialize/shutdown) | diagnostics, go-to-def, document symbols |
-| **Compile cache** | [`include/chaaya/cache.h`](include/chaaya/cache.h) API stub | `.chaaya/cache` layout, invalidation, CLI `--cache` wiring |
-| **thottam** | [`docs/dev/thottam.md`](docs/dev/thottam.md); use Kaappi's Zig thottam, not a C reimplementation | Chaaya `--lib-path` consumer docs, optional `scripts/thottam-smoke.sh` in CI |
-| **R7RS CTest gate** | [`tests/scheme/run_r7rs.cmake`](tests/scheme/run_r7rs.cmake) — **green** | Expand [`tests/scheme/kaappi-deferred/`](tests/scheme/kaappi-deferred/) smoke/compliance batches |
+| **LLVM native** | Real LLVM IR emit + constant-exit lowering + `chaaya_rt` fallback ([`src/llvm_backend.c`](src/llvm_backend.c)) | broader form lowering, full C ABI runtime bridge |
+| **WASM** | `chaaya wasm` runs [`scripts/build-wasm.sh`](scripts/build-wasm.sh); host-stub / WASI CMake paths | wasm32-wasi CI matrix, browser playground binary |
+| **LSP** | Diagnostics, symbols, completion, hover, definition, references ([`src/lsp.c`](src/lsp.c)) | workspace/project indexing, richer docs |
+| **Compile cache** | Auto `.chbc` read/write + `cache status\|clear` ([`src/cache.c`](src/cache.c)) | import-aware caching, richer per-entry status |
+| **CLI observability** | `--disassemble`, `--timings`, `--gc-stats`, `--compile`, profile/coverage/timeout/sandbox MVPs | deeper coverage of library exports, parallel test `--changed` |
+| **thottam** | Use Kaappi's Zig thottam ([`docs/dev/thottam.md`](docs/dev/thottam.md)); not reimplemented in C | consumer docs / smoke wiring only |
+| **R7RS / deferred** | R7RS CTest green; large kaappi-deferred batch wired | triage remaining Kaappi compliance/smoke files |
 
 Language-parity target (≈99% Kaappi language surface): R7RS-small + portable
-SRFIs. Fibers and FFI are **MVP done**; LLVM, WASM, LSP, and thottam integration
-remain deferred (see Phase 11).
+SRFIs. Tooling/backends continue as incremental MVP hardening.
 
 ## Relationship to Kaappi
 

@@ -72,16 +72,32 @@ add_library(chaaya_core STATIC
   src/eval.c
   src/cache.c
   src/disasm.c
+  src/timings.c
   src/cli.c
   src/repl.c
+  src/sandbox.c
+  src/profile.c
+  src/coverage.c
 )
 
 target_include_directories(chaaya_core
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+target_compile_definitions(chaaya_core
+  PUBLIC
+    CHAAYA_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
 
 target_compile_options(chaaya_core PRIVATE
+  -Wall -Wextra -Wpedantic
+  $<$<BOOL:${CHAAYA_WARNINGS_AS_ERRORS}>:-Werror>
+)
+
+add_library(chaaya_rt STATIC
+  src/ch_rt_main.c
+)
+target_compile_options(chaaya_rt PRIVATE
   -Wall -Wextra -Wpedantic
   $<$<BOOL:${CHAAYA_WARNINGS_AS_ERRORS}>:-Werror>
 )
@@ -320,6 +336,7 @@ chaaya_kaappi_deferred_test(smoke_mutation_write_barrier tests/scheme/kaappi-def
 chaaya_kaappi_deferred_test(smoke_upvalue_write_barrier tests/scheme/kaappi-deferred/smoke/upvalue-write-barrier.scm)
 chaaya_kaappi_deferred_test(smoke_ellipsis_mismatch tests/scheme/kaappi-deferred/smoke/ellipsis-mismatch.scm)
 chaaya_kaappi_deferred_test(smoke_import_composed tests/scheme/kaappi-deferred/smoke/import-composed.scm)
+chaaya_kaappi_deferred_test(smoke_portable_srfi_import tests/scheme/kaappi-deferred/smoke/portable-srfi-import.scm)
 chaaya_kaappi_deferred_test(smoke_bytevector_port_fixes tests/scheme/kaappi-deferred/smoke/bytevector-port-fixes.scm)
 chaaya_kaappi_deferred_test(smoke_guard_continuable_845 tests/scheme/kaappi-deferred/smoke/guard-continuable-845.scm)
 chaaya_kaappi_deferred_test(smoke_arith_overflow tests/scheme/kaappi-deferred/smoke/arith-overflow.scm)
@@ -568,6 +585,12 @@ add_test(NAME cli_lsp_didopen_diagnostics
   COMMAND ${CMAKE_COMMAND}
     -DCHAAYA=$<TARGET_FILE:chaaya>
     -P ${CMAKE_SOURCE_DIR}/tests/cli/run_lsp_diagnostics.cmake
+)
+
+add_test(NAME cli_lsp_completion
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/run_lsp_completion.cmake
 )
 
 add_test(NAME cli_stdin

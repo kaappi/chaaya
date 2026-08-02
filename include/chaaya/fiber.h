@@ -122,6 +122,12 @@ int ch_fiber_sleep(ChVM *vm, double seconds);
 int ch_fiber_wait_fd(ChVM *vm, int fd, ChReactorInterest interest);
 int ch_channel_send(ChVM *vm, ChValue channel, ChValue value);
 int ch_channel_recv(ChVM *vm, ChValue channel, ChValue *out_value);
+/* Timeout variants: timeout_seconds < 0 waits forever; 0 is non-blocking.
+ * When timed_out is non-NULL, it is set to 1 on timeout and 0 otherwise. */
+int ch_channel_send_timeout(ChVM *vm, ChValue channel, ChValue value, double timeout_seconds,
+                            int *timed_out);
+int ch_channel_recv_timeout(ChVM *vm, ChValue channel, double timeout_seconds, ChValue *out_value,
+                            int *timed_out);
 int ch_channel_close(ChVM *vm, ChValue channel);
 int ch_channel_closed(ChVM *vm, ChValue channel, int *out_closed);
 

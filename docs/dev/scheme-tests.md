@@ -58,12 +58,16 @@ Wired in CTest as `kaappi_deferred_*` (see `CMakeLists.txt`). Enable with:
 ctest --output-on-failure -R kaappi_deferred -E smoke
 ```
 
-**Wired (language-parity track, green):** includes
+**Wired (language-parity track, mostly green):** includes
 `include-lib-decls`, `r7rs-import-macro-gaps`, `r7rs-libraries-gaps`,
 `r7rs-control-io-gaps`, `reader-port-refill-gaps`, `r7rs-expressions-gaps`,
 `r7rs-hygiene-gaps`, `r7rs-continuation-gaps`, `r7rs-tail-procedures-gaps`,
 `printer-gaps`, `record-ctor-clause-keyword-1882`, plus earlier
 numeric/reader/unicode/string/datatype/time suites.
+
+As of 2026-08-02, the previously red
+`kaappi_deferred_r7rs_continuation_gaps` multi-value `call/cc` check is green
+(call-with-values drains its consumer after a continuation barrier landing).
 
 **Still deferred (not wired):** none on the language-parity track above.
 Remaining Kaappi compliance files stay out until separately triaged.
@@ -78,7 +82,9 @@ ctest --output-on-failure -R kaappi_deferred_smoke
 
 **Wired:** language-surface fixes (`case-lambda-fixes`, `expt-negative-base-1725`,
 `equal-dag`, `circular-list-terminate`) plus a large batch of locally green
-smoke files (see `CMakeLists.txt` `smoke_*` entries).
+smoke files (see `CMakeLists.txt` `smoke_*` entries), including
+`smoke_portable_srfi_import` for explicit `--lib-path` portable SRFI import
+coverage.
 
 **Skipped (do not wire):**
 

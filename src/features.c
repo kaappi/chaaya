@@ -386,9 +386,9 @@ void ch_features_print_text(FILE *out) {
     fprintf(out, "exceptions:   yes\n");
     fprintf(out, "libraries:    yes\n");
     fprintf(out, "macros:       yes\n");
-    fprintf(out, "native:       stub (--native)\n");
-    fprintf(out, "wasm:         stub (chaaya wasm)\n");
-    fprintf(out, "lsp:          stub (chaaya lsp)\n");
+    fprintf(out, "native:       mvp (--native / compile; partial lowering)\n");
+    fprintf(out, "wasm:         mvp (chaaya wasm → build-wasm.sh)\n");
+    fprintf(out, "lsp:          mvp (diagnostics/symbols/completion/hover/def/refs)\n");
 
     fputs("\nFeatures (cond-expand identifiers):\n  ", out);
     for (size_t i = 0; i < sizeof(k_features) / sizeof(k_features[0]); i++) {

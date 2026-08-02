@@ -4,7 +4,9 @@
 #include "chaaya/rational.h"
 #include "chaaya/thread.h"
 
+#include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 static void define_prim(ChVM *vm, const char *name, ChNativeFn fn, int arity, int min_arity) {
     ChValue sym = ch_gc_intern_symbol_cstr(&vm->gc, name);
@@ -12,6 +14,8 @@ static void define_prim(ChVM *vm, const char *name, ChNativeFn fn, int arity, in
     ChValue nv = ch_gc_make_native(&vm->gc, fn, name, arity, min_arity);
     ch_vm_define_global(vm, idx, nv);
 }
+
+static int sleep_seconds_arg(ChValue v, double *out);
 
 static ChValue prim_spawn_fiber(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
@@ -72,20 +76,112 @@ static ChValue prim_channel_closed_p(ChVM *vm, ChValue *args, int nargs) {
 }
 
 static ChValue prim_channel_send(ChVM *vm, ChValue *args, int nargs) {
-    (void)nargs;
-    if (ch_channel_send(vm, args[0], args[1]) != 0) {
+    if (nargs < 2 || nargs > 4) {
+        snprintf(vm->error, sizeof(vm->error),
+                 "channel-send: expected 2 to 4 arguments");
+        return CH_UNDEFINED;
+    }
+    if (nargs == 2) {
+        if (ch_channel_send(vm, args[0], args[1]) != 0) {
+            return CH_UNDEFINED;
+        }
+        return CH_VOID;
+    }
+
+    double timeout = 0.0;
+    if (args[2] == CH_FALSE) {
+        timeout = 0.0;
+    } else if (!sleep_seconds_arg(args[2], &timeout) || !isfinite(timeout) || timeout < 0.0) {
+        snprintf(vm->error, sizeof(vm->error),
+                 "channel-send: expected non-negative timeout");
+        return CH_UNDEFINED;
+    }
+
+    int timed_out = 0;
+    if (ch_channel_send_timeout(vm, args[0], args[1], timeout, &timed_out) != 0) {
+        if (timed_out) {
+            if (nargs >= 4) {
+                return args[3];
+            }
+            ChValue msg = ch_gc_make_string_cstr(&vm->gc, "channel-send: timed out");
+            ChValue irritants = CH_NIL;
+            ch_gc_push(&vm->gc, &msg);
+            ch_gc_push(&vm->gc, &irritants);
+            ChValue channel_arg = args[0];
+            ch_gc_push(&vm->gc, &channel_arg);
+            irritants = ch_gc_cons(&vm->gc, channel_arg, CH_NIL);
+            ch_gc_pop(&vm->gc);
+            ChValue err = ch_gc_make_error_object(&vm->gc, msg, irritants, 0);
+            ch_gc_pop_n(&vm->gc, 2);
+            return ch_vm_raise(vm, err, 0);
+        }
         return CH_UNDEFINED;
     }
     return CH_VOID;
 }
 
 static ChValue prim_channel_recv(ChVM *vm, ChValue *args, int nargs) {
-    (void)nargs;
+    if (nargs < 1 || nargs > 3) {
+        snprintf(vm->error, sizeof(vm->error),
+                 "channel-receive: expected 1 to 3 arguments");
+        return CH_UNDEFINED;
+    }
     ChValue value = CH_UNDEFINED;
-    if (ch_channel_recv(vm, args[0], &value) != 0) {
+    if (nargs == 1) {
+        if (ch_channel_recv(vm, args[0], &value) != 0) {
+            return CH_UNDEFINED;
+        }
+        return value;
+    }
+
+    double timeout = 0.0;
+    if (args[1] == CH_FALSE) {
+        timeout = 0.0;
+    } else if (!sleep_seconds_arg(args[1], &timeout) || !isfinite(timeout) || timeout < 0.0) {
+        snprintf(vm->error, sizeof(vm->error),
+                 "channel-receive: expected non-negative timeout");
+        return CH_UNDEFINED;
+    }
+
+    int timed_out = 0;
+    if (ch_channel_recv_timeout(vm, args[0], timeout, &value, &timed_out) != 0) {
+        if (timed_out) {
+            if (nargs >= 3) {
+                return args[2];
+            }
+            ChValue msg = ch_gc_make_string_cstr(&vm->gc, "channel-receive: timed out");
+            ChValue irritants = CH_NIL;
+            ch_gc_push(&vm->gc, &msg);
+            ch_gc_push(&vm->gc, &irritants);
+            ChValue channel_arg = args[0];
+            ch_gc_push(&vm->gc, &channel_arg);
+            irritants = ch_gc_cons(&vm->gc, channel_arg, CH_NIL);
+            ch_gc_pop(&vm->gc);
+            ChValue err = ch_gc_make_error_object(&vm->gc, msg, irritants, 0);
+            ch_gc_pop_n(&vm->gc, 2);
+            return ch_vm_raise(vm, err, 0);
+        }
         return CH_UNDEFINED;
     }
     return value;
+}
+
+static ChValue prim_channel_timeout_exception_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)nargs;
+    if (!ch_is_error_object(args[0])) {
+        return CH_FALSE;
+    }
+    ChErrorObject *err = ch_as_error_object(args[0]);
+    if (!ch_is_string(err->message)) {
+        return CH_FALSE;
+    }
+    const char *msg = ch_as_string(err->message)->data;
+    if (strncmp(msg, "channel-send: timed out", 23) == 0 ||
+        strncmp(msg, "channel-receive: timed out", 26) == 0) {
+        return CH_TRUE;
+    }
+    return CH_FALSE;
 }
 
 static ChValue prim_fiber_p(ChVM *vm, ChValue *args, int nargs) {
@@ -292,10 +388,12 @@ void ch_register_fiber_primitives(ChVM *vm) {
     define_prim(vm, "fiber-join", prim_fiber_join, 1, 1);
     define_prim(vm, "make-channel", prim_make_channel, -1, 0);
     define_prim(vm, "channel?", prim_channel_p, 1, 1);
-    define_prim(vm, "channel-send!", prim_channel_send, 2, 2);
-    define_prim(vm, "channel-send", prim_channel_send, 2, 2);
-    define_prim(vm, "channel-recv", prim_channel_recv, 1, 1);
-    define_prim(vm, "channel-receive", prim_channel_recv, 1, 1);
+    define_prim(vm, "channel-send!", prim_channel_send, -1, 2);
+    define_prim(vm, "channel-send", prim_channel_send, -1, 2);
+    define_prim(vm, "channel-recv", prim_channel_recv, -1, 1);
+    define_prim(vm, "channel-receive", prim_channel_recv, -1, 1);
+    define_prim(vm, "channel-get", prim_channel_recv, -1, 1);
+    define_prim(vm, "channel-timeout-exception?", prim_channel_timeout_exception_p, 1, 1);
     define_prim(vm, "channel-close!", prim_channel_close, 1, 1);
     define_prim(vm, "channel-closed?", prim_channel_closed_p, 1, 1);
 

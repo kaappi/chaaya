@@ -28,14 +28,16 @@ Chaaya Scheme v0.1.0
 ## Implemented vs stubbed
 
 **Working now:** run/REPL/stdin, `features`, `doctor`, `ast`, `expand`, `ir`,
-`check` (expand + compile + CH4xxx lint), `explain`, `fmt`, `test` (fork/exec),
-`cache status|clear` + auto `.chbc` writer on plain runs,
-`lsp` (init/shutdown + didOpen diagnostics + symbols),
-`--lib-path`, `--completions`, `--diagnostics=text|json`, `--deny-warnings`,
-`--no-ir-opt` / `--no-opt`, `--emit-llvm`, `compile` / `--native` (MVP stub runtime).
+`check` (expand + compile + CH4xxx lint), `explain`, `fmt` (with readback
+round-trip guard), `test` (`--json`, `-j/--jobs`, `--seed`), bytecode cache
+`status|clear` + auto `.chbc` read/write on plain runs, `--compile` bytecode
+blob writer, optional disassembly dump, `lsp` (init/shutdown + diagnostics +
+completion/hover/definition/references/symbols), and wiring for `--sandbox`, `--profile[--profile-json]`,
+`--coverage[--coverage-xml]`, `--timings[=text|json]`, `--timeout`,
+`--max-memory`, `--gc-stats`.
 
-**Still NYI / limited:** `--sandbox`, `--profile`, `--coverage`, `--timings`,
-`--timeout`, `--max-memory`, `--disassemble`, full LLVM object lowering.
+**Still limited:** timeout is POSIX `alarm()`-based, memory limit is
+best-effort process RLIMIT, and LLVM object lowering is still MVP-level.
 
 ## Diagnostics
 

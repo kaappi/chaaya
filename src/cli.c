@@ -2,30 +2,55 @@
 
 #include "chaaya/cache.h"
 #include "chaaya/compiler.h"
+#include "chaaya/coverage.h"
+#include "chaaya/disasm.h"
 #include "chaaya/eval.h"
 #include "chaaya/expander.h"
 #include "chaaya/features.h"
+#include "chaaya/ffi.h"
 #include "chaaya/ir.h"
 #include "chaaya/library.h"
 #include "chaaya/llvm_backend.h"
 #include "chaaya/lsp.h"
 #include "chaaya/opcode.h"
 #include "chaaya/printer.h"
+#include "chaaya/profile.h"
 #include "chaaya/reader.h"
 #include "chaaya/repl.h"
+#include "chaaya/sandbox.h"
+#include "chaaya/timings.h"
 #include "chaaya/value.h"
 #include "chaaya/version.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <libgen.h>
 
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+#ifndef CHAAYA_SOURCE_DIR
+#define CHAAYA_SOURCE_DIR "."
+#endif
+
 static void apply_opts_to_vm(ChVM *vm, ChCliOptions *opts);
+static volatile sig_atomic_t g_cli_timeout_fired = 0;
+
+static void cli_timeout_handler(int sig) {
+    (void)sig;
+    g_cli_timeout_fired = 1;
+}
 
 static void usage_hint(const char *argv0) {
     fprintf(stderr, "Run '%s --help' for usage.\n", argv0);
@@ -42,7 +67,7 @@ void ch_cli_print_help(const char *argv0) {
     printf("       %s check <file.scm>\n", argv0);
     printf("       %s explain <code>\n", argv0);
     printf("       %s features [--json]\n", argv0);
-    printf("       %s test [paths...]\n", argv0);
+    printf("       %s test [--json] [-j N] [--seed N] [paths...]\n", argv0);
     printf("       %s ast|expand|ir <file.scm>\n", argv0);
     printf("       %s doctor [--json]\n", argv0);
     printf("       %s lsp\n", argv0);
@@ -61,7 +86,7 @@ void ch_cli_print_help(const char *argv0) {
     printf("  ir <file> [--no-opt]  Print the IR tree\n");
     printf("  doctor [--json]    Check the installation and environment\n");
     printf("  lsp                Run a minimal stdio JSON-RPC loop\n");
-    printf("  wasm               WebAssembly backend stub (MVP)\n");
+    printf("  wasm               WebAssembly backend helper/build entrypoint\n");
     printf("  fmt [files...]     Canonically format Scheme in place; --check\n");
     printf("  cache status       Show the bytecode cache location and entries\n");
     printf("  cache clear        Remove all bytecode cache entries\n");
@@ -71,8 +96,8 @@ void ch_cli_print_help(const char *argv0) {
     printf("  --version          Show version\n");
     printf("  -v                 Show version (alias)\n");
     printf("  --lib-path <path>  Add library search path (repeatable)\n");
-    printf("  --native           Route file execution through LLVM backend stub\n");
-    printf("  --compile          Compile file to bytecode (.sbc)\n");
+    printf("  --native           Route file execution through LLVM backend\n");
+    printf("  --compile          Compile file to bytecode (.chbc)\n");
     printf("  --emit-llvm        Emit LLVM IR text (.ll)\n");
     printf("  -o <file>          Output path\n");
     printf("  --disassemble      Disassemble bytecode\n");
@@ -88,6 +113,8 @@ void ch_cli_print_help(const char *argv0) {
     printf("  --coverage-xml <f> Write Cobertura XML coverage to file\n");
     printf("  --timeout <ms>     Execution timeout in milliseconds\n");
     printf("  --max-memory <n>   Maximum heap memory in bytes\n");
+    printf("  -j, --jobs <n>     (test) Run up to N tests in parallel\n");
+    printf("  --seed <n>         (test) Set and report deterministic test seed\n");
     printf("  --completions <sh> Output completion script (bash, zsh, fish)\n");
     printf("\n");
     printf("Environment variables:\n");
@@ -103,6 +130,56 @@ static int mark_nyi(ChCliOptions *o, const char *flag) {
         o->nyi_flag = flag;
     }
     return 0;
+}
+
+static int parse_long_arg(const char *flag, const char *text, long *out) {
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(text, &end, 10);
+    if (errno != 0 || !end || *end != '\0') {
+        fprintf(stderr, "%s expects an integer value\n", flag);
+        return CH_EXIT_USAGE;
+    }
+    *out = v;
+    return CH_EXIT_OK;
+}
+
+static int parse_size_arg(const char *flag, const char *text, size_t *out) {
+    char *end = NULL;
+    errno = 0;
+    unsigned long long v = strtoull(text, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || v > SIZE_MAX) {
+        fprintf(stderr, "%s expects a non-negative integer value\n", flag);
+        return CH_EXIT_USAGE;
+    }
+    *out = (size_t)v;
+    return CH_EXIT_OK;
+}
+
+static int parse_int_arg(const char *flag, const char *text, int *out) {
+    long v = 0;
+    int rc = parse_long_arg(flag, text, &v);
+    if (rc != CH_EXIT_OK) {
+        return rc;
+    }
+    if (v < INT_MIN || v > INT_MAX) {
+        fprintf(stderr, "%s value out of range\n", flag);
+        return CH_EXIT_USAGE;
+    }
+    *out = (int)v;
+    return CH_EXIT_OK;
+}
+
+static int parse_uint_arg(const char *flag, const char *text, unsigned *out) {
+    char *end = NULL;
+    errno = 0;
+    unsigned long v = strtoul(text, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || v > UINT_MAX) {
+        fprintf(stderr, "%s expects a non-negative integer value\n", flag);
+        return CH_EXIT_USAGE;
+    }
+    *out = (unsigned)v;
+    return CH_EXIT_OK;
 }
 
 static int is_subcommand(const char *s) {
@@ -176,7 +253,11 @@ int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
             continue;
         }
         if (strcmp(a, "--json") == 0) {
-            out->json = 1;
+            if (out->command == CH_CMD_TEST) {
+                out->test_json = 1;
+            } else {
+                out->json = 1;
+            }
             continue;
         }
         if (strcmp(a, "--lib-path") == 0) {
@@ -216,7 +297,6 @@ int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
         }
         if (strcmp(a, "--compile") == 0) {
             out->flag_compile = 1;
-            mark_nyi(out, "--compile");
             continue;
         }
         if (strcmp(a, "--emit-llvm") == 0) {
@@ -225,27 +305,22 @@ int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
         }
         if (strcmp(a, "--disassemble") == 0) {
             out->flag_disassemble = 1;
-            mark_nyi(out, "--disassemble");
             continue;
         }
         if (strcmp(a, "--sandbox") == 0) {
             out->flag_sandbox = 1;
-            mark_nyi(out, "--sandbox");
             continue;
         }
         if (strcmp(a, "--gc-stats") == 0) {
             out->flag_gc_stats = 1;
-            mark_nyi(out, "--gc-stats");
             continue;
         }
         if (strcmp(a, "--profile") == 0) {
             out->flag_profile = 1;
-            mark_nyi(out, "--profile");
             continue;
         }
         if (strcmp(a, "--coverage") == 0) {
             out->flag_coverage = 1;
-            mark_nyi(out, "--coverage");
             continue;
         }
         if (strcmp(a, "--no-ir-opt") == 0 || strcmp(a, "--no-opt") == 0) {
@@ -258,7 +333,17 @@ int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
         }
         if (strcmp(a, "--timings") == 0 || strncmp(a, "--timings=", 10) == 0) {
             out->flag_timings = 1;
-            mark_nyi(out, "--timings");
+            out->timings_json = 0;
+            if (strncmp(a, "--timings=", 10) == 0) {
+                const char *fmt = a + 10;
+                if (strcmp(fmt, "json") == 0) {
+                    out->timings_json = 1;
+                } else if (strcmp(fmt, "text") != 0) {
+                    fprintf(stderr, "--timings expects text or json\n");
+                    usage_hint(argv0);
+                    return CH_EXIT_USAGE;
+                }
+            }
             continue;
         }
         if (strncmp(a, "--diagnostics=", 14) == 0) {
@@ -280,9 +365,14 @@ int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
                 fprintf(stderr, "--timeout requires a value\n");
                 return CH_EXIT_USAGE;
             }
-            i++;
             out->flag_timeout = 1;
-            mark_nyi(out, "--timeout");
+            if (parse_long_arg("--timeout", argv[++i], &out->timeout_ms) != CH_EXIT_OK) {
+                return CH_EXIT_USAGE;
+            }
+            if (out->timeout_ms < 0) {
+                fprintf(stderr, "--timeout expects a non-negative value\n");
+                return CH_EXIT_USAGE;
+            }
             continue;
         }
         if (strcmp(a, "--max-memory") == 0) {
@@ -290,9 +380,10 @@ int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
                 fprintf(stderr, "--max-memory requires a value\n");
                 return CH_EXIT_USAGE;
             }
-            i++;
             out->flag_max_memory = 1;
-            mark_nyi(out, "--max-memory");
+            if (parse_size_arg("--max-memory", argv[++i], &out->max_memory_bytes) != CH_EXIT_OK) {
+                return CH_EXIT_USAGE;
+            }
             continue;
         }
         if (strcmp(a, "--profile-json") == 0) {
@@ -300,9 +391,8 @@ int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
                 fprintf(stderr, "--profile-json requires a path\n");
                 return CH_EXIT_USAGE;
             }
-            i++;
             out->flag_profile_json = 1;
-            mark_nyi(out, "--profile-json");
+            out->profile_json_path = argv[++i];
             continue;
         }
         if (strcmp(a, "--coverage-xml") == 0) {
@@ -310,9 +400,30 @@ int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
                 fprintf(stderr, "--coverage-xml requires a path\n");
                 return CH_EXIT_USAGE;
             }
-            i++;
             out->flag_coverage_xml = 1;
-            mark_nyi(out, "--coverage-xml");
+            out->coverage_xml_path = argv[++i];
+            continue;
+        }
+        if ((strcmp(a, "-j") == 0 || strcmp(a, "--jobs") == 0) && out->command == CH_CMD_TEST) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s requires a value\n", a);
+                return CH_EXIT_USAGE;
+            }
+            if (parse_int_arg(a, argv[++i], &out->test_jobs) != CH_EXIT_OK || out->test_jobs <= 0) {
+                fprintf(stderr, "%s expects a positive integer\n", a);
+                return CH_EXIT_USAGE;
+            }
+            continue;
+        }
+        if (strcmp(a, "--seed") == 0 && out->command == CH_CMD_TEST) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "--seed requires a value\n");
+                return CH_EXIT_USAGE;
+            }
+            if (parse_uint_arg("--seed", argv[++i], &out->test_seed) != CH_EXIT_OK) {
+                return CH_EXIT_USAGE;
+            }
+            out->test_seed_set = 1;
             continue;
         }
         if (strcmp(a, "--check") == 0) {
@@ -369,7 +480,7 @@ static int not_implemented(const char *what) {
     return CH_EXIT_ERROR;
 }
 
-static int run_test_subprocess(const char *argv0, ChCliOptions *opts, const char *path) {
+static pid_t spawn_test_subprocess(const char *argv0, ChCliOptions *opts, const char *path) {
     char exe[1024];
     if (realpath(argv0, exe) == NULL) {
         if (snprintf(exe, sizeof(exe), "%s", argv0) >= (int)sizeof(exe)) {
@@ -407,6 +518,10 @@ static int run_test_subprocess(const char *argv0, ChCliOptions *opts, const char
         if (chdir(dir) != 0) {
             _exit(127);
         }
+        if (opts->test_json) {
+            (void)freopen("/dev/null", "w", stdout);
+            (void)freopen("/dev/null", "w", stderr);
+        }
         char **child_argv = NULL;
         size_t argc = 0;
         size_t cap = 16;
@@ -443,17 +558,69 @@ static int run_test_subprocess(const char *argv0, ChCliOptions *opts, const char
         free(child_argv);
         _exit(127);
     }
+    return pid;
+}
 
+static int wait_test_subprocess(pid_t pid) {
     int status = 0;
     if (waitpid(pid, &status, 0) < 0) {
-        fprintf(stderr, "test: waitpid failed for %s\n", path);
         return -1;
     }
     if (WIFEXITED(status)) {
         return WEXITSTATUS(status) == 0 ? 0 : -1;
     }
-    fprintf(stderr, "test: abnormal exit for %s\n", path);
     return -1;
+}
+
+static int run_test_subprocess(const char *argv0, ChCliOptions *opts, const char *path) {
+    pid_t pid = spawn_test_subprocess(argv0, opts, path);
+    if (pid < 0) {
+        return -1;
+    }
+    return wait_test_subprocess(pid);
+}
+
+static void print_json_escaped(FILE *out, const char *s) {
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        switch (*p) {
+        case '"':
+            fputs("\\\"", out);
+            break;
+        case '\\':
+            fputs("\\\\", out);
+            break;
+        case '\n':
+            fputs("\\n", out);
+            break;
+        case '\r':
+            fputs("\\r", out);
+            break;
+        case '\t':
+            fputs("\\t", out);
+            break;
+        default:
+            if (*p < 0x20) {
+                fprintf(out, "\\u%04x", (unsigned)*p);
+            } else {
+                fputc(*p, out);
+            }
+            break;
+        }
+    }
+}
+
+static void print_test_result_line(const ChCliOptions *opts, const char *path, int pass) {
+    if (opts->test_json) {
+        fputs("{\"name\":\"", stdout);
+        print_json_escaped(stdout, path);
+        fprintf(stdout, "\",\"status\":\"%s\"}\n", pass ? "pass" : "fail");
+        return;
+    }
+    if (pass) {
+        printf("PASS %s\n", path);
+    } else {
+        fprintf(stderr, "FAIL %s\n", path);
+    }
 }
 
 static int cmd_test(const char *argv0, ChCliOptions *opts) {
@@ -470,29 +637,157 @@ static int cmd_test(const char *argv0, ChCliOptions *opts) {
         paths[i + 1] = opts->script_args[i];
     }
 
-    int failed = 0;
-    for (size_t i = 0; i < path_count; i++) {
-        const char *path = paths[i];
-        if (run_test_subprocess(argv0, opts, path) == 0) {
-            printf("PASS %s\n", path);
+    if (opts->test_seed_set) {
+        if (opts->test_json) {
+            printf("{\"seed\":%u}\n", opts->test_seed);
         } else {
-            fprintf(stderr, "FAIL %s\n", path);
-            failed++;
+            printf("test: seed=%u\n", opts->test_seed);
         }
+        fflush(stdout);
+    }
+
+    int failed = 0;
+
+    if (opts->test_jobs <= 1 || path_count <= 1) {
+        for (size_t i = 0; i < path_count; i++) {
+            const char *path = paths[i];
+            int pass = run_test_subprocess(argv0, opts, path) == 0;
+            print_test_result_line(opts, path, pass);
+            if (!pass) {
+                failed++;
+            }
+        }
+    } else {
+        typedef struct ChRunningTest {
+            pid_t pid;
+            const char *path;
+        } ChRunningTest;
+
+        size_t jobs = (size_t)opts->test_jobs;
+        if (jobs > path_count) {
+            jobs = path_count;
+        }
+        ChRunningTest *running = (ChRunningTest *)calloc(jobs, sizeof(ChRunningTest));
+        if (!running) {
+            fprintf(stderr, "test: out of memory\n");
+            return CH_EXIT_ERROR;
+        }
+
+        size_t next = 0;
+        size_t active = 0;
+        while (next < path_count || active > 0) {
+            while (next < path_count && active < jobs) {
+                pid_t pid = spawn_test_subprocess(argv0, opts, paths[next]);
+                if (pid < 0) {
+                    print_test_result_line(opts, paths[next], 0);
+                    failed++;
+                    next++;
+                    continue;
+                }
+                running[active].pid = pid;
+                running[active].path = paths[next];
+                active++;
+                next++;
+            }
+
+            if (active == 0) {
+                continue;
+            }
+
+            int status = 0;
+            pid_t done = waitpid(-1, &status, 0);
+            if (done < 0) {
+                fprintf(stderr, "test: waitpid failed\n");
+                failed += (int)active;
+                break;
+            }
+
+            size_t idx = 0;
+            while (idx < active && running[idx].pid != done) {
+                idx++;
+            }
+            if (idx == active) {
+                continue;
+            }
+
+            int pass = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+            print_test_result_line(opts, running[idx].path, pass);
+            if (!pass) {
+                failed++;
+            }
+            running[idx] = running[active - 1];
+            active--;
+        }
+
+        free(running);
     }
 
     if (failed > 0) {
-        fprintf(stderr, "test: %d/%zu file(s) failed\n", failed, path_count);
+        if (opts->test_json) {
+            fprintf(stderr, "test: %d/%zu file(s) failed\n", failed, path_count);
+        } else {
+            fprintf(stderr, "test: %d/%zu file(s) failed\n", failed, path_count);
+        }
         return CH_EXIT_ERROR;
     }
-    printf("test: %zu file(s) passed\n", path_count);
+    if (!opts->test_json) {
+        printf("test: %zu file(s) passed\n", path_count);
+    }
     return CH_EXIT_OK;
 }
 
 static int cmd_wasm_stub(void) {
-    fprintf(stderr, "chaaya: 'wasm' backend is not implemented yet (MVP stub).\n");
-    fprintf(stderr, "Enable -DCHAAYA_WASM=ON to build the wasm target scaffold.\n");
-    return CH_EXIT_ERROR;
+    char script_path[PATH_MAX];
+    if (snprintf(script_path, sizeof(script_path), "%s/scripts/build-wasm.sh", CHAAYA_SOURCE_DIR) >=
+        (int)sizeof(script_path)) {
+        fprintf(stderr, "chaaya: wasm script path is too long\n");
+        return CH_EXIT_ERROR;
+    }
+
+    if (access(script_path, F_OK) == 0) {
+        char cmd[PATH_MAX + 32];
+        if (access(script_path, X_OK) == 0) {
+            if (snprintf(cmd, sizeof(cmd), "\"%s\"", script_path) >= (int)sizeof(cmd)) {
+                fprintf(stderr, "chaaya: wasm command line is too long\n");
+                return CH_EXIT_ERROR;
+            }
+        } else if (access(script_path, R_OK) == 0) {
+            if (snprintf(cmd, sizeof(cmd), "bash \"%s\"", script_path) >= (int)sizeof(cmd)) {
+                fprintf(stderr, "chaaya: wasm command line is too long\n");
+                return CH_EXIT_ERROR;
+            }
+        } else {
+            fprintf(stderr, "chaaya: wasm helper exists but is not readable: %s\n", script_path);
+            fprintf(stderr, "Manual build:\n");
+            fprintf(stderr,
+                    "  cmake -S . -B build-wasm -DCHAAYA_WASM=ON "
+                    "-DCMAKE_TOOLCHAIN_FILE=<wasi-sdk.cmake>\n");
+            fprintf(stderr, "  cmake --build build-wasm -j --target chaaya-wasm\n");
+            return CH_EXIT_OK;
+        }
+
+        fprintf(stderr, "chaaya: running wasm build helper: %s\n", script_path);
+        int st = system(cmd);
+        if (st == -1 || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+            int code = (st != -1 && WIFEXITED(st)) ? WEXITSTATUS(st) : -1;
+            fprintf(stderr, "chaaya: wasm build helper failed (exit=%d)\n", code);
+            fprintf(stderr, "Manual build:\n");
+            fprintf(stderr,
+                    "  cmake -S . -B build-wasm -DCHAAYA_WASM=ON "
+                    "-DCMAKE_TOOLCHAIN_FILE=<wasi-sdk.cmake>\n");
+            fprintf(stderr, "  cmake --build build-wasm -j --target chaaya-wasm\n");
+            return CH_EXIT_ERROR;
+        }
+        return CH_EXIT_OK;
+    }
+
+    fprintf(stderr, "chaaya: wasm helper not found at %s\n", script_path);
+    fprintf(stderr, "Manual build:\n");
+    fprintf(stderr,
+            "  cmake -S . -B build-wasm -DCHAAYA_WASM=ON "
+            "-DCMAKE_TOOLCHAIN_FILE=<wasi-sdk.cmake>\n");
+    fprintf(stderr, "  cmake --build build-wasm -j --target chaaya-wasm\n");
+    return CH_EXIT_OK;
 }
 
 static void print_completions(const char *shell) {
@@ -503,8 +798,8 @@ static void print_completions(const char *shell) {
         puts("  local cmds=\"compile check explain features test ast expand ir doctor lsp wasm fmt "
              "cache\"");
         puts("  local opts=\"--help --version --lib-path --native --completions --compile "
-             "--emit-llvm -o --disassemble --sandbox --gc-stats --profile --timings --coverage "
-             "--json\"");
+             "--emit-llvm -o --disassemble --sandbox --gc-stats --profile --profile-json "
+             "--timings --coverage --coverage-xml --timeout --max-memory --json --jobs --seed\"");
         puts("  COMPREPLY=( $(compgen -W \"$cmds $opts\" -- \"$cur\") )");
         puts("}");
         puts("complete -F _chaaya chaaya");
@@ -516,7 +811,8 @@ static void print_completions(const char *shell) {
         puts("  '(-h --help)'{-h,--help}'[show help]' \\");
         puts("  '--version[show version]' \\");
         puts("  '--lib-path[library path]:path:_files' \\");
-        puts("  '--native[run via LLVM backend stub]' \\");
+        puts("  '--native[run via LLVM backend]' \\");
+        puts("  '--compile[compile file to bytecode cache/blob]' \\");
         puts("  '--completions[shell completions]:shell:(bash zsh fish)' \\");
         puts("  '1:command:(compile check explain features test ast expand ir doctor lsp wasm fmt "
              "cache)'");
@@ -526,7 +822,8 @@ static void print_completions(const char *shell) {
         puts("complete -c chaaya -s h -l help -d 'Show help'");
         puts("complete -c chaaya -l version -d 'Show version'");
         puts("complete -c chaaya -l lib-path -r -d 'Library search path'");
-        puts("complete -c chaaya -l native -d 'Run via LLVM backend stub'");
+        puts("complete -c chaaya -l native -d 'Run via LLVM backend'");
+        puts("complete -c chaaya -l compile -d 'Compile file to bytecode'");
         puts("complete -c chaaya -l completions -xa 'bash zsh fish'");
         puts("complete -c chaaya -a 'compile check explain features test ast expand ir doctor lsp "
              "wasm fmt cache'");
@@ -549,6 +846,46 @@ static int path_writable_dir(const char *dir) {
         return 0;
     }
     return S_ISDIR(st.st_mode) && access(dir, W_OK) == 0;
+}
+
+static int resolve_cli_cache_dir(char *out, size_t out_len) {
+    const char *base = getenv("CHAAYA_HOME");
+    if (base && base[0] != '\0') {
+        return snprintf(out, out_len, "%s/cache", base) < (int)out_len ? 0 : -1;
+    }
+    const char *home = getenv("HOME");
+    if (!home || home[0] == '\0') {
+        return -1;
+    }
+    return snprintf(out, out_len, "%s/.chaaya/cache", home) < (int)out_len ? 0 : -1;
+}
+
+static int path_has_executable(const char *name) {
+    const char *path_env = getenv("PATH");
+    if (!path_env || !path_env[0]) {
+        return 0;
+    }
+    char *copy = strdup(path_env);
+    if (!copy) {
+        return 0;
+    }
+    int found = 0;
+    char *save = NULL;
+    for (char *dir = strtok_r(copy, ":", &save); dir; dir = strtok_r(NULL, ":", &save)) {
+        if (!dir[0]) {
+            continue;
+        }
+        char probe[PATH_MAX];
+        if (snprintf(probe, sizeof(probe), "%s/%s", dir, name) >= (int)sizeof(probe)) {
+            continue;
+        }
+        if (access(probe, X_OK) == 0) {
+            found = 1;
+            break;
+        }
+    }
+    free(copy);
+    return found;
 }
 
 static int cmd_doctor(ChCliOptions *opts) {
@@ -616,6 +953,67 @@ static int cmd_doctor(ChCliOptions *opts) {
             DOCTOR_EMIT("PASS", "lib-path", buf);
         } else {
             DOCTOR_EMIT("WARN", "lib-path", buf);
+            warns++;
+        }
+    }
+
+    {
+        ChVM probe_vm;
+        ch_vm_init(&probe_vm);
+#if defined(__APPLE__)
+        const char *libc_probe = "libc.dylib";
+#elif defined(__linux__)
+        const char *libc_probe = "libc.so.6";
+#else
+        const char *libc_probe = NULL;
+#endif
+        if (!libc_probe) {
+            DOCTOR_EMIT("WARN", "ffi", "ffi probe skipped on this platform");
+            warns++;
+        } else {
+            ChValue lib = CH_UNDEFINED;
+            if (ch_ffi_open_library(&probe_vm, libc_probe, &lib) == 0) {
+                (void)ch_ffi_close_library(&probe_vm, lib);
+                DOCTOR_EMIT("PASS", "ffi", libc_probe);
+            } else {
+                char detail[256];
+                snprintf(detail, sizeof(detail), "%s", ch_vm_error(&probe_vm));
+                DOCTOR_EMIT("WARN", "ffi", detail);
+                warns++;
+            }
+        }
+        ch_vm_deinit(&probe_vm);
+    }
+
+    {
+        const char *native_cc = getenv("CHAAYA_LLVM_CC");
+        int have_native_cc = (native_cc && native_cc[0] && path_has_executable(native_cc)) ||
+                             path_has_executable("clang") || path_has_executable("cc");
+        if (have_native_cc) {
+            DOCTOR_EMIT("WARN", "native-backend",
+                        "native compile path available; lowering is partial "
+                        "(const exits + ch_rt_main fallback)");
+            warns++;
+        } else {
+            DOCTOR_EMIT("WARN", "native-backend",
+                        "no native compiler found in PATH for LLVM linking");
+            warns++;
+        }
+    }
+
+    if (path_has_executable("thottam")) {
+        DOCTOR_EMIT("PASS", "thottam", "found in PATH");
+    } else {
+        DOCTOR_EMIT("WARN", "thottam", "use Kaappi thottam via --lib-path (not bundled)");
+        warns++;
+    }
+
+    {
+        char cache_dir[PATH_MAX];
+        if (resolve_cli_cache_dir(cache_dir, sizeof(cache_dir)) == 0) {
+            DOCTOR_EMIT("PASS", "cache-dir", cache_dir);
+        } else {
+            DOCTOR_EMIT("WARN", "cache-dir", "could not resolve cache directory");
             warns++;
         }
     }
@@ -740,6 +1138,20 @@ static int write_fmt_output(const char *path, const char *buf, size_t len) {
     return CH_EXIT_OK;
 }
 
+static int append_value_array(ChValue **values, size_t *count, size_t *cap, ChValue value) {
+    if (*count >= *cap) {
+        size_t next_cap = *cap ? (*cap * 2) : 16;
+        ChValue *next = (ChValue *)realloc(*values, next_cap * sizeof(ChValue));
+        if (!next) {
+            return -1;
+        }
+        *values = next;
+        *cap = next_cap;
+    }
+    (*values)[(*count)++] = value;
+    return 0;
+}
+
 static int cmd_fmt(const char *path, const ChCliOptions *opts) {
     size_t src_len = 0;
     char *src = ch_read_file(path, &src_len);
@@ -768,6 +1180,11 @@ static int cmd_fmt(const char *path, const ChCliOptions *opts) {
     ChReader reader;
     ch_reader_init(&reader, &vm.gc, src, src_len);
     int rc = CH_EXIT_OK;
+    ChValue *expanded_values = NULL;
+    size_t expanded_count = 0;
+    size_t expanded_cap = 0;
+    ChValue expanded_roots = CH_NIL;
+    ch_gc_push(&vm.gc, &expanded_roots);
     for (;;) {
         ChValue v = CH_NIL;
         ch_gc_push(&vm.gc, &v);
@@ -793,12 +1210,79 @@ static int cmd_fmt(const char *path, const ChCliOptions *opts) {
             break;
         }
         if (expanded != CH_VOID) {
+            if (append_value_array(&expanded_values, &expanded_count, &expanded_cap, expanded) != 0) {
+                fprintf(stderr, "fmt: out of memory while collecting expanded values\n");
+                ch_gc_pop_n(&vm.gc, 2);
+                rc = CH_EXIT_ERROR;
+                break;
+            }
+            ChValue keep = expanded;
+            ch_gc_push(&vm.gc, &keep);
+            expanded_roots = ch_gc_cons(&vm.gc, keep, expanded_roots);
+            ch_gc_pop(&vm.gc);
             ch_print_value(mem, expanded, false);
             fputc('\n', mem);
         }
         ch_gc_pop_n(&vm.gc, 2);
     }
     fclose(mem);
+
+    if (rc == CH_EXIT_OK) {
+        ChValue *reparsed_values = NULL;
+        size_t reparsed_count = 0;
+        size_t reparsed_cap = 0;
+        ChValue reparsed_roots = CH_NIL;
+        ch_gc_push(&vm.gc, &reparsed_roots);
+
+        ChReader out_reader;
+        ch_reader_init(&out_reader, &vm.gc, out_buf ? out_buf : "", out_len);
+        for (;;) {
+            ChValue v = CH_NIL;
+            ch_gc_push(&vm.gc, &v);
+            ChReadStatus st = read_cli_datum(&vm, &out_reader, &v);
+            if (st == CH_READ_EOF) {
+                ch_gc_pop(&vm.gc);
+                break;
+            }
+            if (st != CH_READ_OK) {
+                fprintf(stderr, "fmt: formatted output is not readable: %s\n", ch_reader_error(&out_reader));
+                ch_gc_pop(&vm.gc);
+                rc = CH_EXIT_ERROR;
+                break;
+            }
+            if (append_value_array(&reparsed_values, &reparsed_count, &reparsed_cap, v) != 0) {
+                fprintf(stderr, "fmt: out of memory while re-reading formatted output\n");
+                ch_gc_pop(&vm.gc);
+                rc = CH_EXIT_ERROR;
+                break;
+            }
+            ChValue keep = v;
+            ch_gc_push(&vm.gc, &keep);
+            reparsed_roots = ch_gc_cons(&vm.gc, keep, reparsed_roots);
+            ch_gc_pop(&vm.gc);
+            ch_gc_pop(&vm.gc);
+        }
+
+        if (rc == CH_EXIT_OK) {
+            if (expanded_count != reparsed_count) {
+                fprintf(stderr,
+                        "fmt: round-trip mismatch for %s (expanded=%zu, reparsed=%zu)\n",
+                        path, expanded_count, reparsed_count);
+                rc = CH_EXIT_ERROR;
+            } else {
+                for (size_t i = 0; i < expanded_count; i++) {
+                    if (!ch_equal(expanded_values[i], reparsed_values[i])) {
+                        fprintf(stderr, "fmt: round-trip mismatch for %s\n", path);
+                        rc = CH_EXIT_ERROR;
+                        break;
+                    }
+                }
+            }
+        }
+
+        ch_gc_pop(&vm.gc);
+        free(reparsed_values);
+    }
 
     if (rc == CH_EXIT_OK) {
         if (opts->flag_fmt_check) {
@@ -827,6 +1311,8 @@ static int cmd_fmt(const char *path, const ChCliOptions *opts) {
         }
     }
 
+    ch_gc_pop(&vm.gc);
+    free(expanded_values);
     free(out_buf);
     free(src);
     ch_vm_deinit(&vm);
@@ -1098,6 +1584,233 @@ static int cmd_ir(const char *path, const ChCliOptions *opts) {
     return rc;
 }
 
+typedef struct ChCompiledTopLevels {
+    ChFunction **fns;
+    size_t count;
+    size_t cap;
+} ChCompiledTopLevels;
+
+static int append_compiled_top_level(ChCompiledTopLevels *compiled, ChFunction *fn) {
+    if (compiled->count >= compiled->cap) {
+        size_t next_cap = compiled->cap ? compiled->cap * 2 : 8;
+        ChFunction **next =
+            (ChFunction **)realloc(compiled->fns, next_cap * sizeof(ChFunction *));
+        if (!next) {
+            return -1;
+        }
+        compiled->fns = next;
+        compiled->cap = next_cap;
+    }
+    compiled->fns[compiled->count++] = fn;
+    return 0;
+}
+
+/* Returns with root_list pushed on vm->gc; caller must ch_gc_pop once. */
+static int compile_source_top_levels(ChVM *vm, const char *path, const char *src, size_t len,
+                                     ChCompiledTopLevels *compiled, ChValue *root_list) {
+    memset(compiled, 0, sizeof(*compiled));
+    *root_list = CH_NIL;
+    ch_gc_push(&vm->gc, root_list);
+
+    ChReader reader;
+    ch_reader_init(&reader, &vm->gc, src, len);
+    int rc = CH_EXIT_OK;
+    for (;;) {
+        ChValue expr = CH_NIL;
+        ch_gc_push(&vm->gc, &expr);
+        ChReadStatus st = read_cli_datum(vm, &reader, &expr);
+        if (st == CH_READ_EOF) {
+            ch_gc_pop(&vm->gc);
+            break;
+        }
+        if (st != CH_READ_OK) {
+            report_reader_diag(path, src, len, &reader);
+            ch_gc_pop(&vm->gc);
+            rc = CH_EXIT_ERROR;
+            break;
+        }
+
+        ChValue expanded = CH_NIL;
+        ch_gc_push(&vm->gc, &expanded);
+        char err[256];
+        if (ch_expand_toplevel(vm, expr, &expanded, err, sizeof(err)) != CH_EXPAND_OK) {
+            ChDiagCode code = ch_diag_classify_message(err, CH_DIAG_STAGE_COMPILE);
+            ch_diag_report_simple(stderr, path, 0, 0, code, NULL, err);
+            ch_gc_pop_n(&vm->gc, 2);
+            rc = CH_EXIT_ERROR;
+            break;
+        }
+
+        if (expanded != CH_VOID) {
+            ChCompiler compiler;
+            ch_compiler_init(&compiler, vm);
+            ChFunction *fn = NULL;
+            if (ch_compile_toplevel(&compiler, expanded, &fn) != CH_COMPILE_OK || !fn) {
+                report_compiler_diag(path, &compiler);
+                ch_gc_pop_n(&vm->gc, 2);
+                rc = CH_EXIT_ERROR;
+                break;
+            }
+            if (append_compiled_top_level(compiled, fn) != 0) {
+                fprintf(stderr, "compile: out of memory while storing bytecode\n");
+                ch_gc_pop_n(&vm->gc, 2);
+                rc = CH_EXIT_ERROR;
+                break;
+            }
+            ChValue fn_value = ch_make_pointer(&fn->header);
+            ch_gc_push(&vm->gc, &fn_value);
+            *root_list = ch_gc_cons(&vm->gc, fn_value, *root_list);
+            ch_gc_pop(&vm->gc);
+        }
+
+        ch_gc_pop_n(&vm->gc, 2);
+    }
+
+    if (rc != CH_EXIT_OK) {
+        free(compiled->fns);
+        compiled->fns = NULL;
+        compiled->count = 0;
+        compiled->cap = 0;
+    }
+    return rc;
+}
+
+static void disassemble_functions(FILE *out, ChFunction **fns, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        fprintf(out, "; form %zu\n", i + 1);
+        ch_disassemble_function(out, fns[i]);
+    }
+}
+
+static int disassemble_source(ChVM *vm, const char *path) {
+    ChVM probe;
+    ch_vm_init(&probe);
+    ch_vm_register_primitives(&probe);
+    probe.script_path = path;
+    for (size_t i = 0; i < vm->lib_path_count; i++) {
+        probe.lib_paths[probe.lib_path_count++] = vm->lib_paths[i];
+    }
+
+    size_t len = 0;
+    char *src = ch_read_file(path, &len);
+    if (!src) {
+        fprintf(stderr, "Error opening file '%s'\n", path);
+        ch_vm_deinit(&probe);
+        return CH_EXIT_ERROR;
+    }
+
+    ChCompiledTopLevels compiled;
+    ChValue root_list = CH_NIL;
+    int rc = compile_source_top_levels(&probe, path, src, len, &compiled, &root_list);
+    if (rc == CH_EXIT_OK) {
+        fprintf(stderr, "; disassembly: %s (%zu function%s)\n", path, compiled.count,
+                compiled.count == 1 ? "" : "s");
+        disassemble_functions(stderr, compiled.fns, compiled.count);
+    }
+
+    ch_gc_pop(&probe.gc);
+    free(compiled.fns);
+    free(src);
+    ch_vm_deinit(&probe);
+    return rc;
+}
+
+static char *default_bytecode_output_path(const char *path) {
+    size_t len = strlen(path);
+    if (len >= 4 && strcmp(path + len - 4, ".scm") == 0) {
+        char *out = (char *)malloc(len + 2);
+        if (!out) {
+            return NULL;
+        }
+        memcpy(out, path, len - 4);
+        memcpy(out + len - 4, ".chbc", 6);
+        return out;
+    }
+    char *out = (char *)malloc(len + 6);
+    if (!out) {
+        return NULL;
+    }
+    memcpy(out, path, len);
+    memcpy(out + len, ".chbc", 6);
+    return out;
+}
+
+static int cmd_bytecode_compile(ChCliOptions *opts) {
+    if (!opts->file) {
+        fprintf(stderr, "chaaya: --compile requires a Scheme file argument\n");
+        return CH_EXIT_USAGE;
+    }
+
+    size_t len = 0;
+    char *src = ch_read_file(opts->file, &len);
+    if (!src) {
+        fprintf(stderr, "Error opening file '%s'\n", opts->file);
+        return CH_EXIT_ERROR;
+    }
+
+    ChVM vm;
+    ch_vm_init(&vm);
+    ch_vm_register_primitives(&vm);
+    apply_opts_to_vm(&vm, opts);
+
+    ChCompiledTopLevels compiled;
+    ChValue root_list = CH_NIL;
+    int rc = compile_source_top_levels(&vm, opts->file, src, len, &compiled, &root_list);
+    if (rc != CH_EXIT_OK) {
+        ch_gc_pop(&vm.gc);
+        free(src);
+        ch_vm_deinit(&vm);
+        return CH_EXIT_ERROR;
+    }
+
+    if (opts->flag_disassemble) {
+        fprintf(stderr, "; disassembly: %s (%zu function%s)\n", opts->file, compiled.count,
+                compiled.count == 1 ? "" : "s");
+        disassemble_functions(stderr, compiled.fns, compiled.count);
+    }
+
+    ChFunction *empty[1] = {NULL};
+    ChFunction **store_fns = compiled.count > 0 ? compiled.fns : empty;
+    int cache_rc = ch_cache_store(&vm, opts->file, src, len, store_fns, compiled.count);
+
+    char *generated_output = NULL;
+    const char *out_path = opts->output;
+    if (!out_path) {
+        generated_output = default_bytecode_output_path(opts->file);
+        if (!generated_output) {
+            fprintf(stderr, "compile: out of memory while creating output path\n");
+            ch_gc_pop(&vm.gc);
+            free(compiled.fns);
+            free(src);
+            ch_vm_deinit(&vm);
+            return CH_EXIT_ERROR;
+        }
+        out_path = generated_output;
+    }
+
+    if (ch_cache_write_file(out_path, &vm, opts->file, src, len, store_fns, compiled.count) != 0) {
+        fprintf(stderr, "compile: failed to write bytecode file '%s'\n", out_path);
+        rc = CH_EXIT_ERROR;
+    } else {
+        printf("compile: wrote %s (%zu function%s)\n", out_path, compiled.count,
+               compiled.count == 1 ? "" : "s");
+        if (cache_rc != 0) {
+            fprintf(stderr, "compile: warning: cache directory write skipped\n");
+        }
+    }
+
+    if (ch_timings_enabled() && rc == CH_EXIT_OK) {
+        ch_timings_set_output(out_path);
+    }
+
+    free(generated_output);
+    ch_gc_pop(&vm.gc);
+    free(compiled.fns);
+    free(src);
+    ch_vm_deinit(&vm);
+    return rc;
+}
+
 static int source_has_import(const char *src, size_t len) {
     /* Cheap skip: auto-cache disabled when the file mentions import. */
     (void)len;
@@ -1142,7 +1855,8 @@ static int cache_store_from_source(const char *path, const char *src, size_t len
     ChReader reader;
     ch_reader_init(&reader, &cold.gc, src, len);
     ChFunction **compiled = NULL;
-    ChValue *keeps = NULL;
+    ChValue root_list = CH_NIL;
+    ch_gc_push(&cold.gc, &root_list);
     size_t compiled_n = 0;
     size_t compiled_cap = 0;
     int ok = 1;
@@ -1180,22 +1894,21 @@ static int cache_store_from_source(const char *path, const char *src, size_t len
         }
         if (compiled_n >= compiled_cap) {
             size_t ncap = compiled_cap ? compiled_cap * 2 : 8;
-            ChFunction **ncompiled = (ChFunction **)realloc(compiled, ncap * sizeof(ChFunction *));
-            ChValue *nkeeps = (ChValue *)realloc(keeps, ncap * sizeof(ChValue));
-            if (!ncompiled || !nkeeps) {
-                free(ncompiled);
-                free(nkeeps);
+            ChFunction **ncompiled =
+                (ChFunction **)realloc(compiled, ncap * sizeof(ChFunction *));
+            if (!ncompiled) {
                 ch_gc_pop(&cold.gc);
                 ok = 0;
                 break;
             }
             compiled = ncompiled;
-            keeps = nkeeps;
             compiled_cap = ncap;
         }
         compiled[compiled_n] = fn;
-        keeps[compiled_n] = ch_make_pointer(&fn->header);
-        ch_gc_push(&cold.gc, &keeps[compiled_n]);
+        ChValue fn_value = ch_make_pointer(&fn->header);
+        ch_gc_push(&cold.gc, &fn_value);
+        root_list = ch_gc_cons(&cold.gc, fn_value, root_list);
+        ch_gc_pop(&cold.gc);
         compiled_n++;
         ch_gc_pop(&cold.gc);
         /* Compile-only: DEFINE interns global names; values are filled on cache load.
@@ -1203,17 +1916,22 @@ static int cache_store_from_source(const char *path, const char *src, size_t len
     }
 
     int stored = -1;
-    if (ok && compiled_n > 0) {
-        stored = ch_cache_store(&cold, path, src, len, compiled, compiled_n);
+    if (ok) {
+        ChFunction *empty[1] = {NULL};
+        stored = ch_cache_store(&cold, path, src, len, compiled_n > 0 ? compiled : empty, compiled_n);
     }
-    ch_gc_pop_n(&cold.gc, compiled_n);
+    ch_gc_pop(&cold.gc);
     free(compiled);
-    free(keeps);
     ch_vm_deinit(&cold);
     return stored;
 }
 
-static int run_file(ChVM *vm, const char *path) {
+static int cache_disabled_by_env(void) {
+    const char *v = getenv("CHAAYA_NO_CACHE");
+    return v && v[0] != '\0' && strcmp(v, "0") != 0;
+}
+
+static int run_file(ChVM *vm, const ChCliOptions *opts, const char *path) {
     size_t len = 0;
     char *src = ch_read_file(path, &len);
     if (!src) {
@@ -1221,21 +1939,74 @@ static int run_file(ChVM *vm, const char *path) {
         return CH_EXIT_ERROR;
     }
 
-    int use_cache = !source_has_import(src, len);
+    int cache_off_env = cache_disabled_by_env();
+    int has_import = source_has_import(src, len);
+    int use_cache = !cache_off_env && !has_import && !opts->flag_no_ir_opt;
+    if (ch_timings_enabled() && !use_cache) {
+        const char *reason = "source has import";
+        if (cache_off_env) {
+            reason = "CHAAYA_NO_CACHE";
+        } else if (opts->flag_no_ir_opt) {
+            reason = "--no-ir-opt";
+        }
+        ch_timings_set_cache(CH_TIMINGS_CACHE_OFF, path, 0, reason);
+    }
+
     if (use_cache) {
         ChFunction **fns = NULL;
         size_t n = 0;
         if (ch_cache_try_load(vm, path, src, len, &fns, &n)) {
+            if (opts->flag_disassemble) {
+                ChValue rooted_fns = CH_NIL;
+                ch_gc_push(&vm->gc, &rooted_fns);
+                for (size_t i = 0; i < n; i++) {
+                    ChValue fn_value = ch_make_pointer(&fns[i]->header);
+                    ch_gc_push(&vm->gc, &fn_value);
+                    rooted_fns = ch_gc_cons(&vm->gc, fn_value, rooted_fns);
+                    ch_gc_pop(&vm->gc);
+                }
+                fprintf(stderr, "; disassembly: cache-hit %s (%zu function%s)\n", path, n,
+                        n == 1 ? "" : "s");
+                disassemble_functions(stderr, fns, n);
+                ch_gc_pop(&vm->gc);
+            }
+            if (ch_timings_enabled()) {
+                ch_timings_set_cache(CH_TIMINGS_CACHE_HIT, path, 0, NULL);
+                ch_timings_begin(CH_TIMINGS_EXECUTE);
+            }
             int rc = eval_function_list(vm, path, fns, n);
+            if (ch_timings_enabled()) {
+                ch_timings_end(CH_TIMINGS_EXECUTE);
+            }
             free(fns);
             free(src);
             return rc;
         }
     }
 
+    if (opts->flag_disassemble) {
+        if (disassemble_source(vm, path) != CH_EXIT_OK) {
+            free(src);
+            return CH_EXIT_ERROR;
+        }
+    }
+
+    if (ch_timings_enabled()) {
+        ch_timings_begin(CH_TIMINGS_EXECUTE);
+    }
     int rc = ch_eval_source(vm, src, len, 0);
+    if (ch_timings_enabled()) {
+        ch_timings_end(CH_TIMINGS_EXECUTE);
+    }
+
     if (rc == 0 && use_cache) {
-        (void)cache_store_from_source(path, src, len);
+        int stored = cache_store_from_source(path, src, len);
+        if (ch_timings_enabled()) {
+            ch_timings_set_cache(CH_TIMINGS_CACHE_MISS, path, stored == 0,
+                                 stored == 0 ? NULL : "store failed");
+        }
+    } else if (ch_timings_enabled() && use_cache) {
+        ch_timings_set_cache(CH_TIMINGS_CACHE_MISS, path, 0, "evaluation failed");
     }
     free(src);
     return rc == 0 ? CH_EXIT_OK : CH_EXIT_ERROR;
@@ -1280,12 +2051,58 @@ static void apply_opts_to_vm(ChVM *vm, ChCliOptions *opts) {
     }
 }
 
+static int apply_process_memory_limit(size_t bytes) {
+    if (bytes == 0) {
+        return 0;
+    }
+#if defined(RLIMIT_AS)
+    {
+        struct rlimit lim = {.rlim_cur = (rlim_t)bytes, .rlim_max = (rlim_t)bytes};
+        if (setrlimit(RLIMIT_AS, &lim) == 0) {
+            return 0;
+        }
+    }
+#endif
+#if defined(RLIMIT_DATA)
+    {
+        struct rlimit lim = {.rlim_cur = (rlim_t)bytes, .rlim_max = (rlim_t)bytes};
+        if (setrlimit(RLIMIT_DATA, &lim) == 0) {
+            return 0;
+        }
+    }
+#endif
+    return -1;
+}
+
+static void print_gc_stats(FILE *out, const ChVM *vm) {
+    fprintf(out, "GC Statistics:\n");
+    fprintf(out, "  objects=%zu young=%zu old=%zu\n", vm->gc.object_count, vm->gc.young_count,
+            vm->gc.old_count);
+    fprintf(out, "  alloc_count=%zu threshold=%zu\n", vm->gc.alloc_count, vm->gc.threshold);
+    fprintf(out, "  collections=%zu minor=%zu major=%zu\n", vm->gc.collections,
+            vm->gc.minor_collections, vm->gc.major_collections);
+}
+
 int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
     (void)argc;
     const char *argv0 = argv[0];
 
     if (opts->flag_diagnostics) {
         ch_diag_set_format(opts->diagnostics_format);
+    }
+
+    if (opts->flag_timings) {
+        ch_timings_enable(opts->timings_json ? CH_TIMINGS_JSON : CH_TIMINGS_TEXT);
+    }
+    if (opts->flag_sandbox) {
+        ch_sandbox_enable();
+    }
+    if (opts->flag_profile || opts->flag_profile_json) {
+        ch_profile_enable();
+        ch_profile_enter("run");
+    }
+    if (opts->flag_coverage || opts->flag_coverage_xml) {
+        ch_coverage_enable();
     }
 
     if (opts->help) {
@@ -1314,6 +2131,13 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
             return CH_EXIT_USAGE;
         }
         return ch_llvm_backend_emit_ir(opts->file, opts->output);
+    }
+
+    if (opts->flag_compile) {
+        if (ch_timings_enabled()) {
+            ch_timings_set_mode(CH_TIMINGS_MODE_COMPILE);
+        }
+        return cmd_bytecode_compile(opts);
     }
 
     if (opts->flag_native || opts->command == CH_CMD_COMPILE) {
@@ -1399,14 +2223,78 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
     ch_vm_register_primitives(&vm);
     apply_opts_to_vm(&vm, opts);
 
+    if (opts->flag_max_memory && apply_process_memory_limit(opts->max_memory_bytes) != 0) {
+        fprintf(stderr, "warning: failed to apply --max-memory=%zu\n", opts->max_memory_bytes);
+    }
+
+    struct sigaction old_alarm_action;
+    int have_old_alarm_action = 0;
+    g_cli_timeout_fired = 0;
+    if (opts->flag_timeout && opts->file && opts->timeout_ms > 0) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = cli_timeout_handler;
+        sigemptyset(&sa.sa_mask);
+        if (sigaction(SIGALRM, &sa, &old_alarm_action) == 0) {
+            have_old_alarm_action = 1;
+            unsigned long ms = (unsigned long)opts->timeout_ms;
+            unsigned seconds = (unsigned)((ms + 999ul) / 1000ul);
+            if (seconds == 0) {
+                seconds = 1;
+            }
+            alarm(seconds);
+        } else {
+            fprintf(stderr, "warning: failed to install timeout handler\n");
+        }
+    }
+
     int rc;
     if (opts->file) {
-        rc = run_file(&vm, opts->file);
+        rc = run_file(&vm, opts, opts->file);
     } else if (isatty(STDIN_FILENO)) {
         rc = ch_repl_run(&vm);
     } else {
         rc = run_stdin(&vm);
     }
+
+    if (opts->flag_timeout && opts->file && have_old_alarm_action) {
+        alarm(0);
+        sigaction(SIGALRM, &old_alarm_action, NULL);
+    }
+    if (g_cli_timeout_fired) {
+        ch_diag_report_simple(stderr, opts->file, 0, 0, CH_DIAG_EXECUTION_TIMEOUT, NULL,
+                              "execution timed out");
+        rc = CH_EXIT_ERROR;
+    }
+
+    if (opts->flag_gc_stats) {
+        print_gc_stats(stderr, &vm);
+    }
+    if (opts->flag_timings) {
+        ch_timings_report(stderr);
+    }
+    if (opts->flag_profile || opts->flag_profile_json) {
+        ch_profile_leave("run");
+        if (opts->flag_profile) {
+            ch_profile_report_text(stderr);
+        }
+        if (opts->flag_profile_json && opts->profile_json_path &&
+            ch_profile_report_json(opts->profile_json_path) != 0) {
+            fprintf(stderr, "profile: failed to write %s\n", opts->profile_json_path);
+            rc = CH_EXIT_ERROR;
+        }
+    }
+    if (opts->flag_coverage || opts->flag_coverage_xml) {
+        if (opts->flag_coverage) {
+            ch_coverage_report_text(stderr);
+        }
+        if (opts->flag_coverage_xml && opts->coverage_xml_path &&
+            ch_coverage_report_xml(opts->coverage_xml_path) != 0) {
+            fprintf(stderr, "coverage: failed to write %s\n", opts->coverage_xml_path);
+            rc = CH_EXIT_ERROR;
+        }
+    }
+
     ch_vm_deinit(&vm);
     return rc;
 }

@@ -5,12 +5,10 @@
 (test-begin "eval")
 
 ;; --- eval basic ---
-(test-group "eval basic"
-  (test-eqv "eval arithmetic" 3 (eval '(+ 1 2))))
+(test-eqv "eval arithmetic" 3 (eval '(+ 1 2)))
 
 ;; --- eval with environment ---
-(test-group "eval with environment"
-  (test-eqv "eval with scheme base environment" 12 (eval '(* 3 4) (environment '(scheme base)))))
+(test-eqv "eval with scheme base environment" 12 (eval '(* 3 4) (environment '(scheme base))))
 
 ;; --- eval rejects non-environment second argument (#1270) ---
 (test-group "eval bad env type"
@@ -32,8 +30,7 @@
       #f)))
 
 ;; --- eval list construction ---
-(test-group "eval list"
-  (test-equal "eval quoted list" '(1 2 3) (eval '(list 1 2 3))))
+(test-equal "eval quoted list" '(1 2 3) (eval '(list 1 2 3)))
 
 (set! %test-fail-count (test-runner-fail-count (test-runner-current)))
 (test-end "eval")

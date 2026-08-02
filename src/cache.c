@@ -423,26 +423,17 @@ static bool cache_disabled(void) {
     return v && v[0] != '\0' && strcmp(v, "0") != 0;
 }
 
-int ch_cache_store(ChVM *vm, const char *path, const char *source, size_t source_len,
-                   ChFunction **fns, size_t count) {
-    if (cache_disabled()) {
-        return -1;
-    }
-    if (!vm || !path || !source || !fns) {
-        return -1;
-    }
-    char abs[PATH_MAX];
-    if (!realpath(path, abs)) {
-        snprintf(abs, sizeof(abs), "%s", path);
-    }
-    char cpath[PATH_MAX];
-    cache_path_for(abs, cpath, sizeof(cpath));
-    if (!cpath[0]) {
+static int cache_write_blob_file(const char *out_path, ChVM *vm, const char *stored_source_path,
+                                 const char *source, size_t source_len, ChFunction **fns,
+                                 size_t count) {
+    if (!out_path || !vm || !stored_source_path || !source || !fns) {
         return -1;
     }
 
     char tmp[PATH_MAX];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", cpath);
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp", out_path) >= (int)sizeof(tmp)) {
+        return -1;
+    }
     FILE *f = fopen(tmp, "wb");
     if (!f) {
         return -1;
@@ -463,7 +454,7 @@ int ch_cache_store(ChVM *vm, const char *path, const char *source, size_t source
     if (ok && write_u64(f, ver_hash) != 0) {
         ok = 0;
     }
-    if (ok && write_blob(f, abs, strlen(abs)) != 0) {
+    if (ok && write_blob(f, stored_source_path, strlen(stored_source_path)) != 0) {
         ok = 0;
     }
     if (ok && write_u32(f, (uint32_t)count) != 0) {
@@ -489,11 +480,45 @@ int ch_cache_store(ChVM *vm, const char *path, const char *source, size_t source
         unlink(tmp);
         return -1;
     }
-    if (rename(tmp, cpath) != 0) {
+    if (rename(tmp, out_path) != 0) {
         unlink(tmp);
         return -1;
     }
     return 0;
+}
+
+int ch_cache_store(ChVM *vm, const char *path, const char *source, size_t source_len,
+                   ChFunction **fns, size_t count) {
+    if (cache_disabled()) {
+        return -1;
+    }
+    if (!vm || !path || !source || !fns) {
+        return -1;
+    }
+
+    char abs[PATH_MAX];
+    if (!realpath(path, abs)) {
+        snprintf(abs, sizeof(abs), "%s", path);
+    }
+    char cpath[PATH_MAX];
+    cache_path_for(abs, cpath, sizeof(cpath));
+    if (!cpath[0]) {
+        return -1;
+    }
+
+    return cache_write_blob_file(cpath, vm, abs, source, source_len, fns, count);
+}
+
+int ch_cache_write_file(const char *out_path, ChVM *vm, const char *source_path, const char *source,
+                        size_t source_len, ChFunction **fns, size_t count) {
+    if (!out_path || !vm || !source_path || !source || !fns) {
+        return -1;
+    }
+    char abs[PATH_MAX];
+    if (!realpath(source_path, abs)) {
+        snprintf(abs, sizeof(abs), "%s", source_path);
+    }
+    return cache_write_blob_file(out_path, vm, abs, source, source_len, fns, count);
 }
 
 int ch_cache_try_load(ChVM *vm, const char *path, const char *source, size_t source_len,
@@ -629,7 +654,10 @@ int ch_cache_status(void) {
     }
 
     printf("Bytecode cache: enabled (.chbc)\n");
+    printf("Format version: %u\n", CH_CACHE_VERSION);
+    printf("Compiler key: %s\n", CHAAYA_VERSION);
     printf("Location: %s\n", cache_dir);
+    printf("Note: auto-cache skips sources that mention import; set CHAAYA_NO_CACHE=1 to disable\n");
 
     struct stat st;
     if (stat(cache_dir, &st) != 0) {

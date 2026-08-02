@@ -5,7 +5,7 @@ execute_process(
   ERROR_VARIABLE err
 )
 set(combined "${out}${err}")
-# MVP native path should compile stub runtime and run it successfully.
+# MVP native path should compile/link and run successfully.
 if(NOT rc EQUAL 0)
   message(FATAL_ERROR "expected --native MVP to succeed, got rc=${rc}: ${combined}")
 endif()

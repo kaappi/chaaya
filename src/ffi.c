@@ -3,6 +3,7 @@
 #include "chaaya/bignum.h"
 #include "chaaya/ffi_callback.h"
 #include "chaaya/rational.h"
+#include "chaaya/sandbox.h"
 #include "chaaya/vm.h"
 
 #include <math.h>
@@ -491,6 +492,10 @@ void ch_ffi_finalize_library(ChForeignLibrary *library) {
 int ch_ffi_open_library(ChVM *vm, const char *path, ChValue *out_library) {
     if (!out_library) {
         set_error(vm, "ffi: internal open-library error");
+        return -1;
+    }
+    if (ch_sandbox_deny_ffi()) {
+        set_error(vm, "open-foreign-library: denied by sandbox");
         return -1;
     }
 

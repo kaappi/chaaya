@@ -981,9 +981,10 @@ static void vm_debug_on_call(ChVM *vm, ChValue callee) {
     if (!hit) {
         return;
     }
-    fprintf(stderr, "; break at %s\n", name ? name : "<anonymous>");
     if (vm->debug_break_hook) {
         (void)vm->debug_break_hook(vm, name ? name : "<anonymous>");
+    } else {
+        fprintf(stderr, "; break at %s\n", name ? name : "<anonymous>");
     }
 }
 
@@ -1046,8 +1047,11 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
         }
         if (vm->continuation_invoked) {
             vm->continuation_invoked = false;
-            vm->has_pending_call = false;
-            return CH_VM_CONTINUATION_INVOKED;
+            /* A native may convert a barrier landing into a pending follow-up
+             * (call-with-values → consumer). Prefer draining that over escape. */
+            if (!vm->has_pending_call) {
+                return CH_VM_CONTINUATION_INVOKED;
+            }
         }
         if (vm->error[0] != '\0' && result == CH_UNDEFINED && !vm->has_pending_call) {
             char buf[256];
@@ -1191,14 +1195,15 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
     int fixed = fn->arity;
     if (fn->variadic) {
         if (nargs < fixed) {
-            snprintf(vm->error, sizeof(vm->error),
-                     "wrong number of arguments: expected at least %d, got %d", fixed, nargs);
-            return CH_VM_RUNTIME_ERROR;
+            char buf[256];
+            snprintf(buf, sizeof(buf), "wrong number of arguments: expected at least %d, got %d",
+                     fixed, nargs);
+            return raise_message_to_slot(vm, buf, arg_base);
         }
     } else if (nargs != fixed) {
-        snprintf(vm->error, sizeof(vm->error), "wrong number of arguments: expected %d, got %d", fixed,
-                 nargs);
-        return CH_VM_RUNTIME_ERROR;
+        char buf[256];
+        snprintf(buf, sizeof(buf), "wrong number of arguments: expected %d, got %d", fixed, nargs);
+        return raise_message_to_slot(vm, buf, arg_base);
     }
 
     size_t new_base;

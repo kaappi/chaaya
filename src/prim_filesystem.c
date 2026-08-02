@@ -1,4 +1,5 @@
 #include "chaaya/prim.h"
+#include "chaaya/sandbox.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -21,7 +22,13 @@ static const char *require_path(ChVM *vm, ChValue v, const char *who) {
         snprintf(vm->error, sizeof(vm->error), "%s: expected string path", who);
         return NULL;
     }
-    return ch_as_string(v)->data;
+    const char *path = ch_as_string(v)->data;
+    if (ch_sandbox_deny_fs(path)) {
+        snprintf(vm->error, sizeof(vm->error),
+                 "%s: denied by sandbox for path '%s'", who, path);
+        return NULL;
+    }
+    return path;
 }
 
 static ChValue raise_file_error(ChVM *vm, const char *message, ChValue irritant) {

@@ -55,13 +55,22 @@ typedef struct ChCliOptions {
     int flag_no_ir_opt;
     int flag_deny_warnings;
     int flag_timings;
+    int timings_json; /* --timings=json */
     int flag_diagnostics; /* set when --diagnostics= given */
     ChDiagFormat diagnostics_format;
     int flag_timeout;
+    long timeout_ms; /* --timeout value when flag_timeout */
     int flag_max_memory;
+    size_t max_memory_bytes; /* --max-memory value when flag_max_memory */
     int flag_profile_json;
+    const char *profile_json_path;
     int flag_coverage_xml;
+    const char *coverage_xml_path;
     int flag_fmt_check; /* fmt --check */
+    int test_jobs;      /* test -j/--jobs; 0 = default serial */
+    int test_seed_set;
+    unsigned test_seed;
+    int test_json;
     const char *nyi_flag; /* first not-yet-implemented flag name seen */
 } ChCliOptions;
 

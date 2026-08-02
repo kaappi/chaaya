@@ -17,6 +17,19 @@ Active ports that already run under `make test`:
 
 Runner: [`tests/scheme/run_kaappi_deferred.cmake`](../run_kaappi_deferred.cmake).
 
+## Phase B triage (2026-08-02)
+
+Known failing set from Phase B was re-triaged with per-test `ctest -R` runs.
+
+- **Fixed cleanly:** `kaappi_deferred_eval`, `kaappi_deferred_srfi_completeness`,
+  `kaappi_deferred_smoke_call_with_values_arity`,
+  `kaappi_deferred_smoke_string_negative_index`,
+  `kaappi_deferred_r7rs_continuation_gaps` (call-with-values + tail `call/cc`
+  under exception handlers now drains the consumer pending call).
+- **Portable SRFI parity smoke:** added
+  `kaappi_deferred_smoke_portable_srfi_import` to exercise portable
+  `(srfi 111)` through `--lib-path`.
+
 **Enablement process:** local green with `./build/chaaya --lib-path ./lib <file>.scm`, then add `chaaya_kaappi_deferred_test(...)` in [`CMakeLists.txt`](../../../CMakeLists.txt).
 
 Re-sync from Kaappi periodically:

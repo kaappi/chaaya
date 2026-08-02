@@ -1,4 +1,5 @@
 #include "chaaya/prim.h"
+#include "chaaya/sandbox.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,7 +36,10 @@ static int exit_status_from_args(ChValue *args, int nargs) {
 }
 
 static ChValue prim_emergency_exit(ChVM *vm, ChValue *args, int nargs) {
-    (void)vm;
+    if (ch_sandbox_deny_process()) {
+        snprintf(vm->error, sizeof(vm->error), "emergency-exit: denied by sandbox");
+        return CH_UNDEFINED;
+    }
     _Exit(exit_status_from_args(args, nargs));
     return CH_VOID; /* unreachable */
 }
