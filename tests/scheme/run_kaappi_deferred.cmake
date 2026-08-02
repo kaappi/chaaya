@@ -3,9 +3,10 @@ if(NOT DEFINED CHAAYA OR NOT DEFINED INPUT OR NOT DEFINED LIB_PATH)
 endif()
 
 get_filename_component(input_dir "${INPUT}" DIRECTORY)
+get_filename_component(input_name "${INPUT}" NAME)
 
 execute_process(
-  COMMAND "${CHAAYA}" "--lib-path" "${LIB_PATH}" "${INPUT}"
+  COMMAND "${CHAAYA}" "--lib-path" "${LIB_PATH}" "${input_name}"
   WORKING_DIRECTORY "${input_dir}"
   RESULT_VARIABLE rc
   OUTPUT_VARIABLE out

@@ -16,6 +16,7 @@ typedef enum ChCompileStatus {
 typedef struct ChCompiler {
     ChVM *vm;
     char error[256];
+    uint32_t next_binding_id;
 } ChCompiler;
 
 void ch_compiler_init(ChCompiler *c, ChVM *vm);

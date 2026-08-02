@@ -93,6 +93,7 @@ typedef struct ChVM {
     /* R7RS libraries */
     struct ChLibraryRegistry *libraries;
     struct ChLibEnv *active_lib_env; /* non-NULL while compiling/running library body */
+    struct ChEnvironment *active_eval_env; /* non-NULL during eval in a custom environment */
     char *loading_libs[32];
     size_t loading_lib_count;
     char *current_lib_dir; /* owned; directory of .sld being loaded */
@@ -145,6 +146,7 @@ int ch_vm_parameter_pop(ChVM *vm, ChValue parameter);
 
 /* Raise a Scheme condition object through the handler stack. */
 ChValue ch_vm_raise(ChVM *vm, ChValue obj, int continuable);
+void ch_vm_reclaim_regs(ChVM *vm);
 
 ChValue ch_vm_capture_continuation(ChVM *vm, size_t result_slot);
 ChVMStatus ch_vm_invoke_continuation(ChVM *vm, ChContinuation *cont, ChValue value);

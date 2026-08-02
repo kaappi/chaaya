@@ -12,7 +12,7 @@ an R7RS library MVP; fuller Kaappi/R7RS suites stay deferred.
 | `tests/scheme/bootstrap/` | Kaappi-shaped `check-*` suites (`libraries.scm` uses `import`) | yes |
 | `tests/scheme/probes/` | Adapted Kaappi differential probes (stdout golden) | yes |
 | `tests/scheme/r7rs/` | Canonical R7RS-small suite (vendored) | **in CTest** (`r7rs_suite`; full file green) |
-| `tests/scheme/kaappi-deferred/` | Full Kaappi smoke/compliance/probe copies | **partial** — 31 compliance + 43 smoke files in CTest (see below) |
+| `tests/scheme/kaappi-deferred/` | Full Kaappi smoke/compliance/probe copies | **partial** — 37 compliance + 62 smoke files in CTest (see below) |
 
 ## Bootstrap harness
 
@@ -49,7 +49,7 @@ See `tests/scheme/kaappi-deferred/README.md`. Rough gates:
 7. `(scheme inexact)` / `(scheme exact)` + math prims — **done** (MVP)
 8. SRFI-64 or `(chibi test)` — **done** for wired deferred suites (`bind_lib_ref` skips transformers; per-env hoist globals). `(chibi test)` drives `r7rs_suite`.
 9. Re-run Kaappi’s `tests/scheme/run-all.sh` corpus against `chaaya` — **in progress**
-   (compliance: 31 files; smoke: 43 files — see `CMakeLists.txt`)
+   (compliance: 37 files; smoke: 62 files — see `CMakeLists.txt`)
 
 ## kaappi-deferred compliance
 
@@ -60,24 +60,24 @@ time/process-context, bugfix sweeps). Enable with:
 ctest --output-on-failure -R kaappi_deferred -E smoke
 ```
 
-**Recently added (batch 1B–1E, green):** `r7rs-datatypes-gaps`, `time`,
-`process-context`, `scheme-repl`, `include-lib-decls`, `correctness-fixes`,
-`final-gaps`, `bugfixes`, `deferred-bugfixes`, `deferred-final`, `r7rs-thin-forms-gaps`.
+**Recently added (batch 1B–1E + 2, green):** `r7rs-datatypes-gaps`, `time`,
+`process-context`, `scheme-repl`, `correctness-fixes`, `final-gaps`, `bugfixes`,
+`deferred-bugfixes`, `deferred-final`, `r7rs-thin-forms-gaps`, `printer-gaps`,
+`r7rs-tail-position-gaps`, `r7rs-import-macro-gaps`, `r7rs-libraries-gaps`,
+`reader-exactness-gaps`, `srfi-completeness`.
 
 **Deferred (not wired — known blockers):**
 
 | File | Reason |
 |------|--------|
-| `reader-exactness-gaps.scm` | SIGABRT on section 10 round-trip matrix (sections 1–9 pass) |
-| `printer-gaps.scm` | slow/hangs on large write-shared scans (120s+ in CI) |
 | `reader-port-refill-gaps.scm` | port buffer refill at split boundaries (22 failures) |
 | `r7rs-expressions-gaps.scm` | literal identifier binding at use site (29/30) |
-| `r7rs-tail-position-gaps.scm`, `r7rs-tail-procedures-gaps.scm`, `r7rs-import-macro-gaps.scm`, `r7rs-libraries-gaps.scm` | SIGABRT (investigating; TCO works in isolation) |
+| `r7rs-tail-procedures-gaps.scm` | let-values TCO at N=40000 (register growth via `call-with-values`) |
 | `r7rs-control-io-gaps.scm` | immutable environment / `eval` (4 failures) |
 | `r7rs-continuation-gaps.scm` | MV through continuations; `guard`/`raise` (2 failures) |
 | `r7rs-hygiene-gaps.scm` | ellipsis distribution in `syntax-rules` (2 failures) |
 | `record-ctor-clause-keyword-1882.scm` | R6RS clause-syntax records NYI |
-| `srfi-completeness.scm` | multiple missing native SRFI libraries |
+| `include-lib-decls.scm` | library declaration edge cases (in progress) |
 
 ## kaappi-deferred smoke
 
@@ -88,7 +88,7 @@ bignum, fibers, ports). Enable with:
 ctest --output-on-failure -R kaappi_deferred_smoke
 ```
 
-**Green (43):** batch 1 — `basic`, `numeric`, `macros`, `expander-fixes`,
+**Green (62):** batch 1 — `basic`, `numeric`, `macros`, `expander-fixes`,
 `expander-many-patvars`, `gc-mark-contents-types`, `bignum-rational-arith`,
 `bignum-division-multi-arg`, `bignum-rational-normalization`, `not-not-non-boolean`,
 `zero-pred-type-error`, `literal-immutability`, `apply-shadowing`,
@@ -101,7 +101,13 @@ ctest --output-on-failure -R kaappi_deferred_smoke
 `callwithargs-bounds`, `case-arrow-register`, `continuation-wind-870`,
 `define-values-gc`, `dynamic-wind-double-875`, `exact-inexact-842-848`,
 `fiber-round-robin`, `hash-table-walk-rehash`, `inexact-to-exact`,
-`rational-rounding`, `string-trim-whitespace-826`.
+`rational-rounding`, `string-trim-whitespace-826`; batch 3 —
+`bignum-toF64-833`, `call-global-continuation`, `case-empty-datum-854`,
+`command-line-o-flag`, `complex-accessors-types`, `cond-expand-empty`,
+`constant-fold-shadowing`, `continuation-gc-size`, `create-temp-file-error`,
+`datum-label-vector`, `deep-mark-864`, `define-values-lambda-body`, `derived`,
+`do-closure-capture-803`, `dotted-pair-datum-comment`, `ellipsis-depth-mismatch`,
+`exact-integer-sqrt-export`, `exact-large-float`, `exactness-prefix`.
 
 **Batch triage (239 unwired scanned):** ~123 pass locally with 15s timeout;
 116 fail/hang (SRFI-18 threads NYI, missing primitives, fixture libs, 3 hangs).

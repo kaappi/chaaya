@@ -27,6 +27,7 @@ typedef struct ChLocal {
     ChSymbol *name;
     uint8_t depth;
     bool is_captured;
+    uint32_t binding_id;
 } ChLocal;
 
 typedef struct ChCompUpvalue {
@@ -59,6 +60,7 @@ typedef struct ChFuncCompiler {
 void ch_compiler_init(ChCompiler *c, ChVM *vm) {
     c->vm = vm;
     c->error[0] = '\0';
+    c->next_binding_id = 1;
 }
 
 const char *ch_compiler_error(const ChCompiler *c) {
@@ -297,6 +299,7 @@ static int add_local(ChCompiler *c, ChFuncCompiler *fc, ChSymbol *name) {
     fc->locals[fc->local_count].name = name;
     fc->locals[fc->local_count].depth = (uint8_t)fc->scope_depth;
     fc->locals[fc->local_count].is_captured = false;
+    fc->locals[fc->local_count].binding_id = c->next_binding_id++;
     return fc->local_count++;
 }
 
@@ -312,6 +315,26 @@ static void ensure_temps_from(ChFuncCompiler *fc) {
     if (fc->next_reg > fc->max_regs) {
         fc->max_regs = fc->next_reg;
     }
+}
+
+static int in_restricted_eval_env(ChCompiler *c) {
+    return c->vm->active_eval_env != NULL;
+}
+
+static int eval_env_immutable(ChCompiler *c) {
+    return c->vm->active_eval_env != NULL;
+}
+
+static uint32_t resolve_use_site_binding(const void *ctx, const char *name) {
+    const ChFuncCompiler *fc = ctx;
+    for (const ChFuncCompiler *f = fc; f; f = f->enclosing) {
+        for (int i = f->local_count - 1; i >= 0; i--) {
+            if (strcmp(ch_symbol_basename(f->locals[i].name), name) == 0) {
+                return CH_LITERAL_LOCAL_BASE | f->locals[i].binding_id;
+            }
+        }
+    }
+    return CH_LITERAL_UNBOUND;
 }
 
 static ChCompileStatus compile_expr(ChCompiler *c, ChFuncCompiler *fc, ChValue expr, uint8_t dst,
@@ -623,6 +646,9 @@ static ChCompileStatus compile_set(ChCompiler *c, ChFuncCompiler *fc, ChValue ar
         reset_regs(fc, saved);
         return CH_COMPILE_OK;
     }
+    if (eval_env_immutable(c)) {
+        return fail(c, "set!: environment is not mutable");
+    }
     uint16_t gidx;
     if (c->vm->active_lib_env) {
         int lidx = ch_lib_env_find(c->vm->active_lib_env, name);
@@ -693,6 +719,9 @@ static ChCompileStatus compile_define(ChCompiler *c, ChFuncCompiler *fc, ChValue
         return CH_COMPILE_OK;
     }
 
+    if (eval_env_immutable(c)) {
+        return fail(c, "define: environment is not mutable");
+    }
     ensure_temps_from(fc);
     uint8_t saved = fc->next_reg;
     uint8_t vreg = alloc_reg(fc);
@@ -799,7 +828,7 @@ static ChCompileStatus compile_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue
 /* (case-lambda (formals body...) ...) →
  * (lambda %cl-args
  *   (let ((%cl-n (length %cl-args)))
- *     (cond ((= %cl-n arity) (apply (lambda formals body...) %cl-args)) ...
+ *     (cond ((= %cl-n arity) (let ((formals from list-ref %cl-args)) body)) ...
  *           (else (error "wrong number of arguments"))))) */
 static ChCompileStatus compile_case_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
                                            uint8_t dst, bool tail) {
@@ -811,6 +840,7 @@ static ChCompileStatus compile_case_lambda(ChCompiler *c, ChFuncCompiler *fc, Ch
     ChValue eq_sym = ch_gc_intern_symbol_cstr(gc, "=");
     ChValue ge_sym = ch_gc_intern_symbol_cstr(gc, ">=");
     ChValue length_sym = ch_gc_intern_symbol_cstr(gc, "length");
+    ChValue list_ref_sym = ch_gc_intern_symbol_cstr(gc, "list-ref");
     ChValue apply_sym = ch_gc_intern_symbol_cstr(gc, "apply");
     ChValue else_sym = ch_gc_intern_symbol_cstr(gc, "else");
     ChValue error_sym = ch_gc_intern_symbol_cstr(gc, "error");
@@ -822,13 +852,13 @@ static ChCompileStatus compile_case_lambda(ChCompiler *c, ChFuncCompiler *fc, Ch
     ChValue rev_clauses = CH_NIL;
     ChValue scratch = CH_NIL;
     ChValue piece = CH_NIL;
-    ChValue apply_call = CH_NIL;
+    ChValue clause_body = CH_NIL;
     ChValue cond_clauses = CH_NIL;
     ChValue outer = CH_NIL;
     ch_gc_push(gc, &rev_clauses);
     ch_gc_push(gc, &scratch);
     ch_gc_push(gc, &piece);
-    ch_gc_push(gc, &apply_call);
+    ch_gc_push(gc, &clause_body);
     ch_gc_push(gc, &cond_clauses);
     ch_gc_push(gc, &outer);
     ch_gc_push(gc, &args);
@@ -865,15 +895,41 @@ static ChCompileStatus compile_case_lambda(ChCompiler *c, ChFuncCompiler *fc, Ch
         scratch = ch_gc_cons(gc, arity_v, CH_NIL);
         scratch = ch_gc_cons(gc, n_sym, scratch);
         scratch = ch_gc_cons(gc, cmp, scratch);
-        /* piece = (lambda formals . body) */
-        piece = ch_gc_cons(gc, formals, body);
-        piece = ch_gc_cons(gc, lambda_sym, piece);
-        /* apply_call = (apply piece args) */
-        apply_call = ch_gc_cons(gc, args_sym, CH_NIL);
-        apply_call = ch_gc_cons(gc, piece, apply_call);
-        apply_call = ch_gc_cons(gc, apply_sym, apply_call);
-        /* piece = (scratch apply_call) */
-        piece = ch_gc_cons(gc, apply_call, CH_NIL);
+        if (has_rest) {
+            /* Rest formals still use apply+lambda — list-ref/list-tail let
+             * binding did not expose rest names in clause bodies (#1173). */
+            piece = ch_gc_cons(gc, formals, body);
+            piece = ch_gc_cons(gc, lambda_sym, piece);
+            clause_body = ch_gc_cons(gc, args_sym, CH_NIL);
+            clause_body = ch_gc_cons(gc, piece, clause_body);
+            clause_body = ch_gc_cons(gc, apply_sym, clause_body);
+        } else {
+            /* Bind fixed formals via list-ref so bodies can tail-call the
+             * case-lambda without apply growing the register file. */
+            ChValue binds = CH_NIL;
+            int idx = 0;
+            for (ChValue f = formals; ch_is_pair(f); f = ch_cdr(f)) {
+                if (!ch_is_symbol(ch_car(f))) {
+                    ch_gc_pop_n(gc, nroots);
+                    return fail(c, "case-lambda: bad formals");
+                }
+                ChValue name = ch_car(f);
+                ChValue ref = ch_gc_cons(gc, ch_make_fixnum(idx), CH_NIL);
+                ref = ch_gc_cons(gc, args_sym, ref);
+                ref = ch_gc_cons(gc, list_ref_sym, ref);
+                ChValue bind = ch_gc_cons(gc, name, ch_gc_cons(gc, ref, CH_NIL));
+                binds = ch_gc_cons(gc, bind, binds);
+                idx++;
+            }
+            ChValue rb = CH_NIL;
+            while (ch_is_pair(binds)) {
+                rb = ch_gc_cons(gc, ch_car(binds), rb);
+                binds = ch_cdr(binds);
+            }
+            clause_body = ch_gc_cons(gc, let_sym, ch_gc_cons(gc, rb, body));
+        }
+        /* piece = (scratch clause_body) */
+        piece = ch_gc_cons(gc, clause_body, CH_NIL);
         piece = ch_gc_cons(gc, scratch, piece);
         rev_clauses = ch_gc_cons(gc, piece, rev_clauses);
     }
@@ -1238,6 +1294,18 @@ static ChCompileStatus compile_let_values(ChCompiler *c, ChFuncCompiler *fc, ChV
         inner = ch_gc_cons(gc, begin_sym, body);
     }
 
+    /* Single-binding tail context: avoid let/apply so body tail calls stay TCO. */
+    if (tail && count == 1) {
+        ChValue producer =
+            ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, exprs[0], CH_NIL)));
+        ChValue consumer =
+            ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, formals_arr[0], ch_gc_cons(gc, inner, CH_NIL)));
+        ChValue form = ch_gc_cons(gc, cwv_sym, ch_gc_cons(gc, producer, ch_gc_cons(gc, consumer, CH_NIL)));
+        ChValue form_keep = form;
+        ch_gc_pop(gc);
+        return compile_expr(c, fc, form_keep, dst, true);
+    }
+
     for (int i = count - 1; i >= 0; i--) {
         ChValue consumer_body = ch_gc_cons(gc, inner, CH_NIL);
         ChValue consumer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, formals_arr[i], consumer_body));
@@ -1439,6 +1507,9 @@ static ChCompileStatus compile_variable(ChCompiler *c, ChFuncCompiler *fc, ChSym
             }
         }
         if (lidx < 0) {
+            if (in_restricted_eval_env(c)) {
+                return fail(c, "unbound variable");
+            }
             /* Forward refs within the library body; fall through if this names a VM global. */
             int gchk = ch_vm_intern_global(c->vm, name);
             const char *base = ch_symbol_basename(name);
@@ -1460,6 +1531,9 @@ static ChCompileStatus compile_variable(ChCompiler *c, ChFuncCompiler *fc, ChSym
             emit_u16(fc, (uint16_t)(CH_ENV_LIB_BIT | (unsigned)lidx));
             return CH_COMPILE_OK;
         }
+    }
+    if (in_restricted_eval_env(c)) {
+        return fail(c, "unbound variable");
     }
     /* Hygienic renames: exact symbol global if bound during macro expansion. */
     int g = ch_vm_intern_global(c->vm, name);
@@ -2692,7 +2766,12 @@ static ChCompileStatus compile_expr_impl(ChCompiler *c, ChFuncCompiler *fc, ChVa
             if (home) {
                 c->vm->active_lib_env = home;
             }
-            if (ch_expand_macro(c->vm, tr, expr, &expanded, err, sizeof(err)) != CH_EXPAND_OK) {
+            ChUseSiteBindingCheck use_check = {
+                .ctx = fc,
+                .resolve = resolve_use_site_binding,
+            };
+            if (ch_expand_macro_checked(c->vm, tr, expr, &use_check, &expanded, err, sizeof(err)) !=
+                CH_EXPAND_OK) {
                 c->vm->active_lib_env = saved_lib;
                 ch_gc_pop(&c->vm->gc);
                 return fail(c, err);

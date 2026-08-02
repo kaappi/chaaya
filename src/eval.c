@@ -121,6 +121,11 @@ int ch_eval_datum(ChVM *vm, ChValue expr, ChValue env_or_void, ChValue *out) {
     }
 
     ChLibEnv *saved_active_env = vm->active_lib_env;
+    ChEnvironment *saved_eval_env = vm->active_eval_env;
+    vm->active_eval_env = NULL;
+    if (env_obj && env_obj->kind != CH_ENV_INTERACTION) {
+        vm->active_eval_env = env_obj;
+    }
     vm->active_lib_env = eval_env;
 
     ChValue expr_root = expr;
@@ -163,6 +168,7 @@ int ch_eval_datum(ChVM *vm, ChValue expr, ChValue env_or_void, ChValue *out) {
 
     ch_gc_pop(&vm->gc);
     vm->active_lib_env = saved_active_env;
+    vm->active_eval_env = saved_eval_env;
 
     if (rc != 0) {
         return -1;

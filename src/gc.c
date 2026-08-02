@@ -979,6 +979,18 @@ ChValue ch_gc_make_ephemeron(ChGC *gc, ChValue key, ChValue value) {
 
 ChValue ch_gc_make_file_info(ChGC *gc, const ChFileInfo *info) {
     ChFileInfo *fi = (ChFileInfo *)ch_gc_alloc(gc, sizeof(ChFileInfo), CH_TAG_FILE_INFO);
-    *fi = *info;
+    fi->mode = info->mode;
+    fi->size = info->size;
+    fi->mtime_sec = info->mtime_sec;
+    fi->atime_sec = info->atime_sec;
+    fi->ctime_sec = info->ctime_sec;
+    fi->dev = info->dev;
+    fi->ino = info->ino;
+    fi->nlinks = info->nlinks;
+    fi->rdev = info->rdev;
+    fi->blksize = info->blksize;
+    fi->blocks = info->blocks;
+    fi->uid = info->uid;
+    fi->gid = info->gid;
     return ch_make_pointer(&fi->header);
 }

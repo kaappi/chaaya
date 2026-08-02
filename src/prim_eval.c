@@ -49,6 +49,12 @@ static ChValue prim_eval(ChVM *vm, ChValue *args, int nargs) {
     ChValue env = (nargs >= 2) ? args[1] : CH_VOID;
     ChValue result = CH_VOID;
     if (ch_eval_datum(vm, args[0], env, &result) != 0) {
+        if (vm->error[0] != '\0') {
+            ChValue msg = ch_gc_make_string_cstr(&vm->gc, vm->error);
+            ChValue err = ch_gc_make_error_object(&vm->gc, msg, CH_NIL, 0);
+            vm->error[0] = '\0';
+            return ch_vm_raise(vm, err, 0);
+        }
         return CH_UNDEFINED;
     }
     return result;

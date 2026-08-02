@@ -268,6 +268,92 @@ static ChValue prim_set_current_directory(ChVM *vm, ChValue *args, int nargs) {
     return CH_VOID;
 }
 
+static ChSymbol *file_type_symbol(ChVM *vm, mode_t mode) {
+    if (S_ISREG(mode)) {
+        return ch_as_symbol(ch_gc_intern_symbol_cstr(&vm->gc, "regular"));
+    }
+    if (S_ISDIR(mode)) {
+        return ch_as_symbol(ch_gc_intern_symbol_cstr(&vm->gc, "directory"));
+    }
+    if (S_ISLNK(mode)) {
+        return ch_as_symbol(ch_gc_intern_symbol_cstr(&vm->gc, "symlink"));
+    }
+    if (S_ISFIFO(mode)) {
+        return ch_as_symbol(ch_gc_intern_symbol_cstr(&vm->gc, "fifo"));
+    }
+    if (S_ISSOCK(mode)) {
+        return ch_as_symbol(ch_gc_intern_symbol_cstr(&vm->gc, "socket"));
+    }
+    if (S_ISCHR(mode)) {
+        return ch_as_symbol(ch_gc_intern_symbol_cstr(&vm->gc, "char-special"));
+    }
+    if (S_ISBLK(mode)) {
+        return ch_as_symbol(ch_gc_intern_symbol_cstr(&vm->gc, "block-special"));
+    }
+    return ch_as_symbol(ch_gc_intern_symbol_cstr(&vm->gc, "unknown"));
+}
+
+static ChValue prim_file_info_type(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChFileInfo *fi = require_file_info(vm, args[0], "file-info-type");
+    if (!fi) {
+        return CH_UNDEFINED;
+    }
+    return ch_make_pointer(&file_type_symbol(vm, fi->mode)->header);
+}
+
+static const char *default_temp_prefix(char *buf, size_t cap) {
+    const char *tmpdir = getenv("TMPDIR");
+    if (!tmpdir || tmpdir[0] == '\0') {
+        tmpdir = "/tmp/";
+    }
+    size_t n = strlen(tmpdir);
+    if (n + 1 >= cap) {
+        return "/tmp/";
+    }
+    memcpy(buf, tmpdir, n + 1);
+    if (n > 0 && tmpdir[n - 1] != '/') {
+        if (n + 2 >= cap) {
+            return "/tmp/";
+        }
+        buf[n] = '/';
+        buf[n + 1] = '\0';
+    }
+    return buf;
+}
+
+static ChValue prim_temp_file_prefix(ChVM *vm, ChValue *args, int nargs) {
+    (void)args;
+    (void)nargs;
+    char buf[512];
+    return ch_gc_make_string_cstr(&vm->gc, default_temp_prefix(buf, sizeof(buf)));
+}
+
+static ChValue prim_create_temp_file(ChVM *vm, ChValue *args, int nargs) {
+    char prefix_buf[512];
+    const char *prefix = default_temp_prefix(prefix_buf, sizeof(prefix_buf));
+    if (nargs > 0) {
+        prefix = require_path(vm, args[0], "create-temp-file");
+        if (!prefix) {
+            return CH_UNDEFINED;
+        }
+    }
+    char template_buf[256];
+    size_t plen = strlen(prefix);
+    if (plen + 7 > sizeof(template_buf)) {
+        return raise_file_error(vm, "temp file prefix too long", nargs > 0 ? args[0] : CH_FALSE);
+    }
+    memcpy(template_buf, prefix, plen);
+    memcpy(template_buf + plen, "XXXXXX", 6);
+    template_buf[plen + 6] = '\0';
+    int fd = mkstemp(template_buf);
+    if (fd < 0) {
+        return raise_file_error(vm, "cannot create temp file", nargs > 0 ? args[0] : CH_FALSE);
+    }
+    close(fd);
+    return ch_gc_make_string_cstr(&vm->gc, template_buf);
+}
+
 void ch_register_filesystem_primitives(ChVM *vm) {
     define_prim(vm, "directory-files", prim_directory_files, -1, 1);
     define_prim(vm, "file-info", prim_file_info, -1, 1);
@@ -284,4 +370,7 @@ void ch_register_filesystem_primitives(ChVM *vm) {
     define_prim(vm, "real-path", prim_real_path, 1, 1);
     define_prim(vm, "current-directory", prim_current_directory, 0, 0);
     define_prim(vm, "set-current-directory!", prim_set_current_directory, 1, 1);
+    define_prim(vm, "file-info-type", prim_file_info_type, 1, 1);
+    define_prim(vm, "temp-file-prefix", prim_temp_file_prefix, 0, 0);
+    define_prim(vm, "create-temp-file", prim_create_temp_file, -1, 0);
 }

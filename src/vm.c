@@ -254,7 +254,6 @@ ChValue ch_vm_raise(ChVM *vm, ChValue obj, int continuable) {
     if (st != CH_VM_OK) {
         return CH_UNDEFINED;
     }
-    (void)continuable;
     return result;
 }
 
@@ -446,6 +445,10 @@ static size_t compute_reg_top(const ChVM *vm) {
         }
     }
     return top;
+}
+
+void ch_vm_reclaim_regs(ChVM *vm) {
+    vm->reg_top = compute_reg_top(vm);
 }
 
 /* calloc that never returns NULL; allocates at least one element. */
@@ -910,14 +913,25 @@ static void vm_debug_on_call(ChVM *vm, ChValue callee) {
     }
 }
 
+static ChValue pack_continuation_value(ChVM *vm, size_t arg_base, int nargs) {
+    if (nargs == 1) {
+        return vm->regs[arg_base + 1];
+    }
+    if (nargs == 0) {
+        return CH_VOID;
+    }
+    return ch_gc_make_values(&vm->gc, &vm->regs[arg_base + 1], (size_t)nargs);
+}
+
 static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int nargs, bool tail) {
     vm_debug_on_call(vm, callee);
     if (ch_is_continuation(callee)) {
-        if (nargs != 1) {
-            snprintf(vm->error, sizeof(vm->error), "continuation: expected 1 argument, got %d", nargs);
+        if (nargs < 0) {
+            snprintf(vm->error, sizeof(vm->error), "continuation: bad argument count");
             return CH_VM_RUNTIME_ERROR;
         }
-        return ch_vm_invoke_continuation(vm, ch_as_continuation(callee), vm->regs[arg_base + 1]);
+        ChValue value = pack_continuation_value(vm, arg_base, nargs);
+        return ch_vm_invoke_continuation(vm, ch_as_continuation(callee), value);
     }
 
     if (ch_is_native(callee)) {

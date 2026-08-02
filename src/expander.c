@@ -12,8 +12,8 @@
 #define CH_HYG_MAX 4096
 #define CH_EXPAND_DEPTH_MAX 256
 #define CH_ELLIPSIS_MAX 64
-#define CH_LITERAL_UNBOUND 0u
-#define CH_LITERAL_GLOBAL_BASE 0x80000000u
+
+static thread_local const ChUseSiteBindingCheck *active_use_check = NULL;
 
 static uint32_t global_binding_slot(ChVM *vm, ChSymbol *sym) {
     const char *base = ch_symbol_basename(sym);
@@ -62,6 +62,7 @@ typedef struct ChHygRename {
 typedef struct ChExpandCtx {
     ChVM *vm;
     ChTransformer *tr;
+    const ChUseSiteBindingCheck *use_check;
     ChBinding binds[CH_BIND_MAX];
     int nbinds;
     ChHygRename renames[CH_HYG_MAX];
@@ -82,11 +83,20 @@ static int literal_matches(ChExpandCtx *ctx, ChSymbol *pat_lit, ChValue use) {
         return 0;
     }
     uint32_t def_slot = ctx->tr->literal_bound[(size_t)idx];
-    uint32_t use_slot = resolve_expand_binding_slot(ctx->vm, use_sym);
+    uint32_t use_slot = CH_LITERAL_UNBOUND;
+    if (ctx->use_check && ctx->use_check->resolve) {
+        use_slot = ctx->use_check->resolve(ctx->use_check->ctx, ch_symbol_basename(use_sym));
+    }
+    if (use_slot == CH_LITERAL_UNBOUND) {
+        use_slot = resolve_expand_binding_slot(ctx->vm, use_sym);
+    }
     if (def_slot == CH_LITERAL_UNBOUND && use_slot == CH_LITERAL_UNBOUND) {
         return strcmp(ch_symbol_basename(pat_lit), ch_symbol_basename(use_sym)) == 0;
     }
-    return def_slot != CH_LITERAL_UNBOUND && def_slot == use_slot;
+    if (def_slot == CH_LITERAL_UNBOUND || use_slot == CH_LITERAL_UNBOUND) {
+        return 0;
+    }
+    return def_slot == use_slot;
 }
 
 static int is_ellipsis_id(ChExpandCtx *ctx, ChSymbol *s) {
@@ -882,6 +892,16 @@ ChExpandStatus ch_parse_syntax_rules(ChVM *vm, ChValue spec, ChTransformer **out
     return CH_EXPAND_OK;
 }
 
+ChExpandStatus ch_expand_macro_checked(ChVM *vm, ChTransformer *tr, ChValue use,
+                                       const ChUseSiteBindingCheck *use_check, ChValue *out,
+                                       char *err, size_t err_len) {
+    const ChUseSiteBindingCheck *saved = active_use_check;
+    active_use_check = use_check;
+    ChExpandStatus st = ch_expand_macro(vm, tr, use, out, err, err_len);
+    active_use_check = saved;
+    return st;
+}
+
 ChExpandStatus ch_expand_macro(ChVM *vm, ChTransformer *tr, ChValue use, ChValue *out, char *err,
                                size_t err_len) {
     ChLibEnv *saved_env = vm->active_lib_env;
@@ -911,6 +931,7 @@ ChExpandStatus ch_expand_macro(ChVM *vm, ChTransformer *tr, ChValue use, ChValue
         memset(&ctx, 0, sizeof(ctx));
         ctx.vm = vm;
         ctx.tr = tr;
+        ctx.use_check = active_use_check;
         ctx.err = err;
         ctx.err_len = err_len;
 

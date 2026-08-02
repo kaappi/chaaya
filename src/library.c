@@ -288,6 +288,7 @@ int ch_register_builtin_libraries(ChVM *vm) {
         "directory-files",         "file-info",           "file-info?",
         "file-info-directory?",    "file-info-regular?",  "file-info-symlink?",
         "file-info:size",          "file-info:mtime",     "file-info:mode",
+        "file-info-type",          "temp-file-prefix",    "create-temp-file",
         "create-directory",        "delete-directory",    "rename-file",
         "real-path",               "current-directory",   "set-current-directory!",
         "file-exists?",            "delete-file"};
