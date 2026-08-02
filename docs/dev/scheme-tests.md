@@ -94,15 +94,18 @@ Wired in CTest as `kaappi_deferred_smoke_*`. Enable with:
 ctest --output-on-failure -R kaappi_deferred_smoke
 ```
 
-**Status as of 2026-08-02 (Phase 2/5 batch):** 216 of 257 non-backend smoke
-files wired (**216/257**, ~84%). "Non-backend" excludes the 8 permanently
-skipped `jit-*.scm`/`llvm-*.scm` files (see below); 41 remain unwired.
+**Status as of 2026-08-02 (expander bug campaign):** 222 of 257 non-backend smoke
+files wired (**222/257**, ~86%). "Non-backend" excludes the 8 permanently
+skipped `jit-*.scm`/`llvm-*.scm` files (see below); 35 remain unwired.
 
 **Wired:** language-surface fixes (`case-lambda-fixes`, `expt-negative-base-1725`,
 `equal-dag`, `circular-list-terminate`) plus a large batch of locally green
 smoke files (see `CMakeLists.txt` `smoke_*` entries), including
 `smoke_portable_srfi_import` for explicit `--lib-path` portable SRFI import
-coverage. Batch 9 added `file-info-blocks` (missing `file-info:blocks`
+coverage. Expander campaign wired `lambda-param-shadows-keyword-788`,
+`expander-vector-patterns`, `internal-define-syntax-scope`,
+`library-macro-leak-877`, `record-macro-scope-1718`, and `macro-chains`.
+Batch 9 added `file-info-blocks` (missing `file-info:blocks`
 accessor, now implemented) and `mutex-lock-false-owner` (`mutex-lock!`'s `#f`
 timeout argument was inverted — it polled instead of blocking indefinitely,
 and the optional explicit-owner-thread argument was never read; both fixed
@@ -118,12 +121,11 @@ smoke covers are wired and green: `kaappi-parallel-map`,
 |------|--------|
 | `jit-*.scm`, `llvm-*.scm` | JIT/LLVM backend not in Chaaya |
 
-**Remaining unwired (41), grouped by blocker:**
+**Remaining unwired (35), grouped by blocker:**
 
 | Blocker | Files | Notes |
 |---------|------:|-------|
 | Fiber/thread scheduler races & cross-thread capacity limits | 15 | `fiber-blocked-exit`, `fiber-channel-receive-waits-out-peer-sleep`, `fiber-channel-rendezvous`, `fiber-dispatch-blocked-siblings`, `fiber-error-handling`, `fiber-many-waiters-one-object-1530`, `fiber-pipeline`, `fiber-thread-join-deadline-cleared-after-resolve`, `fiber-timed-mutex-lock-not-starved-by-busy-sibling`, `mutex-nested-dispatch-dirty-snapshot-1487`, `mutex-timeout`, `nested-wait-under-sleep-dirty-snapshot-1490`, `thread-foreign-owner-1484`, `thread-port-isolation`, `deep-copy-list-801`. Deep scheduler/dispatch work, not quick fixes; `nested-wait-under-sleep-dirty-snapshot-1490` in particular passes in isolation but times out under parallel `ctest -j` load — a genuine contention-sensitive race, left unwired rather than wired flaky. |
-| Macro expander (hygiene/scope/depth/patterns) | 6 | `macro-chains` (head-position chain compilation isn't iterative, unlike Kaappi#1796), `record-macro-scope-1718`, `internal-define-syntax-scope` (internal `define-syntax` appears to leak past its scope), `library-macro-leak-877`, `expander-vector-patterns` (vector patterns in `syntax-rules` templates), `lambda-param-shadows-keyword-788`. |
 | SRFI-170 POSIX primitives missing/incomplete | 4 | `filesystem-intcast` (`set-file-mode`/`set-umask!`/`umask` unimplemented), `group-info-by-name-1161` (`user-gid`/`group-info` unimplemented), `srfi170-time-objects` (`posix-time`/`monotonic-time` gaps), `filesystem-nul-path-805`. |
 | Fixed compiler limits (register file is `uint8_t`-indexed) | 5 | `apply-large-arglist`, `call-arg-limit`, `case-large-clauses`, `large-form-body-791`, `vector-large-arglist` — all hit an intentional ~200–256 argument/clause/register ceiling; raising it is a register-file width change, not a quick fix. |
 | Global/library rebinding internals | 3 | `percent-name-user-library-1856`, `library-redefine-closure-820`, `define-values-letrec-1719`. |

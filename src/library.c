@@ -169,6 +169,188 @@ static int library_into_env(ChLibEnv *env, ChLibrary *lib) {
     return 0;
 }
 
+#define CH_IMPORT_FREE_MAX 64
+#define CH_IMPORT_PV_MAX 128
+#define CH_IMPORT_VISIT_MAX 64
+
+static int import_name_listed(ChSymbol **names, int n, ChSymbol *s) {
+    const char *base = ch_symbol_basename(s);
+    for (int i = 0; i < n; i++) {
+        if (strcmp(ch_symbol_basename(names[i]), base) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int import_is_literal(ChTransformer *tr, ChSymbol *s) {
+    const char *base = ch_symbol_basename(s);
+    for (size_t i = 0; i < tr->literal_count; i++) {
+        if (strcmp(ch_symbol_basename(tr->literals[i]), base) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int import_is_ellipsis(ChTransformer *tr, ChSymbol *s) {
+    const char *base = ch_symbol_basename(s);
+    if (tr->ellipsis_id) {
+        return strcmp(ch_symbol_basename(tr->ellipsis_id), base) == 0;
+    }
+    return strcmp(base, "...") == 0;
+}
+
+static void import_collect_pvars(ChTransformer *tr, ChValue pat, ChSymbol **pvars, int *npvars) {
+    if (ch_is_symbol(pat)) {
+        ChSymbol *s = ch_as_symbol(pat);
+        const char *base = ch_symbol_basename(s);
+        if (strcmp(base, "_") == 0 || import_is_ellipsis(tr, s) || import_is_literal(tr, s)) {
+            return;
+        }
+        if (!import_name_listed(pvars, *npvars, s) && *npvars < CH_IMPORT_PV_MAX) {
+            pvars[(*npvars)++] = s;
+        }
+        return;
+    }
+    if (ch_is_pair(pat)) {
+        import_collect_pvars(tr, ch_car(pat), pvars, npvars);
+        import_collect_pvars(tr, ch_cdr(pat), pvars, npvars);
+        return;
+    }
+    if (ch_is_vector(pat)) {
+        ChVector *vec = ch_as_vector(pat);
+        for (size_t i = 0; i < vec->len; i++) {
+            import_collect_pvars(tr, vec->items[i], pvars, npvars);
+        }
+    }
+}
+
+static void import_collect_free(ChTransformer *tr, ChValue tmpl, ChSymbol **pvars, int npvars,
+                                ChSymbol **frees, int *nfrees) {
+    if (ch_is_symbol(tmpl)) {
+        ChSymbol *s = ch_as_symbol(tmpl);
+        const char *base = ch_symbol_basename(s);
+        if (strcmp(base, "_") == 0 || import_is_ellipsis(tr, s) || import_is_literal(tr, s) ||
+            import_name_listed(pvars, npvars, s)) {
+            return;
+        }
+        if (!import_name_listed(frees, *nfrees, s) && *nfrees < CH_IMPORT_FREE_MAX) {
+            frees[(*nfrees)++] = s;
+        }
+        return;
+    }
+    if (ch_is_pair(tmpl)) {
+        if (ch_is_symbol(ch_car(tmpl)) &&
+            strcmp(ch_symbol_basename(ch_as_symbol(ch_car(tmpl))), "quote") == 0) {
+            return;
+        }
+        import_collect_free(tr, ch_car(tmpl), pvars, npvars, frees, nfrees);
+        import_collect_free(tr, ch_cdr(tmpl), pvars, npvars, frees, nfrees);
+        return;
+    }
+    if (ch_is_vector(tmpl)) {
+        ChVector *vec = ch_as_vector(tmpl);
+        for (size_t i = 0; i < vec->len; i++) {
+            import_collect_free(tr, vec->items[i], pvars, npvars, frees, nfrees);
+        }
+    }
+}
+
+static int lib_env_lookup(const ChLibEnv *env, ChSymbol *name, ChValue *out) {
+    if (!env) {
+        return 0;
+    }
+    const char *base = ch_symbol_basename(name);
+    for (size_t i = 0; i < env->count; i++) {
+        if (!env->bindings[i].defined) {
+            continue;
+        }
+        if (strcmp(ch_symbol_basename(env->bindings[i].name), base) == 0) {
+            *out = env->bindings[i].value;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int copy_transformer_free_refs(ChVM *vm, ChTransformer *tr, ChLibEnv *home,
+                                      ChTransformer **visited, int *nvisited, int depth);
+
+static int copy_one_def_env_binding(ChVM *vm, ChSymbol *name, ChValue val, ChLibEnv *home,
+                                    ChTransformer **visited, int *nvisited, int depth) {
+    if (ch_is_transformer(val)) {
+        /* Helper macros: macros table only, never globals (#1332 / #877). */
+        int already = 0;
+        const char *base = ch_symbol_basename(name);
+        for (size_t i = 0; i < vm->macro_count; i++) {
+            if (strcmp(ch_symbol_basename(vm->macros[i].name), base) == 0) {
+                already = 1;
+                break;
+            }
+        }
+        if (!already) {
+            ChLibEnv *saved = vm->active_lib_env;
+            vm->active_lib_env = home;
+            int mrc = ch_vm_define_macro(vm, name, ch_as_transformer(val));
+            vm->active_lib_env = saved;
+            if (mrc != 0) {
+                snprintf(vm->error, sizeof(vm->error), "import: macro table full");
+                return -1;
+            }
+        }
+        return copy_transformer_free_refs(vm, ch_as_transformer(val), home, visited, nvisited,
+                                          depth + 1);
+    }
+    /* Non-transformer helpers become importer globals when missing. */
+    int gidx = ch_vm_intern_global(vm, name);
+    if (gidx < 0) {
+        snprintf(vm->error, sizeof(vm->error), "import: global table full");
+        return -1;
+    }
+    if (!vm->globals[gidx].defined) {
+        ch_vm_define_global(vm, gidx, val);
+    }
+    return 0;
+}
+
+static int copy_transformer_free_refs(ChVM *vm, ChTransformer *tr, ChLibEnv *home,
+                                      ChTransformer **visited, int *nvisited, int depth) {
+    if (!tr || !home || depth > 32) {
+        return 0;
+    }
+    for (int i = 0; i < *nvisited; i++) {
+        if (visited[i] == tr) {
+            return 0;
+        }
+    }
+    if (*nvisited >= CH_IMPORT_VISIT_MAX) {
+        return 0;
+    }
+    visited[(*nvisited)++] = tr;
+
+    ChSymbol *pvars[CH_IMPORT_PV_MAX];
+    int npvars = 0;
+    for (size_t r = 0; r < tr->rule_count; r++) {
+        import_collect_pvars(tr, tr->patterns[r], pvars, &npvars);
+    }
+    for (size_t r = 0; r < tr->rule_count; r++) {
+        ChSymbol *frees[CH_IMPORT_FREE_MAX];
+        int nfrees = 0;
+        import_collect_free(tr, tr->templates[r], pvars, npvars, frees, &nfrees);
+        for (int i = 0; i < nfrees; i++) {
+            ChValue fval = CH_UNDEFINED;
+            if (!lib_env_lookup(home, frees[i], &fval)) {
+                continue;
+            }
+            if (copy_one_def_env_binding(vm, frees[i], fval, home, visited, nvisited, depth) != 0) {
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 static int merge_env_into_globals(ChVM *vm, const ChLibEnv *env, ChLibEnv *macro_home) {
     for (size_t i = 0; i < env->count; i++) {
         if (!env->bindings[i].defined) {
@@ -187,6 +369,14 @@ static int merge_env_into_globals(ChVM *vm, const ChLibEnv *env, ChLibEnv *macro
             if (mrc != 0) {
                 snprintf(vm->error, sizeof(vm->error), "import: macro table full");
                 return -1;
+            }
+            if (macro_home) {
+                ChTransformer *visited[CH_IMPORT_VISIT_MAX];
+                int nvisited = 0;
+                if (copy_transformer_free_refs(vm, ch_as_transformer(env->bindings[i].value),
+                                               macro_home, visited, &nvisited, 0) != 0) {
+                    return -1;
+                }
             }
         }
     }

@@ -36,6 +36,12 @@ typedef struct ChCompUpvalue {
     bool is_local;
 } ChCompUpvalue;
 
+typedef struct ChBodyMacroSave {
+    ChSymbol *name;
+    ChValue old_transformer;
+    int depth;
+} ChBodyMacroSave;
+
 typedef struct ChFuncCompiler {
     struct ChFuncCompiler *enclosing;
     ChFunction *fn;
@@ -46,6 +52,9 @@ typedef struct ChFuncCompiler {
     int scope_depth;
     ChCompUpvalue upvalues[CH_MAX_UPVALUES];
     int upvalue_count;
+    /* Scoped define-syntax bindings to restore when leaving a body (#651). */
+    ChBodyMacroSave body_macros[CH_MAX_DERIVED_BINDINGS];
+    int n_body_macros;
     uint8_t next_reg;
     uint8_t max_regs;
     /* growable code buffer before freeze into fn */
@@ -81,7 +90,7 @@ int add_constant(ChCompiler *c, ChFuncCompiler *fc, ChValue v);
 int resolve_local(ChFuncCompiler *fc, ChSymbol *name);
 int resolve_upvalue(ChFuncCompiler *fc, ChSymbol *name);
 void begin_scope(ChFuncCompiler *fc);
-void end_scope(ChFuncCompiler *fc);
+void end_scope(ChCompiler *c, ChFuncCompiler *fc);
 int add_local(ChCompiler *c, ChFuncCompiler *fc, ChSymbol *name);
 uint8_t local_reg(ChFuncCompiler *fc, int local_index);
 void ensure_temps_from(ChFuncCompiler *fc);
@@ -123,6 +132,7 @@ ChCompileStatus compile_letrec(ChCompiler *c, ChFuncCompiler *fc, ChValue args, 
 ChCompileStatus compile_cond_expand(ChCompiler *c, ChFuncCompiler *fc, ChValue args, uint8_t dst,
                                     bool tail);
 ChCompileStatus compile_define_property(ChCompiler *c, ChFuncCompiler *fc, ChValue args, uint8_t dst);
+ChCompileStatus compile_define_syntax(ChCompiler *c, ChFuncCompiler *fc, ChValue args, uint8_t dst);
 ChCompileStatus compile_let_syntax(ChCompiler *c, ChFuncCompiler *fc, ChValue args, uint8_t dst,
                                    bool tail, int letrec);
 ChCompileStatus compile_and(ChCompiler *c, ChFuncCompiler *fc, ChValue args, uint8_t dst, bool tail);

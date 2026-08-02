@@ -12,6 +12,8 @@ extern "C" {
 #define CH_BIND_MAX 64
 #define CH_HYG_MAX 4096
 #define CH_EXPAND_DEPTH_MAX 256
+/* Head-position macro chains (kaappi#1796): iterative steps, not nest depth. */
+#define CH_EXPAND_STEP_MAX 10000
 #define CH_ELLIPSIS_MAX 64
 
 typedef struct ChBinding {

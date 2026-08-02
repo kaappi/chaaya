@@ -11,12 +11,16 @@
 #include <string.h>
 
 int is_well_known(const char *base) {
+    /* Identifiers that must NEVER be renamed in syntax-rules templates.
+     * Special forms that R7RS rebinds as variables (notably `if` and `let`)
+     * are intentionally omitted: they receive hygienic renames (__hyg_N_if)
+     * so use-site locals cannot capture macro-introduced keywords, while the
+     * compiler still recognizes them via ch_symbol_basename (#788 / Kaappi). */
     static const char *names[] = {
         "quote",
         "quasiquote",
         "unquote",
         "unquote-splicing",
-        "if",
         "lambda",
         "case-lambda",
         "delay",
@@ -27,7 +31,6 @@ int is_well_known(const char *base) {
         "begin",
         "and",
         "or",
-        "let",
         "let*",
         "letrec",
         "let-values",
@@ -99,11 +102,6 @@ int is_well_known(const char *base) {
     return 0;
 }
 
-
-typedef struct ChMacroSave {
-    ChSymbol *name;
-    ChValue old_transformer; /* CH_NIL = unbound */
-} ChMacroSave;
 
 static ChValue lookup_macro_value(ChVM *vm, ChSymbol *name) {
     const char *base = ch_symbol_basename(name);
@@ -217,30 +215,6 @@ void capture_transformer_templates(ChVM *vm, ChTransformer *tr) {
     }
 }
 
-static void remove_macro_binding(ChVM *vm, ChSymbol *name) {
-    const char *base = ch_symbol_basename(name);
-    for (size_t i = 0; i < vm->macro_count; i++) {
-        if (strcmp(ch_symbol_basename(vm->macros[i].name), base) == 0) {
-            vm->macro_count--;
-            vm->macros[i] = vm->macros[vm->macro_count];
-            return;
-        }
-    }
-}
-
-static void restore_macro_binding(ChVM *vm, const ChMacroSave *save) {
-    if (save->old_transformer == CH_NIL) {
-        remove_macro_binding(vm, save->name);
-    } else {
-        ch_vm_define_macro(vm, save->name, ch_as_transformer(save->old_transformer));
-    }
-}
-
-static ChExpandStatus parse_transformer_spec(ChVM *vm, ChValue spec, ChTransformer **out, char *err,
-                                             size_t err_len) {
-    return ch_parse_syntax_rules(vm, spec, out, err, err_len);
-}
-
 static ChExpandStatus expand_define_property(ChVM *vm, ChValue args, ChValue *out, char *err,
                                              size_t err_len) {
     if (!ch_is_pair(args) || !ch_is_symbol(ch_car(args)) || !ch_is_pair(ch_cdr(args))) {
@@ -271,105 +245,6 @@ static ChExpandStatus expand_define_property(ChVM *vm, ChValue args, ChValue *ou
     ch_gc_pop(&vm->gc);
     *out = CH_VOID;
     return CH_EXPAND_OK;
-}
-
-static ChExpandStatus expand_let_syntax(ChVM *vm, ChValue bindings, ChValue body, int letrec,
-                                        ChValue *out, char *err, size_t err_len, int depth) {
-    if (ch_is_nil(body)) {
-        snprintf(err, err_len, "let-syntax: missing body");
-        return CH_EXPAND_ERROR;
-    }
-
-    ChMacroSave saves[CH_BIND_MAX];
-    int nsaves = 0;
-    ChSymbol *names[CH_BIND_MAX];
-    ChTransformer *transformers[CH_BIND_MAX];
-    int nbinds = 0;
-
-    if (!letrec) {
-        for (ChValue bl = bindings; ch_is_pair(bl); bl = ch_cdr(bl)) {
-            ChValue bind = ch_car(bl);
-            if (!ch_is_pair(bind) || !ch_is_symbol(ch_car(bind)) || !ch_is_pair(ch_cdr(bind))) {
-                snprintf(err, err_len, "let-syntax: bad binding");
-                return CH_EXPAND_ERROR;
-            }
-            if (nbinds >= CH_BIND_MAX) {
-                snprintf(err, err_len, "let-syntax: too many bindings");
-                return CH_EXPAND_ERROR;
-            }
-            ChSymbol *kw = ch_as_symbol(ch_car(bind));
-            ChValue spec = ch_car(ch_cdr(bind));
-            ChTransformer *tr = NULL;
-            if (parse_transformer_spec(vm, spec, &tr, err, err_len) != CH_EXPAND_OK) {
-                for (int i = 0; i < nsaves; i++) {
-                    restore_macro_binding(vm, &saves[i]);
-                }
-                return CH_EXPAND_ERROR;
-            }
-            capture_transformer_templates(vm, tr);
-            saves[nsaves].name = kw;
-            saves[nsaves].old_transformer = lookup_macro_value(vm, kw);
-            nsaves++;
-            names[nbinds] = kw;
-            transformers[nbinds++] = tr;
-        }
-        if (!ch_is_nil(bindings) && !ch_is_pair(bindings)) {
-            snprintf(err, err_len, "let-syntax: bad binding list");
-            return CH_EXPAND_ERROR;
-        }
-        for (int i = 0; i < nbinds; i++) {
-            if (ch_vm_define_macro(vm, names[i], transformers[i]) != 0) {
-                for (int j = 0; j < nsaves; j++) {
-                    restore_macro_binding(vm, &saves[j]);
-                }
-                snprintf(err, err_len, "let-syntax: too many macros");
-                return CH_EXPAND_ERROR;
-            }
-        }
-    } else {
-        for (ChValue bl = bindings; ch_is_pair(bl); bl = ch_cdr(bl)) {
-            ChValue bind = ch_car(bl);
-            if (!ch_is_pair(bind) || !ch_is_symbol(ch_car(bind)) || !ch_is_pair(ch_cdr(bind))) {
-                snprintf(err, err_len, "letrec-syntax: bad binding");
-                return CH_EXPAND_ERROR;
-            }
-            if (nsaves >= CH_BIND_MAX) {
-                snprintf(err, err_len, "letrec-syntax: too many bindings");
-                return CH_EXPAND_ERROR;
-            }
-            ChSymbol *kw = ch_as_symbol(ch_car(bind));
-            ChValue spec = ch_car(ch_cdr(bind));
-            saves[nsaves].name = kw;
-            saves[nsaves].old_transformer = lookup_macro_value(vm, kw);
-            nsaves++;
-            ChTransformer *tr = NULL;
-            if (parse_transformer_spec(vm, spec, &tr, err, err_len) != CH_EXPAND_OK) {
-                for (int i = 0; i < nsaves; i++) {
-                    restore_macro_binding(vm, &saves[i]);
-                }
-                return CH_EXPAND_ERROR;
-            }
-            if (ch_vm_define_macro(vm, kw, tr) != 0) {
-                for (int i = 0; i < nsaves; i++) {
-                    restore_macro_binding(vm, &saves[i]);
-                }
-                snprintf(err, err_len, "letrec-syntax: too many macros");
-                return CH_EXPAND_ERROR;
-            }
-        }
-        if (!ch_is_nil(bindings) && !ch_is_pair(bindings)) {
-            snprintf(err, err_len, "letrec-syntax: bad binding list");
-            return CH_EXPAND_ERROR;
-        }
-    }
-
-    ChValue begin_sym = ch_gc_intern_symbol_cstr(&vm->gc, "begin");
-    ChValue begin_form = ch_gc_cons(&vm->gc, begin_sym, body);
-    ChExpandStatus st = expand_form(vm, begin_form, out, err, err_len, depth + 1);
-    for (int i = 0; i < nsaves; i++) {
-        restore_macro_binding(vm, &saves[i]);
-    }
-    return st;
 }
 
 static ChValue list1(ChGC *gc, ChValue a) {
@@ -976,6 +851,10 @@ ChExpandStatus expand_form(ChVM *vm, ChValue expr, ChValue *out, char *err, size
         snprintf(err, err_len, "macro expansion depth exceeded");
         return CH_EXPAND_ERROR;
     }
+    /* Only the root call from ch_expand_toplevel may register define-syntax
+     * during expand; nested walks leave that to the compiler (#651). */
+    bool was_toplevel_form = vm->expanding_toplevel_form;
+    vm->expanding_toplevel_form = false;
     if (!ch_is_pair(expr)) {
         *out = expr;
         return CH_EXPAND_OK;
@@ -1008,21 +887,11 @@ ChExpandStatus expand_form(ChVM *vm, ChValue expr, ChValue *out, char *err, size
         if (strcmp(base, "define-property") == 0) {
             return expand_define_property(vm, ch_cdr(expr), out, err, err_len);
         }
-        if (strcmp(base, "let-syntax") == 0) {
-            ChValue rest = ch_cdr(expr);
-            if (!ch_is_pair(rest) || !ch_is_pair(ch_cdr(rest))) {
-                snprintf(err, err_len, "let-syntax: bad syntax");
-                return CH_EXPAND_ERROR;
-            }
-            return expand_let_syntax(vm, ch_car(rest), ch_cdr(rest), 0, out, err, err_len, depth);
-        }
-        if (strcmp(base, "letrec-syntax") == 0) {
-            ChValue rest = ch_cdr(expr);
-            if (!ch_is_pair(rest) || !ch_is_pair(ch_cdr(rest))) {
-                snprintf(err, err_len, "letrec-syntax: bad syntax");
-                return CH_EXPAND_ERROR;
-            }
-            return expand_let_syntax(vm, ch_car(rest), ch_cdr(rest), 1, out, err, err_len, depth);
+        if (strcmp(base, "let-syntax") == 0 || strcmp(base, "letrec-syntax") == 0) {
+            /* Leave for compile_let_syntax so definition-site locals can be
+             * captured into a lambda wrapper (#1644 hygiene). */
+            *out = expr;
+            return CH_EXPAND_OK;
         }
         if (strcmp(base, "define-record-type") == 0) {
             ChValue expanded = CH_NIL;
@@ -1038,44 +907,52 @@ ChExpandStatus expand_form(ChVM *vm, ChValue expr, ChValue *out, char *err, size
             return st;
         }
         if (strcmp(base, "define-syntax") == 0) {
-            /* (define-syntax name transformer-spec) — register immediately so
-             * later forms in the same expand pass can see the macro. */
+            /* Library expand records into active_lib_env (#877). Top-level
+             * program forms register into vm->macros during expand so the next
+             * top-level form (and `chaaya expand`) see them. Nested bodies leave
+             * the form for compile_define_syntax + end_scope (#651). */
             ChValue rest = ch_cdr(expr);
             if (!ch_is_pair(rest) || !ch_is_symbol(ch_car(rest)) || !ch_is_pair(ch_cdr(rest))) {
                 snprintf(err, err_len, "define-syntax: bad syntax");
                 return CH_EXPAND_ERROR;
             }
-            /* An environment created by (environment ...), (null-environment ...),
-             * or (scheme-report-environment ...) is immutable (R7RS 6.14): eval'ing
-             * a top-level define-syntax into it must error, not register the macro
-             * in the VM's global table (which would leak it to every other user of
-             * that name). Mirrors compile_define/compile_set's eval_env_immutable
-             * check; active_eval_env is only set for the eval-environment argument,
-             * never for ordinary library/body compilation, so local define-syntax
-             * inside lambda/let bodies is unaffected. */
             if (vm->active_eval_env) {
                 snprintf(err, err_len, "define-syntax: environment is not mutable");
                 return CH_EXPAND_ERROR;
             }
-            ChSymbol *name = ch_as_symbol(ch_car(rest));
-            ChValue spec = ch_car(ch_cdr(rest));
-            ChTransformer *tr = NULL;
-            if (ch_parse_syntax_rules(vm, spec, &tr, err, err_len) != CH_EXPAND_OK) {
-                return CH_EXPAND_ERROR;
-            }
-            if (ch_vm_define_macro(vm, name, tr) != 0) {
-                snprintf(err, err_len, "define-syntax: too many macros");
-                return CH_EXPAND_ERROR;
-            }
             if (vm->active_lib_env) {
+                ChSymbol *name = ch_as_symbol(ch_car(rest));
+                ChValue spec = ch_car(ch_cdr(rest));
+                ChTransformer *tr = NULL;
+                if (ch_parse_syntax_rules(vm, spec, &tr, err, err_len) != CH_EXPAND_OK) {
+                    return CH_EXPAND_ERROR;
+                }
+                capture_transformer_templates(vm, tr);
                 int idx = ch_lib_env_intern(vm->active_lib_env, name);
                 if (idx < 0) {
                     snprintf(err, err_len, "define-syntax: library environment full");
                     return CH_EXPAND_ERROR;
                 }
                 ch_lib_env_define(vm->active_lib_env, idx, ch_make_pointer(&tr->header));
+                *out = CH_VOID;
+                return CH_EXPAND_OK;
             }
-            *out = CH_VOID;
+            if (was_toplevel_form) {
+                ChSymbol *name = ch_as_symbol(ch_car(rest));
+                ChValue spec = ch_car(ch_cdr(rest));
+                ChTransformer *tr = NULL;
+                if (ch_parse_syntax_rules(vm, spec, &tr, err, err_len) != CH_EXPAND_OK) {
+                    return CH_EXPAND_ERROR;
+                }
+                capture_transformer_templates(vm, tr);
+                if (ch_vm_define_macro(vm, name, tr) != 0) {
+                    snprintf(err, err_len, "define-syntax: too many macros");
+                    return CH_EXPAND_ERROR;
+                }
+                *out = CH_VOID;
+                return CH_EXPAND_OK;
+            }
+            *out = expr;
             return CH_EXPAND_OK;
         }
         ChTransformer *tr =
@@ -1087,13 +964,33 @@ ChExpandStatus expand_form(ChVM *vm, ChValue expr, ChValue *out, char *err, size
             if (tr->literal_count > 0) {
                 return expand_list(vm, expr, out, err, err_len, depth);
             }
-            ChValue expanded = CH_NIL;
-            ch_gc_push(&vm->gc, &expanded);
-            if (ch_expand_macro(vm, tr, expr, &expanded, err, err_len) != CH_EXPAND_OK) {
+            /* Head-position chains: expand iteratively at O(1) native stack.
+             * Nested depth (below) still guards true nesting (#1796). */
+            ChValue cur = expr;
+            ch_gc_push(&vm->gc, &cur);
+            for (int steps = 0;; steps++) {
+                if (steps >= CH_EXPAND_STEP_MAX) {
+                    ch_gc_pop(&vm->gc);
+                    snprintf(err, err_len, "macro expansion step limit exceeded");
+                    return CH_EXPAND_ERROR;
+                }
+                ChValue expanded = CH_NIL;
+                ch_gc_push(&vm->gc, &expanded);
+                if (ch_expand_macro(vm, tr, cur, &expanded, err, err_len) != CH_EXPAND_OK) {
+                    ch_gc_pop_n(&vm->gc, 2);
+                    return CH_EXPAND_ERROR;
+                }
+                cur = expanded;
                 ch_gc_pop(&vm->gc);
-                return CH_EXPAND_ERROR;
+                if (!ch_is_pair(cur) || !ch_is_symbol(ch_car(cur)) || vm->suppress_macro_expand) {
+                    break;
+                }
+                tr = ch_vm_lookup_macro(vm, ch_as_symbol(ch_car(cur)));
+                if (!tr || tr->literal_count > 0) {
+                    break;
+                }
             }
-            ChExpandStatus st = expand_form(vm, expanded, out, err, err_len, depth + 1);
+            ChExpandStatus st = expand_form(vm, cur, out, err, err_len, depth + 1);
             ch_gc_pop(&vm->gc);
             return st;
         }
@@ -1102,5 +999,8 @@ ChExpandStatus expand_form(ChVM *vm, ChValue expr, ChValue *out, char *err, size
 }
 
 ChExpandStatus ch_expand_toplevel(ChVM *vm, ChValue expr, ChValue *out, char *err, size_t err_len) {
-    return expand_form(vm, expr, out, err, err_len, 0);
+    vm->expanding_toplevel_form = true;
+    ChExpandStatus st = expand_form(vm, expr, out, err, err_len, 0);
+    vm->expanding_toplevel_form = false;
+    return st;
 }

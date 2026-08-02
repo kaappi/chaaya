@@ -372,6 +372,14 @@ static void mark_object_contents(ChObject *obj) {
             mark_value(tr->patterns[i]);
             mark_value(tr->templates[i]);
         }
+        for (size_t i = 0; i < tr->capture_count; i++) {
+            if (tr->capture_from[i]) {
+                mark_object(&tr->capture_from[i]->header);
+            }
+            if (tr->capture_to[i]) {
+                mark_object(&tr->capture_to[i]->header);
+            }
+        }
         break;
     }
     case CH_TAG_RECORD_TYPE: {
@@ -731,6 +739,13 @@ static int references_young(ChObject *obj) {
         }
         for (size_t i = 0; i < tr->rule_count; i++) {
             if (is_young_pointer(tr->patterns[i]) || is_young_pointer(tr->templates[i])) {
+                return 1;
+            }
+        }
+        for (size_t i = 0; i < tr->capture_count; i++) {
+            if ((tr->capture_from[i] &&
+                 tr->capture_from[i]->header.generation == CH_OBJ_GEN_YOUNG) ||
+                (tr->capture_to[i] && tr->capture_to[i]->header.generation == CH_OBJ_GEN_YOUNG)) {
                 return 1;
             }
         }
@@ -1213,6 +1228,7 @@ ChValue ch_gc_make_transformer(ChGC *gc) {
     tr->literal_count = 0;
     tr->ellipsis_id = NULL;
     tr->rule_count = 0;
+    tr->capture_count = 0;
     return ch_make_pointer(&tr->header);
 }
 

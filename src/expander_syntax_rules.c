@@ -804,6 +804,17 @@ static ChValue instantiate(ChExpandCtx *ctx, ChValue tmpl) {
         if (ctx->escape && is_ellipsis_id(ctx, s)) {
             return tmpl;
         }
+        /* Definition-site local captures (#1644): compiler injects snapshot
+         * locals named capture_to so template free refs skip use-site basename
+         * fallbacks. */
+        if (ctx->tr && ctx->tr->capture_count > 0) {
+            const char *base = ch_symbol_basename(s);
+            for (size_t i = 0; i < ctx->tr->capture_count; i++) {
+                if (strcmp(ch_symbol_basename(ctx->tr->capture_from[i]), base) == 0) {
+                    return ch_make_pointer(&ctx->tr->capture_to[i]->header);
+                }
+            }
+        }
         /* Free identifiers that already resolve to a top-level binding keep
          * their name (so templates can refer to user helpers like `pass`).
          * Unbound free identifiers still get hygienic renames. */
@@ -825,6 +836,19 @@ static ChValue instantiate(ChExpandCtx *ctx, ChValue tmpl) {
             return out;
         }
         return instantiate_list(ctx, tmpl);
+    }
+    if (ch_is_vector(tmpl)) {
+        ChVector *src = ch_as_vector(tmpl);
+        ChValue tmpl_root = tmpl;
+        ch_gc_push(&ctx->vm->gc, &tmpl_root);
+        ChValue out = ch_gc_make_vector(&ctx->vm->gc, src->len, CH_UNDEFINED);
+        ch_gc_push(&ctx->vm->gc, &out);
+        ChVector *dst = ch_as_vector(out);
+        for (size_t i = 0; i < src->len; i++) {
+            dst->items[i] = instantiate(ctx, src->items[i]);
+        }
+        ch_gc_pop_n(&ctx->vm->gc, 2);
+        return out;
     }
     return tmpl;
 }
@@ -978,6 +1002,22 @@ ChExpandStatus ch_expand_macro(ChVM *vm, ChTransformer *tr, ChValue use, ChValue
 
 ChTransformer *ch_vm_lookup_macro(ChVM *vm, ChSymbol *name) {
     const char *base = ch_symbol_basename(name);
+    /* Library body compilation (and use-site expansion with home_env) must not
+     * see the importer's process-global macros — otherwise a program-level
+     * shadow of `lambda`/`if`/… corrupts unrelated libraries (#1718). Private
+     * and imported library macros live in active_lib_env (#877). */
+    if (vm->active_lib_env) {
+        for (size_t i = 0; i < vm->active_lib_env->count; i++) {
+            if (!vm->active_lib_env->bindings[i].defined) {
+                continue;
+            }
+            if (strcmp(ch_symbol_basename(vm->active_lib_env->bindings[i].name), base) == 0 &&
+                ch_is_transformer(vm->active_lib_env->bindings[i].value)) {
+                return ch_as_transformer(vm->active_lib_env->bindings[i].value);
+            }
+        }
+        return NULL;
+    }
     for (size_t i = 0; i < vm->macro_count; i++) {
         if (strcmp(ch_symbol_basename(vm->macros[i].name), base) == 0) {
             return ch_as_transformer(vm->macros[i].transformer);

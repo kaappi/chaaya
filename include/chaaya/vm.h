@@ -93,6 +93,11 @@ typedef struct ChVM {
     /* When set, expand_form still registers define-syntax but does not
      * expand macro uses (used while expanding record-type boilerplate). */
     bool suppress_macro_expand;
+    /* True only for the root form of ch_expand_toplevel — top-level
+     * define-syntax registers during expand so `chaaya expand` and the
+     * next top-level form see the macro; nested bodies leave registration
+     * to the compiler (#651). */
+    bool expanding_toplevel_form;
 
     /* SRFI 213 define-property table (macro-expansion time) */
     ChSyntaxProp syntax_props[CH_VM_MAX_SYNTAX_PROPS];

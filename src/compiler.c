@@ -1,5 +1,7 @@
 #include "compiler_internal.h"
 
+#include "expander_internal.h"
+
 void ch_compiler_init(ChCompiler *c, ChVM *vm) {
     c->vm = vm;
     c->error[0] = '\0';
@@ -283,9 +285,26 @@ void begin_scope(ChFuncCompiler *fc) {
     fc->scope_depth++;
 }
 
-void end_scope(ChFuncCompiler *fc) {
+void end_scope(ChCompiler *c, ChFuncCompiler *fc) {
     while (fc->local_count > 0 && fc->locals[fc->local_count - 1].depth == fc->scope_depth) {
         fc->local_count--;
+    }
+    while (fc->n_body_macros > 0 &&
+           fc->body_macros[fc->n_body_macros - 1].depth == fc->scope_depth) {
+        fc->n_body_macros--;
+        ChBodyMacroSave *save = &fc->body_macros[fc->n_body_macros];
+        if (save->old_transformer == CH_NIL) {
+            const char *base = ch_symbol_basename(save->name);
+            for (size_t i = 0; i < c->vm->macro_count; i++) {
+                if (strcmp(ch_symbol_basename(c->vm->macros[i].name), base) == 0) {
+                    c->vm->macro_count--;
+                    c->vm->macros[i] = c->vm->macros[c->vm->macro_count];
+                    break;
+                }
+            }
+        } else {
+            ch_vm_define_macro(c->vm, save->name, ch_as_transformer(save->old_transformer));
+        }
     }
     fc->scope_depth--;
 }
@@ -665,138 +684,176 @@ static ChCompileStatus compile_expr_impl(ChCompiler *c, ChFuncCompiler *fc, ChVa
     ChValue head = ch_car(expr);
     ChValue args = ch_cdr(expr);
 
-    /* Core special forms beat macro shadows (#1718 record/define-values boilerplate). */
-    if (is_symbol_named(head, "quote")) {
-        return compile_quote(c, fc, args, dst);
-    }
-    if (is_symbol_named(head, "quasiquote")) {
-        return compile_quasiquote_real(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "if")) {
-        return compile_if(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "begin")) {
-        return compile_begin(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "set!")) {
-        return compile_set(c, fc, args, dst);
-    }
-    if (is_symbol_named(head, "define")) {
-        return compile_define(c, fc, args, dst);
-    }
-    if (is_symbol_named(head, "define-syntax")) {
-        emit_byte(fc, CH_OP_LOAD_VOID);
-        emit_byte(fc, dst);
-        return CH_COMPILE_OK;
-    }
-    if (is_symbol_named(head, "define-property")) {
-        return compile_define_property(c, fc, args, dst);
-    }
-    if (is_symbol_named(head, "let-syntax")) {
-        return compile_let_syntax(c, fc, args, dst, tail, 0);
-    }
-    if (is_symbol_named(head, "letrec-syntax")) {
-        return compile_let_syntax(c, fc, args, dst, tail, 1);
-    }
-    if (is_symbol_named(head, "cond-expand")) {
-        return compile_cond_expand(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "lambda")) {
-        return compile_lambda(c, fc, args, dst);
-    }
-    if (is_symbol_named(head, "case-lambda")) {
-        return compile_case_lambda(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "delay")) {
-        return compile_delay(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "delay-force")) {
-        return compile_delay_force(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "define-values")) {
-        return compile_define_values(c, fc, args, dst);
-    }
-    if (is_symbol_named(head, "and")) {
-        return compile_and(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "or")) {
-        return compile_or(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "let")) {
-        return compile_let(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "let*")) {
-        return compile_let_star(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "letrec")) {
-        return compile_letrec(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "letrec*")) {
-        return compile_letrec(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "let-values")) {
-        return compile_let_values(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "let*-values")) {
-        return compile_let_star_values(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "cond")) {
-        return compile_cond(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "case")) {
-        return compile_case(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "when")) {
-        return compile_when_unless(c, fc, args, dst, tail, 1);
-    }
-    if (is_symbol_named(head, "unless")) {
-        return compile_when_unless(c, fc, args, dst, tail, 0);
-    }
-    if (is_symbol_named(head, "do")) {
-        return compile_do(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "guard")) {
-        return compile_guard(c, fc, args, dst, tail);
-    }
-    if (is_symbol_named(head, "parameterize")) {
-        return compile_parameterize(c, fc, args, dst, tail);
-    }
-
-    /* Macro uses should already be expanded at toplevel; expand again for safety. */
+    /* Local/upvalue bindings shadow keywords and primitives (#788). Hygienic
+     * renames (__hyg_*) still denote the original keyword. Core special forms
+     * still beat macro shadows (#1718) when the head is not lexically bound. */
+    bool head_shadowed = false;
     if (ch_is_symbol(head)) {
-        ChTransformer *tr = ch_vm_lookup_macro(c->vm, ch_as_symbol(head));
-        if (tr) {
-            ChValue expanded = CH_NIL;
-            ch_gc_push(&c->vm->gc, &expanded);
-            char err[256];
-            ChLibEnv *saved_lib = c->vm->active_lib_env;
-            ChLibEnv *home = NULL;
-            const char *base = ch_symbol_basename(ch_as_symbol(head));
-            for (size_t i = 0; i < c->vm->macro_count; i++) {
-                if (strcmp(ch_symbol_basename(c->vm->macros[i].name), base) == 0) {
-                    home = c->vm->macros[i].home_env;
+        ChSymbol *hsym = ch_as_symbol(head);
+        if (strncmp(hsym->name, "__hyg_", 6) != 0) {
+            for (ChFuncCompiler *p = fc; p; p = p->enclosing) {
+                for (int i = 0; i < p->local_count; i++) {
+                    if (strcmp(p->locals[i].name->name, hsym->name) == 0) {
+                        head_shadowed = true;
+                        break;
+                    }
+                }
+                if (head_shadowed) {
                     break;
                 }
             }
-            if (home) {
-                c->vm->active_lib_env = home;
-            }
+        }
+    }
+
+    if (!head_shadowed && is_symbol_named(head, "quote")) {
+        return compile_quote(c, fc, args, dst);
+    }
+    if (!head_shadowed && is_symbol_named(head, "quasiquote")) {
+        return compile_quasiquote_real(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "if")) {
+        return compile_if(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "begin")) {
+        return compile_begin(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "set!")) {
+        return compile_set(c, fc, args, dst);
+    }
+    if (!head_shadowed && is_symbol_named(head, "define")) {
+        return compile_define(c, fc, args, dst);
+    }
+    if (!head_shadowed && is_symbol_named(head, "define-syntax")) {
+        return compile_define_syntax(c, fc, args, dst);
+    }
+    if (!head_shadowed && is_symbol_named(head, "define-property")) {
+        return compile_define_property(c, fc, args, dst);
+    }
+    if (!head_shadowed && is_symbol_named(head, "let-syntax")) {
+        return compile_let_syntax(c, fc, args, dst, tail, 0);
+    }
+    if (!head_shadowed && is_symbol_named(head, "letrec-syntax")) {
+        return compile_let_syntax(c, fc, args, dst, tail, 1);
+    }
+    if (!head_shadowed && is_symbol_named(head, "cond-expand")) {
+        return compile_cond_expand(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "lambda")) {
+        return compile_lambda(c, fc, args, dst);
+    }
+    if (!head_shadowed && is_symbol_named(head, "case-lambda")) {
+        return compile_case_lambda(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "delay")) {
+        return compile_delay(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "delay-force")) {
+        return compile_delay_force(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "define-values")) {
+        return compile_define_values(c, fc, args, dst);
+    }
+
+    /* Macros beat derived special forms (when/let/cond/…) so let-syntax can
+     * rebind them; core forms above still beat macros (#1718 / R7RS when+if).
+     * Head-position chains trampoline here (#1796) so compileExpr recursion
+     * does not grow with chain length. */
+    if (ch_is_symbol(head)) {
+        ChTransformer *tr = ch_vm_lookup_macro(c->vm, ch_as_symbol(head));
+        if (tr) {
+            ChValue cur = expr;
+            ch_gc_push(&c->vm->gc, &cur);
+            char err[256];
+            ChLibEnv *saved_lib = c->vm->active_lib_env;
             ChUseSiteBindingCheck use_check = {
                 .ctx = fc,
                 .resolve = resolve_use_site_binding,
             };
-            if (ch_expand_macro_checked(c->vm, tr, expr, &use_check, &expanded, err, sizeof(err)) !=
-                CH_EXPAND_OK) {
-                c->vm->active_lib_env = saved_lib;
+            for (int steps = 0;; steps++) {
+                if (steps >= CH_EXPAND_STEP_MAX) {
+                    c->vm->active_lib_env = saved_lib;
+                    ch_gc_pop(&c->vm->gc);
+                    return fail(c, "macro expansion step limit exceeded");
+                }
+                ChLibEnv *home = NULL;
+                const char *base = ch_symbol_basename(ch_as_symbol(ch_car(cur)));
+                for (size_t i = 0; i < c->vm->macro_count; i++) {
+                    if (strcmp(ch_symbol_basename(c->vm->macros[i].name), base) == 0) {
+                        home = c->vm->macros[i].home_env;
+                        break;
+                    }
+                }
+                c->vm->active_lib_env = home ? home : saved_lib;
+                ChValue expanded = CH_NIL;
+                ch_gc_push(&c->vm->gc, &expanded);
+                if (ch_expand_macro_checked(c->vm, tr, cur, &use_check, &expanded, err,
+                                            sizeof(err)) != CH_EXPAND_OK) {
+                    c->vm->active_lib_env = saved_lib;
+                    ch_gc_pop_n(&c->vm->gc, 2);
+                    return fail(c, err);
+                }
+                cur = expanded;
                 ch_gc_pop(&c->vm->gc);
-                return fail(c, err);
+                if (!ch_is_pair(cur) || !ch_is_symbol(ch_car(cur))) {
+                    break;
+                }
+                tr = ch_vm_lookup_macro(c->vm, ch_as_symbol(ch_car(cur)));
+                if (!tr) {
+                    break;
+                }
             }
-            size_t root_base = c->vm->gc.root_count - 1;
-            ChCompileStatus st = compile_expr(c, fc, expanded, dst, tail);
             c->vm->active_lib_env = saved_lib;
+            size_t root_base = c->vm->gc.root_count - 1;
+            ChCompileStatus st = compile_expr(c, fc, cur, dst, tail);
             pop_root_at(&c->vm->gc, root_base);
             return st;
         }
+    }
+
+    if (!head_shadowed && is_symbol_named(head, "and")) {
+        return compile_and(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "or")) {
+        return compile_or(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "let")) {
+        return compile_let(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "let*")) {
+        return compile_let_star(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "letrec")) {
+        return compile_letrec(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "letrec*")) {
+        return compile_letrec(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "let-values")) {
+        return compile_let_values(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "let*-values")) {
+        return compile_let_star_values(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "cond")) {
+        return compile_cond(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "case")) {
+        return compile_case(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "when")) {
+        return compile_when_unless(c, fc, args, dst, tail, 1);
+    }
+    if (!head_shadowed && is_symbol_named(head, "unless")) {
+        return compile_when_unless(c, fc, args, dst, tail, 0);
+    }
+    if (!head_shadowed && is_symbol_named(head, "do")) {
+        return compile_do(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "guard")) {
+        return compile_guard(c, fc, args, dst, tail);
+    }
+    if (!head_shadowed && is_symbol_named(head, "parameterize")) {
+        return compile_parameterize(c, fc, args, dst, tail);
     }
 
     return compile_call(c, fc, expr, dst, tail);

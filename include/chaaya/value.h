@@ -253,6 +253,7 @@ typedef struct ChPort {
 
 #define CH_TRANSFORMER_MAX_RULES 32
 #define CH_TRANSFORMER_MAX_LITERALS 16
+#define CH_TRANSFORMER_MAX_CAPTURES 16
 
 typedef struct ChTransformer {
     ChObject header;
@@ -263,6 +264,11 @@ typedef struct ChTransformer {
     ChValue patterns[CH_TRANSFORMER_MAX_RULES];
     ChValue templates[CH_TRANSFORMER_MAX_RULES];
     size_t rule_count;
+    /* Definition-site local free refs (#1644): template `x` becomes capture_to
+     * while the let-syntax body is wrapped as ((lambda (capture_to...) ...) x...). */
+    ChSymbol *capture_from[CH_TRANSFORMER_MAX_CAPTURES];
+    ChSymbol *capture_to[CH_TRANSFORMER_MAX_CAPTURES];
+    size_t capture_count;
 } ChTransformer;
 
 #define CH_RECORD_MAX_FIELDS 64

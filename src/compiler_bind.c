@@ -216,7 +216,7 @@ ChCompileStatus compile_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue args, 
             }
             emit_byte(&child, CH_OP_RETURN);
             emit_byte(&child, body_dst);
-            end_scope(&child);
+            end_scope(c, &child);
             goto lambda_finish;
         }
         ch_gc_pop(&c->vm->gc);
@@ -230,7 +230,7 @@ ChCompileStatus compile_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue args, 
     }
     emit_byte(&child, CH_OP_RETURN);
     emit_byte(&child, body_dst);
-    end_scope(&child);
+    end_scope(c, &child);
 
 lambda_finish:
     if (finish_function(c, &child) != CH_COMPILE_OK) {

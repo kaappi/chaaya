@@ -409,8 +409,11 @@
                (when if (set! if 'now))
                if)))
 
-(test 'outer (let-syntax ((const (syntax-rules () ((const) 'outer))))
-  (const)))
+(test 'outer
+      (let ((x 'outer))
+        (let-syntax ((m (syntax-rules () ((m) x))))
+          (let ((x 'inner))
+            (m)))))
 
 (test 7 (letrec-syntax
   ((my-or (syntax-rules ()
@@ -421,7 +424,15 @@
                (if temp
                    temp
                    (my-or e2 ...)))))))
-  (my-or #f 7)))
+  (let ((x #f)
+        (y 7)
+        (temp 8)
+        (let odd?)
+        (if even?))
+    (my-or x
+           (let temp)
+           (if y)
+           y))))
 
 (define-syntax be-like-begin1
   (syntax-rules ()

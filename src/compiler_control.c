@@ -1,5 +1,7 @@
 #include "compiler_internal.h"
 
+#include "expander_internal.h"
+
 static size_t guard_gensym_counter = 0;
 static size_t parameterize_gensym_counter = 0;
 static size_t do_gensym_counter = 0;
@@ -55,6 +57,8 @@ ChCompileStatus compile_cond_expand(ChCompiler *c, ChFuncCompiler *fc, ChValue a
     return compile_begin(c, fc, body, dst, tail);
 }
 
+static void let_syntax_setup_captures(ChCompiler *c, ChFuncCompiler *fc, ChTransformer *tr);
+
 ChCompileStatus compile_define_property(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
                                                uint8_t dst) {
     if (!fc->is_toplevel || fc->scope_depth > 0) {
@@ -88,8 +92,248 @@ ChCompileStatus compile_define_property(ChCompiler *c, ChFuncCompiler *fc, ChVal
     return CH_COMPILE_OK;
 }
 
+ChCompileStatus compile_define_syntax(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
+                                             uint8_t dst) {
+    if (!ch_is_pair(args) || !ch_is_symbol(ch_car(args)) || !ch_is_pair(ch_cdr(args))) {
+        return fail(c, "define-syntax: bad syntax");
+    }
+    if (!ch_is_nil(ch_cdr(ch_cdr(args)))) {
+        return fail(c, "define-syntax: bad syntax");
+    }
+    if (eval_env_immutable(c)) {
+        return fail(c, "define-syntax: environment is not mutable");
+    }
+
+    ChSymbol *name = ch_as_symbol(ch_car(args));
+    ChValue spec = ch_car(ch_cdr(args));
+    ChTransformer *tr = NULL;
+    char err[256];
+    if (ch_parse_syntax_rules(c->vm, spec, &tr, err, sizeof(err)) != CH_EXPAND_OK) {
+        return fail(c, err);
+    }
+    capture_transformer_templates(c->vm, tr);
+    let_syntax_setup_captures(c, fc, tr);
+
+    /* Snapshot definition-site locals for free template refs (#1644). */
+    for (size_t i = 0; i < tr->capture_count; i++) {
+        int to_idx = resolve_local(fc, tr->capture_to[i]);
+        if (to_idx < 0) {
+            if (add_local(c, fc, tr->capture_to[i]) < 0) {
+                return CH_COMPILE_ERROR;
+            }
+            ensure_temps_from(fc);
+            to_idx = resolve_local(fc, tr->capture_to[i]);
+        }
+        uint8_t to_reg = local_reg(fc, to_idx);
+        int from_idx = resolve_local(fc, tr->capture_from[i]);
+        if (from_idx < 0) {
+            const char *base = ch_symbol_basename(tr->capture_from[i]);
+            for (int li = fc->local_count - 1; li >= 0; li--) {
+                if (li == to_idx) {
+                    continue;
+                }
+                if (strcmp(ch_symbol_basename(fc->locals[li].name), base) == 0) {
+                    from_idx = li;
+                    break;
+                }
+            }
+        }
+        if (from_idx >= 0) {
+            emit_byte(fc, CH_OP_MOVE);
+            emit_byte(fc, to_reg);
+            emit_byte(fc, local_reg(fc, from_idx));
+        } else {
+            int up = resolve_upvalue(fc, tr->capture_from[i]);
+            if (up < 0) {
+                return fail(c, "define-syntax: capture of unbound local");
+            }
+            emit_byte(fc, CH_OP_GET_UPVALUE);
+            emit_byte(fc, to_reg);
+            emit_byte(fc, (uint8_t)up);
+        }
+    }
+
+    /* begin's shared dst is allocated before capture locals and may alias them;
+     * writing void there would clobber the snapshot (same rule as compile_define). */
+    int emit_void = dst >= (uint8_t)fc->local_count;
+
+    /* Library body: keep the transformer in the library env only (#877). */
+    if (c->vm->active_lib_env) {
+        int idx = ch_lib_env_intern(c->vm->active_lib_env, name);
+        if (idx < 0) {
+            return fail(c, "define-syntax: library environment full");
+        }
+        ch_lib_env_define(c->vm->active_lib_env, idx, ch_make_pointer(&tr->header));
+        if (emit_void) {
+            emit_byte(fc, CH_OP_LOAD_VOID);
+            emit_byte(fc, dst);
+        }
+        return CH_COMPILE_OK;
+    }
+
+    /* Internal body: scoped registration restored by end_scope (#651). */
+    bool in_body = !fc->is_toplevel || fc->scope_depth > 0;
+    if (in_body) {
+        if (fc->n_body_macros >= CH_MAX_DERIVED_BINDINGS) {
+            return fail(c, "define-syntax: too many body macros");
+        }
+        ChBodyMacroSave *save = &fc->body_macros[fc->n_body_macros++];
+        save->name = name;
+        save->old_transformer = lookup_macro_value(c->vm, name);
+        save->depth = fc->scope_depth;
+        if (ch_vm_define_macro(c->vm, name, tr) != 0) {
+            fc->n_body_macros--;
+            return fail(c, "define-syntax: too many macros");
+        }
+        if (emit_void) {
+            emit_byte(fc, CH_OP_LOAD_VOID);
+            emit_byte(fc, dst);
+        }
+        return CH_COMPILE_OK;
+    }
+
+    /* Program top-level: permanent. */
+    if (ch_vm_define_macro(c->vm, name, tr) != 0) {
+        return fail(c, "define-syntax: too many macros");
+    }
+    if (emit_void) {
+        emit_byte(fc, CH_OP_LOAD_VOID);
+        emit_byte(fc, dst);
+    }
+    return CH_COMPILE_OK;
+}
+
+static int let_syntax_is_ellipsis(ChTransformer *tr, ChSymbol *s) {
+    const char *base = ch_symbol_basename(s);
+    if (tr->ellipsis_id) {
+        return strcmp(ch_symbol_basename(tr->ellipsis_id), base) == 0;
+    }
+    return strcmp(base, "...") == 0;
+}
+
+static int let_syntax_is_literal(ChTransformer *tr, ChSymbol *s) {
+    const char *base = ch_symbol_basename(s);
+    for (size_t i = 0; i < tr->literal_count; i++) {
+        if (strcmp(ch_symbol_basename(tr->literals[i]), base) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int let_syntax_name_listed(ChSymbol **names, int n, ChSymbol *s) {
+    const char *base = ch_symbol_basename(s);
+    for (int i = 0; i < n; i++) {
+        if (strcmp(ch_symbol_basename(names[i]), base) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void let_syntax_collect_pvars(ChTransformer *tr, ChValue pat, ChSymbol **pvars, int *npvars) {
+    if (ch_is_symbol(pat)) {
+        ChSymbol *s = ch_as_symbol(pat);
+        const char *base = ch_symbol_basename(s);
+        if (strcmp(base, "_") == 0 || let_syntax_is_ellipsis(tr, s) || let_syntax_is_literal(tr, s)) {
+            return;
+        }
+        if (!let_syntax_name_listed(pvars, *npvars, s) && *npvars < CH_BIND_MAX) {
+            pvars[(*npvars)++] = s;
+        }
+        return;
+    }
+    if (ch_is_pair(pat)) {
+        let_syntax_collect_pvars(tr, ch_car(pat), pvars, npvars);
+        let_syntax_collect_pvars(tr, ch_cdr(pat), pvars, npvars);
+        return;
+    }
+    if (ch_is_vector(pat)) {
+        ChVector *vec = ch_as_vector(pat);
+        for (size_t i = 0; i < vec->len; i++) {
+            let_syntax_collect_pvars(tr, vec->items[i], pvars, npvars);
+        }
+    }
+}
+
+static void let_syntax_collect_free(ChTransformer *tr, ChValue tmpl, ChSymbol **pvars, int npvars,
+                                    ChSymbol **frees, int *nfrees) {
+    if (ch_is_symbol(tmpl)) {
+        ChSymbol *s = ch_as_symbol(tmpl);
+        const char *base = ch_symbol_basename(s);
+        if (strcmp(base, "_") == 0 || let_syntax_is_ellipsis(tr, s) || let_syntax_is_literal(tr, s) ||
+            let_syntax_name_listed(pvars, npvars, s) || is_well_known(base)) {
+            return;
+        }
+        if (!let_syntax_name_listed(frees, *nfrees, s) && *nfrees < CH_TRANSFORMER_MAX_CAPTURES) {
+            frees[(*nfrees)++] = s;
+        }
+        return;
+    }
+    if (ch_is_pair(tmpl)) {
+        if (ch_is_symbol(ch_car(tmpl)) &&
+            strcmp(ch_symbol_basename(ch_as_symbol(ch_car(tmpl))), "quote") == 0) {
+            return;
+        }
+        let_syntax_collect_free(tr, ch_car(tmpl), pvars, npvars, frees, nfrees);
+        let_syntax_collect_free(tr, ch_cdr(tmpl), pvars, npvars, frees, nfrees);
+        return;
+    }
+    if (ch_is_vector(tmpl)) {
+        ChVector *vec = ch_as_vector(tmpl);
+        for (size_t i = 0; i < vec->len; i++) {
+            let_syntax_collect_free(tr, vec->items[i], pvars, npvars, frees, nfrees);
+        }
+    }
+}
+
+static int let_syntax_local_bound(ChFuncCompiler *fc, ChSymbol *name) {
+    const char *base = ch_symbol_basename(name);
+    for (ChFuncCompiler *p = fc; p; p = p->enclosing) {
+        for (int i = 0; i < p->local_count; i++) {
+            if (strcmp(ch_symbol_basename(p->locals[i].name), base) == 0) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void let_syntax_setup_captures(ChCompiler *c, ChFuncCompiler *fc, ChTransformer *tr) {
+    ChSymbol *pvars[CH_BIND_MAX];
+    int npvars = 0;
+    for (size_t r = 0; r < tr->rule_count; r++) {
+        let_syntax_collect_pvars(tr, tr->patterns[r], pvars, &npvars);
+    }
+    ChSymbol *frees[CH_TRANSFORMER_MAX_CAPTURES];
+    int nfrees = 0;
+
+    for (size_t r = 0; r < tr->rule_count; r++) {
+        let_syntax_collect_free(tr, tr->templates[r], pvars, npvars, frees, &nfrees);
+    }
+    tr->capture_count = 0;
+    for (int i = 0; i < nfrees; i++) {
+        if (!let_syntax_local_bound(fc, frees[i])) {
+            continue;
+        }
+        if (tr->capture_count >= CH_TRANSFORMER_MAX_CAPTURES) {
+            break;
+        }
+        char buf[128];
+        snprintf(buf, sizeof(buf), "__cap_%u_%s", c->vm->hyg_counter++,
+                 ch_symbol_basename(frees[i]));
+        tr->capture_from[tr->capture_count] = frees[i];
+        tr->capture_to[tr->capture_count] =
+            ch_as_symbol(ch_gc_intern_symbol_cstr(&c->vm->gc, buf));
+
+        tr->capture_count++;
+    }
+
+}
+
 ChCompileStatus compile_let_syntax(ChCompiler *c, ChFuncCompiler *fc, ChValue args,
                                         uint8_t dst, bool tail, int letrec) {
+
     if (!ch_is_pair(args) || !ch_is_pair(ch_cdr(args))) {
         return fail(c, letrec ? "letrec-syntax: bad syntax" : "let-syntax: bad syntax");
     }
@@ -102,31 +346,44 @@ ChCompileStatus compile_let_syntax(ChCompiler *c, ChFuncCompiler *fc, ChValue ar
     ChTransformer *transformers[CH_MAX_DERIVED_BINDINGS];
     int nbinds = 0;
 
-    if (!letrec) {
-        for (ChValue bl = bindings; ch_is_pair(bl); bl = ch_cdr(bl)) {
-            ChValue bind = ch_car(bl);
-            if (!ch_is_pair(bind) || !ch_is_symbol(ch_car(bind)) || !ch_is_pair(ch_cdr(bind))) {
-                return fail(c, "let-syntax: bad binding");
+    for (ChValue bl = bindings; ch_is_pair(bl); bl = ch_cdr(bl)) {
+        ChValue bind = ch_car(bl);
+        if (!ch_is_pair(bind) || !ch_is_symbol(ch_car(bind)) || !ch_is_pair(ch_cdr(bind))) {
+            return fail(c, letrec ? "letrec-syntax: bad binding" : "let-syntax: bad binding");
+        }
+        if (nbinds >= CH_MAX_DERIVED_BINDINGS) {
+            return fail(c, letrec ? "letrec-syntax: too many bindings" : "let-syntax: too many bindings");
+        }
+        ChSymbol *kw = ch_as_symbol(ch_car(bind));
+        ChValue spec = ch_car(ch_cdr(bind));
+        ChTransformer *tr = NULL;
+        char err[256];
+        if (ch_parse_syntax_rules(c->vm, spec, &tr, err, sizeof(err)) != CH_EXPAND_OK) {
+            for (int i = 0; i < nsaves; i++) {
+                restore_macro_binding(c->vm, &saves[i]);
             }
-            if (nbinds >= CH_MAX_DERIVED_BINDINGS) {
-                return fail(c, "let-syntax: too many bindings");
-            }
-            ChSymbol *kw = ch_as_symbol(ch_car(bind));
-            ChValue spec = ch_car(ch_cdr(bind));
-            ChTransformer *tr = NULL;
-            char err[256];
-            if (ch_parse_syntax_rules(c->vm, spec, &tr, err, sizeof(err)) != CH_EXPAND_OK) {
+            return fail(c, err);
+        }
+        capture_transformer_templates(c->vm, tr);
+        let_syntax_setup_captures(c, fc, tr);
+        saves[nsaves].name = kw;
+        saves[nsaves].old_transformer = lookup_macro_value(c->vm, kw);
+        nsaves++;
+        names[nbinds] = kw;
+        transformers[nbinds++] = tr;
+        if (letrec) {
+            if (ch_vm_define_macro(c->vm, kw, tr) != 0) {
                 for (int i = 0; i < nsaves; i++) {
                     restore_macro_binding(c->vm, &saves[i]);
                 }
-                return fail(c, err);
+                return fail(c, "letrec-syntax: too many macros");
             }
-            saves[nsaves].name = kw;
-            saves[nsaves].old_transformer = lookup_macro_value(c->vm, kw);
-            nsaves++;
-            names[nbinds] = kw;
-            transformers[nbinds++] = tr;
         }
+    }
+    if (!ch_is_nil(bindings) && !ch_is_pair(bindings)) {
+        return fail(c, letrec ? "letrec-syntax: bad binding list" : "let-syntax: bad binding list");
+    }
+    if (!letrec) {
         for (int i = 0; i < nbinds; i++) {
             if (ch_vm_define_macro(c->vm, names[i], transformers[i]) != 0) {
                 for (int j = 0; j < nsaves; j++) {
@@ -135,34 +392,78 @@ ChCompileStatus compile_let_syntax(ChCompiler *c, ChFuncCompiler *fc, ChValue ar
                 return fail(c, "let-syntax: too many macros");
             }
         }
-    } else {
-        for (ChValue bl = bindings; ch_is_pair(bl); bl = ch_cdr(bl)) {
-            ChValue bind = ch_car(bl);
-            if (!ch_is_pair(bind) || !ch_is_symbol(ch_car(bind)) || !ch_is_pair(ch_cdr(bind))) {
-                return fail(c, "letrec-syntax: bad binding");
-            }
-            if (nsaves >= CH_MAX_DERIVED_BINDINGS) {
-                return fail(c, "letrec-syntax: too many bindings");
-            }
-            ChSymbol *kw = ch_as_symbol(ch_car(bind));
-            ChValue spec = ch_car(ch_cdr(bind));
-            saves[nsaves].name = kw;
-            saves[nsaves].old_transformer = lookup_macro_value(c->vm, kw);
-            nsaves++;
-            ChTransformer *tr = NULL;
-            char err[256];
-            if (ch_parse_syntax_rules(c->vm, spec, &tr, err, sizeof(err)) != CH_EXPAND_OK) {
-                for (int i = 0; i < nsaves; i++) {
-                    restore_macro_binding(c->vm, &saves[i]);
+    }
+
+    /* Union capture parameters and inject locals that snapshot definition-site
+     * values so use-site shadows cannot steal them (#1644). */
+    ChSymbol *cap_from[CH_TRANSFORMER_MAX_CAPTURES];
+    ChSymbol *cap_to[CH_TRANSFORMER_MAX_CAPTURES];
+    int ncaps = 0;
+    for (int i = 0; i < nbinds; i++) {
+        ChTransformer *tr = transformers[i];
+        for (size_t j = 0; j < tr->capture_count; j++) {
+            int idx = -1;
+            for (int k = 0; k < ncaps; k++) {
+                if (strcmp(ch_symbol_basename(cap_from[k]),
+                           ch_symbol_basename(tr->capture_from[j])) == 0) {
+                    idx = k;
+                    break;
                 }
-                return fail(c, err);
             }
-            if (ch_vm_define_macro(c->vm, kw, tr) != 0) {
-                for (int i = 0; i < nsaves; i++) {
-                    restore_macro_binding(c->vm, &saves[i]);
+            if (idx < 0) {
+                if (ncaps >= CH_TRANSFORMER_MAX_CAPTURES) {
+                    break;
                 }
-                return fail(c, "letrec-syntax: too many macros");
+                cap_from[ncaps] = tr->capture_from[j];
+                cap_to[ncaps] = tr->capture_to[j];
+                idx = ncaps++;
+            } else {
+                tr->capture_to[j] = cap_to[idx];
             }
+        }
+    }
+
+    for (int i = 0; i < ncaps; i++) {
+        int to_idx = resolve_local(fc, cap_to[i]);
+        if (to_idx < 0) {
+            if (add_local(c, fc, cap_to[i]) < 0) {
+                for (int j = 0; j < nsaves; j++) {
+                    restore_macro_binding(c->vm, &saves[j]);
+                }
+                return CH_COMPILE_ERROR;
+            }
+            ensure_temps_from(fc);
+            to_idx = resolve_local(fc, cap_to[i]);
+        }
+        uint8_t to_reg = local_reg(fc, to_idx);
+        int from_idx = resolve_local(fc, cap_from[i]);
+        if (from_idx < 0) {
+            const char *base = ch_symbol_basename(cap_from[i]);
+            for (int li = fc->local_count - 1; li >= 0; li--) {
+                if (li == to_idx) {
+                    continue;
+                }
+                if (strcmp(ch_symbol_basename(fc->locals[li].name), base) == 0) {
+                    from_idx = li;
+                    break;
+                }
+            }
+        }
+        if (from_idx >= 0) {
+            emit_byte(fc, CH_OP_MOVE);
+            emit_byte(fc, to_reg);
+            emit_byte(fc, local_reg(fc, from_idx));
+        } else {
+            int up = resolve_upvalue(fc, cap_from[i]);
+            if (up < 0) {
+                for (int j = 0; j < nsaves; j++) {
+                    restore_macro_binding(c->vm, &saves[j]);
+                }
+                return fail(c, "let-syntax: capture of unbound local");
+            }
+            emit_byte(fc, CH_OP_GET_UPVALUE);
+            emit_byte(fc, to_reg);
+            emit_byte(fc, (uint8_t)up);
         }
     }
 
