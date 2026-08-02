@@ -623,22 +623,10 @@ static int cmd_doctor(ChCliOptions *opts) {
     return fails ? CH_EXIT_ERROR : CH_EXIT_OK;
 }
 
-static size_t push_cli_vm_roots(ChVM *vm) {
-    for (size_t i = 0; i < vm->global_count; i++) {
-        ch_gc_push(&vm->gc, &vm->globals[i].value);
-    }
-    for (size_t i = 0; i < vm->macro_count; i++) {
-        ch_gc_push(&vm->gc, &vm->macros[i].transformer);
-    }
-    size_t lib_roots = ch_library_push_gc_roots(vm);
-    return vm->global_count + vm->macro_count + lib_roots;
-}
-
 static ChReadStatus read_cli_datum(ChVM *vm, ChReader *reader, ChValue *out) {
-    size_t sticky_roots = push_cli_vm_roots(vm);
-    ChReadStatus st = ch_read_datum(reader, out);
-    ch_gc_pop_n(&vm->gc, sticky_roots);
-    return st;
+    /* Globals/macros/libraries are marked during GC; no sticky root flood. */
+    (void)vm;
+    return ch_read_datum(reader, out);
 }
 
 static int cmd_ast(const char *path) {
@@ -709,17 +697,14 @@ static int cmd_expand(const char *path, const ChCliOptions *opts) {
         }
         ChValue out = CH_NIL;
         ch_gc_push(&vm.gc, &out);
-        size_t sticky_roots = push_cli_vm_roots(&vm);
         char err[256];
         if (ch_expand_toplevel(&vm, v, &out, err, sizeof(err)) != CH_EXPAND_OK) {
-            ch_gc_pop_n(&vm.gc, sticky_roots);
             fprintf(stderr, "expand error: %s\n", err);
             ch_gc_pop_n(&vm.gc, 2);
             free(src);
             ch_vm_deinit(&vm);
             return CH_EXIT_ERROR;
         }
-        ch_gc_pop_n(&vm.gc, sticky_roots);
         if (out != CH_VOID) {
             ch_print_value(stdout, out, false);
             fputc('\n', stdout);
@@ -791,16 +776,13 @@ static int cmd_fmt(const char *path, const ChCliOptions *opts) {
 
         ChValue expanded = CH_NIL;
         ch_gc_push(&vm.gc, &expanded);
-        size_t sticky_roots = push_cli_vm_roots(&vm);
         char err[256];
         if (ch_expand_toplevel(&vm, v, &expanded, err, sizeof(err)) != CH_EXPAND_OK) {
-            ch_gc_pop_n(&vm.gc, sticky_roots);
             fprintf(stderr, "fmt error: %s\n", err);
             ch_gc_pop_n(&vm.gc, 2);
             rc = CH_EXIT_ERROR;
             break;
         }
-        ch_gc_pop_n(&vm.gc, sticky_roots);
         if (expanded != CH_VOID) {
             ch_print_value(mem, expanded, false);
             fputc('\n', mem);

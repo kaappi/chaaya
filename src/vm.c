@@ -246,13 +246,30 @@ ChValue ch_vm_raise(ChVM *vm, ChValue obj, int continuable) {
 
     ChValue call_args[1] = {obj};
     ChValue result = CH_VOID;
+    size_t handlers_before = vm->handler_count;
     ChVMStatus st = ch_vm_apply(vm, eh.handler, call_args, 1, &result);
-    if (st == CH_VM_CONTINUATION_INVOKED) {
+    /* Guard escapes via call/cc: apply may report OK at its barrier while a
+     * parent continuation actually delivered the value (continuation_invoked),
+     * or restore a different handler stack (nested guard re-raise). */
+    if (st == CH_VM_CONTINUATION_INVOKED || vm->continuation_invoked ||
+        vm->handler_count != handlers_before) {
         vm->continuation_invoked = true;
         return CH_UNDEFINED;
     }
     if (st != CH_VM_OK) {
         return CH_UNDEFINED;
+    }
+    if (!continuable) {
+        /* R7RS 6.11: returning from a non-continuable raise handler raises a
+         * secondary exception (the original handler was already popped). */
+        ChValue msg =
+            ch_gc_make_string_cstr(&vm->gc, "exception handler returned from non-continuable exception");
+        ch_gc_push(&vm->gc, &msg);
+        ChValue secondary = ch_gc_make_error_object(&vm->gc, msg, CH_NIL, 0);
+        ch_gc_push(&vm->gc, &secondary);
+        ChValue raised = ch_vm_raise(vm, secondary, 0);
+        ch_gc_pop_n(&vm->gc, 2);
+        return raised;
     }
     return result;
 }
@@ -315,6 +332,14 @@ void ch_vm_mark_gc_roots(ChVM *vm) {
     }
     for (size_t i = 0; i < vm->global_count; i++) {
         ch_gc_mark_value(vm->globals[i].value);
+    }
+    /* In-construction define-library env is not yet in vm->libraries. */
+    if (vm->active_lib_env) {
+        for (size_t i = 0; i < vm->active_lib_env->count; i++) {
+            if (vm->active_lib_env->bindings[i].defined) {
+                ch_gc_mark_value(vm->active_lib_env->bindings[i].value);
+            }
+        }
     }
     for (size_t i = 0; i < vm->wind_count; i++) {
         ch_gc_mark_value(vm->wind_stack[i].before);
@@ -1160,16 +1185,11 @@ ChVMStatus ch_vm_eval_function(ChVM *vm, ChFunction *fn, ChValue *out) {
     ChValue saved_result = vm->result;
     bool saved_cont = vm->continuation_invoked;
 
-    size_t gcount = vm->global_count;
     ChValue fn_v = ch_make_pointer(&fn->header);
     ChValue cl_v = CH_FALSE;
     ch_gc_push(&vm->gc, &fn_v);
     ch_gc_push(&vm->gc, &cl_v);
-    for (size_t i = 0; i < gcount; i++) {
-        ch_gc_push(&vm->gc, &vm->globals[i].value);
-    }
     cl_v = ch_gc_make_closure(&vm->gc, ch_as_function(fn_v), NULL);
-    ch_gc_pop_n(&vm->gc, gcount);
 
     /* Run the thunk in a fresh frame window above the caller's registers. */
     size_t base = saved_reg_top;

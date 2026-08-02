@@ -260,7 +260,7 @@ chaaya_kaappi_deferred_test(r7rs_datatypes_gaps tests/scheme/kaappi-deferred/com
 chaaya_kaappi_deferred_test(time tests/scheme/kaappi-deferred/compliance/time.scm)
 chaaya_kaappi_deferred_test(process_context tests/scheme/kaappi-deferred/compliance/process-context.scm)
 chaaya_kaappi_deferred_test(scheme_repl tests/scheme/kaappi-deferred/compliance/scheme-repl.scm)
-# chaaya_kaappi_deferred_test(include_lib_decls ...)  # deferred: CTest failures
+chaaya_kaappi_deferred_test(include_lib_decls tests/scheme/kaappi-deferred/compliance/include-lib-decls.scm)
 chaaya_kaappi_deferred_test(correctness_fixes tests/scheme/kaappi-deferred/compliance/correctness-fixes.scm)
 chaaya_kaappi_deferred_test(final_gaps tests/scheme/kaappi-deferred/compliance/final-gaps.scm)
 chaaya_kaappi_deferred_test(bugfixes tests/scheme/kaappi-deferred/compliance/bugfixes.scm)
@@ -268,14 +268,19 @@ chaaya_kaappi_deferred_test(deferred_bugfixes tests/scheme/kaappi-deferred/compl
 chaaya_kaappi_deferred_test(deferred_final tests/scheme/kaappi-deferred/compliance/deferred-final.scm)
 chaaya_kaappi_deferred_test(r7rs_thin_forms_gaps tests/scheme/kaappi-deferred/compliance/r7rs-thin-forms-gaps.scm)
 chaaya_kaappi_deferred_test(r7rs_tail_position_gaps tests/scheme/kaappi-deferred/compliance/r7rs-tail-position-gaps.scm)
-# Green from repo root; SIGABRT under CTest cwd (compliance/) — run manually until fixed
-# chaaya_kaappi_deferred_test(r7rs_import_macro_gaps ...)
-# chaaya_kaappi_deferred_test(r7rs_libraries_gaps ...)
+chaaya_kaappi_deferred_test(r7rs_import_macro_gaps tests/scheme/kaappi-deferred/compliance/r7rs-import-macro-gaps.scm)
+chaaya_kaappi_deferred_test(r7rs_libraries_gaps tests/scheme/kaappi-deferred/compliance/r7rs-libraries-gaps.scm)
 # chaaya_kaappi_deferred_test(printer_gaps ...)  # 300s+ write-shared scan
 chaaya_kaappi_deferred_test(reader_exactness_gaps tests/scheme/kaappi-deferred/compliance/reader-exactness-gaps.scm)
 chaaya_kaappi_deferred_test(srfi_completeness tests/scheme/kaappi-deferred/compliance/srfi-completeness.scm)
-# Deferred: r7rs-expressions-gaps (let-scoped literal hygiene), r7rs-control-io-gaps,
-# r7rs-continuation-gaps, r7rs-hygiene-gaps (nested ellipsis), reader-port-refill-gaps
+chaaya_kaappi_deferred_test(r7rs_control_io_gaps tests/scheme/kaappi-deferred/compliance/r7rs-control-io-gaps.scm)
+chaaya_kaappi_deferred_test(reader_port_refill_gaps tests/scheme/kaappi-deferred/compliance/reader-port-refill-gaps.scm)
+chaaya_kaappi_deferred_test(r7rs_expressions_gaps tests/scheme/kaappi-deferred/compliance/r7rs-expressions-gaps.scm)
+chaaya_kaappi_deferred_test(r7rs_hygiene_gaps tests/scheme/kaappi-deferred/compliance/r7rs-hygiene-gaps.scm)
+chaaya_kaappi_deferred_test(r7rs_continuation_gaps tests/scheme/kaappi-deferred/compliance/r7rs-continuation-gaps.scm)
+chaaya_kaappi_deferred_test(record_ctor_clause_keyword_1882 tests/scheme/kaappi-deferred/compliance/record-ctor-clause-keyword-1882.scm)
+# Deferred: r7rs-tail-procedures-gaps (let-values TCO at N=40000)
+# printer_gaps (300s+ write-shared scan)
 
 # Tier 3 kaappi-deferred smoke
 chaaya_kaappi_deferred_test(smoke_basic tests/scheme/kaappi-deferred/smoke/basic.scm)
@@ -342,8 +347,10 @@ chaaya_kaappi_deferred_test(smoke_ellipsis_depth_mismatch tests/scheme/kaappi-de
 chaaya_kaappi_deferred_test(smoke_exact_integer_sqrt_export tests/scheme/kaappi-deferred/smoke/exact-integer-sqrt-export.scm)
 chaaya_kaappi_deferred_test(smoke_exact_large_float tests/scheme/kaappi-deferred/smoke/exact-large-float.scm)
 chaaya_kaappi_deferred_test(smoke_exactness_prefix tests/scheme/kaappi-deferred/smoke/exactness-prefix.scm)
-# Deferred (not green yet): circular-list-terminate (timeout), equal-dag,
-# case-lambda-fixes, expt-negative-base-1725 (negative-base fractional expt)
+chaaya_kaappi_deferred_test(smoke_case_lambda_fixes tests/scheme/kaappi-deferred/smoke/case-lambda-fixes.scm)
+chaaya_kaappi_deferred_test(smoke_expt_negative_base_1725 tests/scheme/kaappi-deferred/smoke/expt-negative-base-1725.scm)
+chaaya_kaappi_deferred_test(smoke_equal_dag tests/scheme/kaappi-deferred/smoke/equal-dag.scm)
+chaaya_kaappi_deferred_test(smoke_circular_list_terminate tests/scheme/kaappi-deferred/smoke/circular-list-terminate.scm)
 
 # Display probes adapted from Kaappi differential/probes
 function(chaaya_probe_test name)

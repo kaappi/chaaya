@@ -326,6 +326,9 @@ static void mark_object(ChObject *obj) {
     case CH_TAG_RECORD_TYPE: {
         ChRecordType *rt = (ChRecordType *)obj;
         mark_value(rt->name);
+        if (rt->parent) {
+            mark_object(&rt->parent->header);
+        }
         break;
     }
     case CH_TAG_RECORD: {
@@ -826,6 +829,28 @@ ChValue ch_gc_make_record_type(ChGC *gc, ChValue name, uint16_t num_fields) {
     ch_gc_pop(gc);
     rt->name = name;
     rt->num_fields = num_fields;
+    rt->own_field_start = 0;
+    rt->parent = NULL;
+    return ch_make_pointer(&rt->header);
+}
+
+ChValue ch_gc_make_record_type_ext(ChGC *gc, ChValue name, uint16_t own_fields, ChRecordType *parent) {
+    uint16_t parent_n = parent ? parent->num_fields : 0;
+    uint32_t total = (uint32_t)parent_n + (uint32_t)own_fields;
+    if (total > CH_RECORD_MAX_FIELDS) {
+        return CH_UNDEFINED;
+    }
+    ch_gc_push(gc, &name);
+    ChValue parent_v = parent ? ch_make_pointer(&parent->header) : CH_NIL;
+    if (parent) {
+        ch_gc_push(gc, &parent_v);
+    }
+    ChRecordType *rt = (ChRecordType *)ch_gc_alloc(gc, sizeof(ChRecordType), CH_TAG_RECORD_TYPE);
+    ch_gc_pop_n(gc, parent ? 2 : 1);
+    rt->name = name;
+    rt->num_fields = (uint16_t)total;
+    rt->own_field_start = parent_n;
+    rt->parent = parent;
     return ch_make_pointer(&rt->header);
 }
 

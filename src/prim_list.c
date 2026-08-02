@@ -240,15 +240,11 @@ static ChValue prim_list_copy(ChVM *vm, ChValue *args, int nargs) {
 
     ChValue head = CH_NIL;
     ChValue tail = CH_NIL;
+    ChValue slow = src;
+    int advance_slow = 0;
     ch_gc_push(&vm->gc, &head);
     ch_gc_push(&vm->gc, &tail);
-    size_t steps = 0;
     while (ch_is_pair(src)) {
-        if (steps++ > 1000000) {
-            ch_gc_pop_n(&vm->gc, 2);
-            snprintf(vm->error, sizeof(vm->error), "list-copy: list too long");
-            return CH_UNDEFINED;
-        }
         ChValue cell = ch_gc_cons(&vm->gc, ch_car(src), CH_NIL);
         if (ch_is_nil(head)) {
             head = cell;
@@ -257,6 +253,15 @@ static ChValue prim_list_copy(ChVM *vm, ChValue *args, int nargs) {
         }
         tail = cell;
         src = ch_cdr(src);
+        if (advance_slow) {
+            slow = ch_cdr(slow);
+            if (ch_is_pair(src) && ch_eq(src, slow)) {
+                ch_gc_pop_n(&vm->gc, 2);
+                snprintf(vm->error, sizeof(vm->error), "list-copy: circular list");
+                return CH_UNDEFINED;
+            }
+        }
+        advance_slow = !advance_slow;
     }
     if (!ch_is_nil(src)) {
         ch_set_cdr(tail, src);
@@ -330,6 +335,8 @@ static ChValue prim_cddr(ChVM *vm, ChValue *args, int nargs) {
 }
 
 static ChValue mem_common(ChVM *vm, ChValue obj, ChValue lst, int mode, ChValue cmp) {
+    ChValue slow = lst;
+    int advance_slow = 0;
     while (ch_is_pair(lst)) {
         ChValue x = ch_car(lst);
         int match = 0;
@@ -351,6 +358,14 @@ static ChValue mem_common(ChVM *vm, ChValue obj, ChValue lst, int mode, ChValue 
             return lst;
         }
         lst = ch_cdr(lst);
+        if (advance_slow) {
+            slow = ch_cdr(slow);
+            if (ch_is_pair(lst) && ch_eq(lst, slow)) {
+                snprintf(vm->error, sizeof(vm->error), "circular list");
+                return CH_UNDEFINED;
+            }
+        }
+        advance_slow = !advance_slow;
     }
     return CH_FALSE;
 }
@@ -373,6 +388,8 @@ static ChValue prim_member(ChVM *vm, ChValue *args, int nargs) {
 }
 
 static ChValue ass_common(ChVM *vm, ChValue obj, ChValue alist, int mode, ChValue cmp) {
+    ChValue slow = alist;
+    int advance_slow = 0;
     while (ch_is_pair(alist)) {
         ChValue cell = ch_car(alist);
         if (ch_is_pair(cell)) {
@@ -397,6 +414,14 @@ static ChValue ass_common(ChVM *vm, ChValue obj, ChValue alist, int mode, ChValu
             }
         }
         alist = ch_cdr(alist);
+        if (advance_slow) {
+            slow = ch_cdr(slow);
+            if (ch_is_pair(alist) && ch_eq(alist, slow)) {
+                snprintf(vm->error, sizeof(vm->error), "circular list");
+                return CH_UNDEFINED;
+            }
+        }
+        advance_slow = !advance_slow;
     }
     return CH_FALSE;
 }
@@ -565,6 +590,7 @@ static ChValue prim_for_each(ChVM *vm, ChValue *args, int nargs) {
 void ch_register_list_primitives(ChVM *vm) {
     define_prim(vm, "apply", prim_apply, -1, 2);
     define_prim(vm, "length", prim_length, 1, 1);
+    define_prim(vm, "%length", prim_length, 1, 1);
     define_prim(vm, "list?", prim_list_p, 1, 1);
     define_prim(vm, "append", prim_append, -1, 0);
     define_prim(vm, "reverse", prim_reverse, 1, 1);

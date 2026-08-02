@@ -2,7 +2,7 @@
 
 Chaaya borrows Kaappi’s conformance posture: smoke → compliance → R7RS suite,
 plus display probes for optimizer-sensitive shapes. Bootstrap covers macros and
-an R7RS library MVP; fuller Kaappi/R7RS suites stay deferred.
+an R7RS library MVP; fuller Kaappi/R7RS suites stay deferred where noted.
 
 ## Layout
 
@@ -12,7 +12,7 @@ an R7RS library MVP; fuller Kaappi/R7RS suites stay deferred.
 | `tests/scheme/bootstrap/` | Kaappi-shaped `check-*` suites (`libraries.scm` uses `import`) | yes |
 | `tests/scheme/probes/` | Adapted Kaappi differential probes (stdout golden) | yes |
 | `tests/scheme/r7rs/` | Canonical R7RS-small suite (vendored) | **in CTest** (`r7rs_suite`; full file green) |
-| `tests/scheme/kaappi-deferred/` | Full Kaappi smoke/compliance/probe copies | **partial** — 37 compliance + 62 smoke files in CTest (see below) |
+| `tests/scheme/kaappi-deferred/` | Full Kaappi smoke/compliance/probe copies | **partial** — see wired lists below |
 
 ## Bootstrap harness
 
@@ -47,80 +47,45 @@ See `tests/scheme/kaappi-deferred/README.md`. Rough gates:
 5. Rationals + exact `/` — **done** (MVP)
 6. Complexes (inexact rectangular) — **done** (MVP)
 7. `(scheme inexact)` / `(scheme exact)` + math prims — **done** (MVP)
-8. SRFI-64 or `(chibi test)` — **done** for wired deferred suites (`bind_lib_ref` skips transformers; per-env hoist globals). `(chibi test)` drives `r7rs_suite`.
+8. SRFI-64 or `(chibi test)` — **done** for wired deferred suites
 9. Re-run Kaappi’s `tests/scheme/run-all.sh` corpus against `chaaya` — **in progress**
-   (compliance: 37 files; smoke: 62 files — see `CMakeLists.txt`)
 
 ## kaappi-deferred compliance
 
-Wired in CTest as `kaappi_deferred_*` (numeric/reader, unicode/strings, R7RS gaps,
-time/process-context, bugfix sweeps). Enable with:
+Wired in CTest as `kaappi_deferred_*` (see `CMakeLists.txt`). Enable with:
 
 ```bash
 ctest --output-on-failure -R kaappi_deferred -E smoke
 ```
 
-**Recently added (batch 1B–1E + 2, green):** `r7rs-datatypes-gaps`, `time`,
-`process-context`, `scheme-repl`, `correctness-fixes`, `final-gaps`, `bugfixes`,
-`deferred-bugfixes`, `deferred-final`, `r7rs-thin-forms-gaps`, `printer-gaps`,
-`r7rs-tail-position-gaps`, `r7rs-import-macro-gaps`, `r7rs-libraries-gaps`,
-`reader-exactness-gaps`, `srfi-completeness`.
+**Wired (language-parity track, green):** includes
+`include-lib-decls`, `r7rs-import-macro-gaps`, `r7rs-libraries-gaps`,
+`r7rs-control-io-gaps`, `reader-port-refill-gaps`, `r7rs-expressions-gaps`,
+`r7rs-hygiene-gaps`, `r7rs-continuation-gaps`, `record-ctor-clause-keyword-1882`,
+plus earlier numeric/reader/unicode/string/datatype/time suites.
 
 **Deferred (not wired — known blockers):**
 
 | File | Reason |
 |------|--------|
-| `reader-port-refill-gaps.scm` | port buffer refill at split boundaries (22 failures) |
-| `r7rs-expressions-gaps.scm` | literal identifier binding at use site (29/30) |
-| `r7rs-tail-procedures-gaps.scm` | let-values TCO at N=40000 (register growth via `call-with-values`) |
-| `r7rs-control-io-gaps.scm` | immutable environment / `eval` (4 failures) |
-| `r7rs-continuation-gaps.scm` | MV through continuations; `guard`/`raise` (2 failures) |
-| `r7rs-hygiene-gaps.scm` | ellipsis distribution in `syntax-rules` (2 failures) |
-| `record-ctor-clause-keyword-1882.scm` | R6RS clause-syntax records NYI |
-| `include-lib-decls.scm` | library declaration edge cases (in progress) |
+| `r7rs-tail-procedures-gaps.scm` | `let-values` TCO at N=40000 (register growth via `call-with-values`) |
+| `printer-gaps.scm` | 300s+ `write-shared` scan — too slow for default CTest |
 
 ## kaappi-deferred smoke
 
-Wired in CTest as `kaappi_deferred_smoke_*` (themes: core, macros, expander, GC,
-bignum, fibers, ports). Enable with:
+Wired in CTest as `kaappi_deferred_smoke_*`. Enable with:
 
 ```bash
 ctest --output-on-failure -R kaappi_deferred_smoke
 ```
 
-**Green (62):** batch 1 — `basic`, `numeric`, `macros`, `expander-fixes`,
-`expander-many-patvars`, `gc-mark-contents-types`, `bignum-rational-arith`,
-`bignum-division-multi-arg`, `bignum-rational-normalization`, `not-not-non-boolean`,
-`zero-pred-type-error`, `literal-immutability`, `apply-shadowing`,
-`call-with-values-arity`, `binding-form-validation`, `memv-assv-numeric`,
-`char-folding-fixes`, `expt-rational`, `tail-calls`; batch 2 —
-`bignum-expt-gc`, `closure-upvalue-gc`, `fiber-channel-gc`, `promise-gc`,
-`mutation-write-barrier`, `upvalue-write-barrier`, `ellipsis-mismatch`,
-`import-composed`, `bytevector-port-fixes`, `guard-continuable-845`,
-`arith-overflow`, `bare-lambda-self-tail-call`, `bignum-gc-alias-1414`,
-`callwithargs-bounds`, `case-arrow-register`, `continuation-wind-870`,
-`define-values-gc`, `dynamic-wind-double-875`, `exact-inexact-842-848`,
-`fiber-round-robin`, `hash-table-walk-rehash`, `inexact-to-exact`,
-`rational-rounding`, `string-trim-whitespace-826`; batch 3 —
-`bignum-toF64-833`, `call-global-continuation`, `case-empty-datum-854`,
-`command-line-o-flag`, `complex-accessors-types`, `cond-expand-empty`,
-`constant-fold-shadowing`, `continuation-gc-size`, `create-temp-file-error`,
-`datum-label-vector`, `deep-mark-864`, `define-values-lambda-body`, `derived`,
-`do-closure-capture-803`, `dotted-pair-datum-comment`, `ellipsis-depth-mismatch`,
-`exact-integer-sqrt-export`, `exact-large-float`, `exactness-prefix`.
+**Recently wired (language surface):** `case-lambda-fixes`,
+`expt-negative-base-1725`, `equal-dag`, `circular-list-terminate`.
 
-**Batch triage (239 unwired scanned):** ~123 pass locally with 15s timeout;
-116 fail/hang (SRFI-18 threads NYI, missing primitives, fixture libs, 3 hangs).
-See `/tmp/chaaya-smoke-final.txt` from batch run for per-file reasons.
-
-**Skipped in this batch (not green or Chaaya-deferred):**
+**Skipped (do not wire):**
 
 | File | Reason |
 |------|--------|
-| `jit-*.scm`, `llvm-*.scm` | JIT/LLVM backend not in Chaaya — do not wire |
-| `circular-list-terminate.scm` | hangs (timeout) — needs printer/GC fix |
-| `equal-dag.scm` | `equal?` on DAGs |
-| `case-lambda-fixes.scm` | case-lambda edge cases |
-| `expt-negative-base-1725.scm` | negative-base fractional/complex `expt` |
+| `jit-*.scm`, `llvm-*.scm` | JIT/LLVM backend not in Chaaya |
 
-Add the next batch (ports, fibers, expander) only after local green + `make test`.
+Add further smoke batches only after local green + `make test`.

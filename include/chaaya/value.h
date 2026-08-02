@@ -266,7 +266,9 @@ typedef struct ChTransformer {
 typedef struct ChRecordType {
     ChObject header;
     ChValue name; /* string */
-    uint16_t num_fields;
+    uint16_t num_fields; /* total, including parent fields */
+    uint16_t own_field_start; /* index of first field owned by this type */
+    struct ChRecordType *parent; /* nullable; R6RS/SRFI 237 inheritance */
 } ChRecordType;
 
 typedef struct ChRecord {

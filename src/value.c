@@ -3,6 +3,7 @@
 #include "chaaya/bignum.h"
 #include "chaaya/rational.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 ChValue ch_make_fixnum(int64_t n) {
@@ -407,30 +408,69 @@ bool ch_eqv(ChValue a, ChValue b) {
     return false;
 }
 
-#define CH_EQUAL_VISITED_MAX 256
-
 typedef struct ChEqualPair {
     ChValue a;
     ChValue b;
 } ChEqualPair;
 
-static bool equal_with_visited(ChValue a, ChValue b, ChEqualPair *visited, size_t *nvisited);
+typedef struct ChEqualVisited {
+    ChEqualPair *pairs;
+    size_t count;
+    size_t cap;
+    ChEqualPair stack_pairs[64];
+    int heap;
+} ChEqualVisited;
 
-static bool equal_pair_seen(ChValue a, ChValue b, ChEqualPair *visited, size_t nvisited);
-static bool equal_push_pair(ChValue a, ChValue b, ChEqualPair *visited, size_t *nvisited);
+static bool equal_with_visited(ChValue a, ChValue b, ChEqualVisited *vis);
 
-static bool equal_list(ChValue a, ChValue b, ChEqualPair *visited, size_t *nvisited) {
-    while (true) {
-        if (!ch_is_pair(a) || !ch_is_pair(b)) {
-            return equal_with_visited(a, b, visited, nvisited);
-        }
-        if (equal_pair_seen(a, b, visited, *nvisited)) {
+static bool equal_pair_seen(ChValue a, ChValue b, const ChEqualVisited *vis) {
+    for (size_t i = 0; i < vis->count; i++) {
+        if ((vis->pairs[i].a == a && vis->pairs[i].b == b) ||
+            (vis->pairs[i].a == b && vis->pairs[i].b == a)) {
             return true;
         }
-        if (!equal_push_pair(a, b, visited, nvisited)) {
+    }
+    return false;
+}
+
+static bool equal_push_pair(ChValue a, ChValue b, ChEqualVisited *vis) {
+    if (vis->count >= vis->cap) {
+        size_t ncap = vis->cap ? vis->cap * 2 : 64;
+        ChEqualPair *np;
+        if (!vis->heap) {
+            np = (ChEqualPair *)malloc(ncap * sizeof(ChEqualPair));
+            if (!np) {
+                return false;
+            }
+            memcpy(np, vis->pairs, vis->count * sizeof(ChEqualPair));
+            vis->heap = 1;
+        } else {
+            np = (ChEqualPair *)realloc(vis->pairs, ncap * sizeof(ChEqualPair));
+            if (!np) {
+                return false;
+            }
+        }
+        vis->pairs = np;
+        vis->cap = ncap;
+    }
+    vis->pairs[vis->count].a = a;
+    vis->pairs[vis->count].b = b;
+    vis->count++;
+    return true;
+}
+
+static bool equal_list(ChValue a, ChValue b, ChEqualVisited *vis) {
+    while (true) {
+        if (!ch_is_pair(a) || !ch_is_pair(b)) {
+            return equal_with_visited(a, b, vis);
+        }
+        if (equal_pair_seen(a, b, vis)) {
+            return true;
+        }
+        if (!equal_push_pair(a, b, vis)) {
             return false;
         }
-        if (!equal_with_visited(ch_car(a), ch_car(b), visited, nvisited)) {
+        if (!equal_with_visited(ch_car(a), ch_car(b), vis)) {
             return false;
         }
         a = ch_cdr(a);
@@ -438,32 +478,12 @@ static bool equal_list(ChValue a, ChValue b, ChEqualPair *visited, size_t *nvisi
     }
 }
 
-static bool equal_pair_seen(ChValue a, ChValue b, ChEqualPair *visited, size_t nvisited) {
-    for (size_t i = 0; i < nvisited; i++) {
-        if ((visited[i].a == a && visited[i].b == b) ||
-            (visited[i].a == b && visited[i].b == a)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool equal_push_pair(ChValue a, ChValue b, ChEqualPair *visited, size_t *nvisited) {
-    if (*nvisited >= CH_EQUAL_VISITED_MAX) {
-        return false;
-    }
-    visited[*nvisited].a = a;
-    visited[*nvisited].b = b;
-    (*nvisited)++;
-    return true;
-}
-
-static bool equal_with_visited(ChValue a, ChValue b, ChEqualPair *visited, size_t *nvisited) {
+static bool equal_with_visited(ChValue a, ChValue b, ChEqualVisited *vis) {
     if (ch_eqv(a, b)) {
         return true;
     }
     if (ch_is_pair(a) && ch_is_pair(b)) {
-        return equal_list(a, b, visited, nvisited);
+        return equal_list(a, b, vis);
     }
     if (ch_is_string(a) && ch_is_string(b)) {
         ChString *sa = ch_as_string(a);
@@ -479,14 +499,14 @@ static bool equal_with_visited(ChValue a, ChValue b, ChEqualPair *visited, size_
         if (va->len != vb->len) {
             return false;
         }
-        if (equal_pair_seen(a, b, visited, *nvisited)) {
+        if (equal_pair_seen(a, b, vis)) {
             return true;
         }
-        if (!equal_push_pair(a, b, visited, nvisited)) {
+        if (!equal_push_pair(a, b, vis)) {
             return false;
         }
         for (size_t i = 0; i < va->len; i++) {
-            if (!equal_with_visited(va->items[i], vb->items[i], visited, nvisited)) {
+            if (!equal_with_visited(va->items[i], vb->items[i], vis)) {
                 return false;
             }
         }
@@ -507,7 +527,14 @@ static bool equal_with_visited(ChValue a, ChValue b, ChEqualPair *visited, size_
 }
 
 bool ch_equal(ChValue a, ChValue b) {
-    ChEqualPair visited[CH_EQUAL_VISITED_MAX];
-    size_t nvisited = 0;
-    return equal_with_visited(a, b, visited, &nvisited);
+    ChEqualVisited vis;
+    vis.pairs = vis.stack_pairs;
+    vis.count = 0;
+    vis.cap = sizeof(vis.stack_pairs) / sizeof(vis.stack_pairs[0]);
+    vis.heap = 0;
+    bool ok = equal_with_visited(a, b, &vis);
+    if (vis.heap) {
+        free(vis.pairs);
+    }
+    return ok;
 }

@@ -717,14 +717,9 @@ static int load_library_file(ChVM *vm, const char *path) {
     ch_reader_init(&reader, &vm->gc, src, len);
     int rc = 0;
     for (;;) {
-        size_t base = vm->gc.root_count;
         ChValue expr = CH_NIL;
         ch_gc_push(&vm->gc, &expr);
-        for (size_t i = 0; i < vm->global_count; i++) {
-            ch_gc_push(&vm->gc, &vm->globals[i].value);
-        }
         ChReadStatus rs = ch_read_datum(&reader, &expr);
-        ch_gc_pop_to(&vm->gc, base + 1);
         if (rs == CH_READ_EOF) {
             ch_gc_pop(&vm->gc);
             break;
@@ -1192,18 +1187,17 @@ static int eval_library_begin(ChVM *vm, ChLibEnv *env, ChValue body) {
     for (ChValue b = body; ch_is_pair(b); b = ch_cdr(b)) {
         ChValue form = ch_car(b);
         ch_gc_push(&vm->gc, &form);
-        for (size_t i = 0; i < vm->global_count; i++) {
-            ch_gc_push(&vm->gc, &vm->globals[i].value);
-        }
+        /* Root the in-construction env only — it is not yet registered, so
+         * ch_library_mark_gc_roots cannot see it. Globals are marked via the VM. */
         push_lib_env_roots(vm, env);
-        size_t extra_roots = vm->global_count + lib_env_root_count(env);
+        size_t env_roots = lib_env_root_count(env);
 
         if (eval_toplevel_form(vm, form) != 0) {
-            ch_gc_pop_n(&vm->gc, 1 + extra_roots);
+            ch_gc_pop_n(&vm->gc, 1 + env_roots);
             vm->active_lib_env = saved;
             return -1;
         }
-        ch_gc_pop_n(&vm->gc, 1 + extra_roots);
+        ch_gc_pop_n(&vm->gc, 1 + env_roots);
     }
 
     vm->active_lib_env = saved;

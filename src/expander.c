@@ -51,7 +51,7 @@ static int literal_index(ChTransformer *tr, ChSymbol *s) {
 typedef struct ChBinding {
     ChSymbol *var;
     ChValue value; /* single match, or list of matches for ellipsis */
-    int ellipsis;
+    int ellipsis;  /* 0 = scalar; >0 = ellipsis depth (1 = list, 2 = list-of-lists) */
 } ChBinding;
 
 typedef struct ChHygRename {
@@ -313,6 +313,121 @@ static int bind_var(ChExpandCtx *ctx, ChSymbol *var, ChValue val, int under_elli
 }
 
 static int match_pattern(ChExpandCtx *ctx, ChValue pat, ChValue use, int under_ellipsis);
+static int match_list(ChExpandCtx *ctx, ChValue pat, ChValue use, int under_ellipsis);
+
+/* Collect pattern-variable names from an ellipsis element pattern. */
+static void collect_ellipsis_vars(ChExpandCtx *ctx, ChValue pat, ChSymbol **names, int *nnames) {
+    if (ch_is_symbol(pat)) {
+        ChSymbol *s = ch_as_symbol(pat);
+        const char *base = ch_symbol_basename(s);
+        if (strcmp(base, "_") == 0 || is_ellipsis_id(ctx, s) || is_literal(ctx, s)) {
+            return;
+        }
+        for (int i = 0; i < *nnames; i++) {
+            if (strcmp(ch_symbol_basename(names[i]), base) == 0) {
+                return;
+            }
+        }
+        if (*nnames < CH_BIND_MAX) {
+            names[(*nnames)++] = s;
+        }
+        return;
+    }
+    if (ch_is_pair(pat)) {
+        ChValue esc;
+        if (take_pattern_escape(pat, &esc)) {
+            collect_ellipsis_vars(ctx, esc, names, nnames);
+            return;
+        }
+        collect_ellipsis_vars(ctx, ch_car(pat), names, nnames);
+        collect_ellipsis_vars(ctx, ch_cdr(pat), names, nnames);
+        return;
+    }
+    if (ch_is_vector(pat)) {
+        ChVector *vec = ch_as_vector(pat);
+        for (size_t i = 0; i < vec->len; i++) {
+            collect_ellipsis_vars(ctx, vec->items[i], names, nnames);
+        }
+    }
+}
+
+/* Match `patt ...` by matching each element into a fresh binding set, then
+ * appending (wrapping nested ellipsis lists) onto outer ellipsis bindings. */
+static int match_ellipsis(ChExpandCtx *ctx, ChValue pcar, ChValue after, ChValue use) {
+    int need = list_length(after);
+    int ulen = list_length(use);
+    if (need < 0 || ulen < 0 || ulen < need) {
+        return 0;
+    }
+    int nrep = ulen - need;
+
+    ChSymbol *var_names[CH_BIND_MAX];
+    int nvars = 0;
+    collect_ellipsis_vars(ctx, pcar, var_names, &nvars);
+
+    int base = ctx->nbinds;
+    for (int vi = 0; vi < nvars; vi++) {
+        if (ctx->nbinds >= CH_BIND_MAX) {
+            return expand_err(ctx, "syntax-rules: too many pattern variables");
+        }
+        /* Skip if already bound (shouldn't happen for well-formed patterns). */
+        if (find_bind(ctx, var_names[vi])) {
+            return expand_err(ctx, "syntax-rules: duplicate pattern variable");
+        }
+        ctx->binds[ctx->nbinds].var = var_names[vi];
+        ctx->binds[ctx->nbinds].value = CH_NIL;
+        ctx->binds[ctx->nbinds].ellipsis = 1;
+        ctx->nbinds++;
+    }
+
+    ChValue u = use;
+    for (int i = 0; i < nrep; i++) {
+        if (!ch_is_pair(u)) {
+            return 0;
+        }
+        /* Fresh sub-context bindings for this element. */
+        ChExpandCtx sub = *ctx;
+        sub.nbinds = 0;
+        memset(sub.binds, 0, sizeof(sub.binds));
+        if (!match_pattern(&sub, pcar, ch_car(u), 0)) {
+            if (sub.err && sub.err[0]) {
+                snprintf(ctx->err, ctx->err_len, "%s", sub.err);
+            }
+            return 0;
+        }
+        for (int si = 0; si < sub.nbinds; si++) {
+            for (int bi = base; bi < ctx->nbinds; bi++) {
+                if (strcmp(ch_symbol_basename(ctx->binds[bi].var),
+                           ch_symbol_basename(sub.binds[si].var)) != 0) {
+                    continue;
+                }
+                ChValue piece = sub.binds[si].value;
+                if (sub.binds[si].ellipsis) {
+                    /* Nested ellipsis: sub match_ellipsis already left piece in
+                     * document order — wrap as one outer element. */
+                    if (ctx->binds[bi].ellipsis < sub.binds[si].ellipsis + 1) {
+                        ctx->binds[bi].ellipsis = sub.binds[si].ellipsis + 1;
+                    }
+                }
+                ch_gc_push(&ctx->vm->gc, &ctx->binds[bi].value);
+                ch_gc_push(&ctx->vm->gc, &piece);
+                ctx->binds[bi].value = ch_gc_cons(&ctx->vm->gc, piece, ctx->binds[bi].value);
+                ch_gc_pop_n(&ctx->vm->gc, 2);
+                break;
+            }
+        }
+        /* Copy hyg renames from sub if any were added (none for match). */
+        u = ch_cdr(u);
+    }
+
+    /* Reverse outer ellipsis lists to document order. */
+    for (int bi = base; bi < ctx->nbinds; bi++) {
+        if (ctx->binds[bi].ellipsis) {
+            ctx->binds[bi].value = list_reverse(&ctx->vm->gc, ctx->binds[bi].value);
+        }
+    }
+    return match_list(ctx, after, u, 0);
+}
 
 static int match_list(ChExpandCtx *ctx, ChValue pat, ChValue use, int under_ellipsis) {
     ChValue whole_esc;
@@ -340,6 +455,11 @@ static int match_list(ChExpandCtx *ctx, ChValue pat, ChValue use, int under_elli
     while (ch_is_pair(pat)) {
         ChValue pcar = ch_car(pat);
         ChValue pcdr = ch_cdr(pat);
+        /* Ellipsis must win over underscore greediness so `(_ ... y)` works. */
+        if (ch_is_pair(pcdr) && ch_is_symbol(ch_car(pcdr)) &&
+            is_ellipsis_id(ctx, ch_as_symbol(ch_car(pcdr)))) {
+            return match_ellipsis(ctx, pcar, ch_cdr(pcdr), use);
+        }
         if (ch_is_nil(use) && ch_is_nil(pcdr) && ch_is_symbol(pcar) &&
             is_underscore_pat(ctx, ch_as_symbol(pcar))) {
             return 1;
@@ -380,42 +500,6 @@ static int match_list(ChExpandCtx *ctx, ChValue pat, ChValue use, int under_elli
             }
             return match_list(ctx, pcdr, u, under_ellipsis);
         }
-        if (ch_is_pair(pcdr) && ch_is_symbol(ch_car(pcdr)) &&
-            is_ellipsis_id(ctx, ch_as_symbol(ch_car(pcdr)))) {
-            ChValue after = ch_cdr(pcdr);
-            int need = list_length(after);
-            int ulen = list_length(use);
-            if (need < 0 || ulen < 0 || ulen < need) {
-                return 0;
-            }
-            int nrep = ulen - need;
-            int start_binds = ctx->nbinds;
-            ChValue u = use;
-            for (int i = 0; i < nrep; i++) {
-                if (!match_pattern(ctx, pcar, ch_car(u), 1)) {
-                    return 0;
-                }
-                u = ch_cdr(u);
-            }
-            /* ellipsis lists were cons'd front-first; reverse each new ellipsis bind */
-            for (int bi = start_binds; bi < ctx->nbinds; bi++) {
-                if (ctx->binds[bi].ellipsis) {
-                    ctx->binds[bi].value = list_reverse(&ctx->vm->gc, ctx->binds[bi].value);
-                }
-            }
-            /* also reverse pre-existing ellipsis vars that were appended in this loop */
-            for (int bi = 0; bi < start_binds; bi++) {
-                if (ctx->binds[bi].ellipsis && nrep > 0) {
-                    /* appended nrep items at front; reverse whole list then rotate?
-                     * Simpler: rebuild by reversing only the newly prepended segment.
-                     * Since bind_var always conses to front, after nrep appends the list is
-                     * newest-first for the whole ellipsis sequence if this was the only
-                     * ellipsis match for that var. Reverse once at end of rule match. */
-                    (void)bi;
-                }
-            }
-            return match_list(ctx, after, u, under_ellipsis);
-        }
         if (!ch_is_pair(use)) {
             return 0;
         }
@@ -435,6 +519,19 @@ static int match_list(ChExpandCtx *ctx, ChValue pat, ChValue use, int under_elli
     return ch_is_nil(pat) && ch_is_nil(use);
 }
 
+static ChValue vector_to_list(ChGC *gc, ChVector *vec) {
+    ChValue list = CH_NIL;
+    ch_gc_push(gc, &list);
+    for (size_t i = vec->len; i > 0; i--) {
+        ChValue item = vec->items[i - 1];
+        ch_gc_push(gc, &item);
+        list = ch_gc_cons(gc, item, list);
+        ch_gc_pop(gc);
+    }
+    ch_gc_pop(gc);
+    return list;
+}
+
 static int match_pattern(ChExpandCtx *ctx, ChValue pat, ChValue use, int under_ellipsis) {
     if (ch_is_symbol(pat)) {
         ChSymbol *s = ch_as_symbol(pat);
@@ -448,6 +545,18 @@ static int match_pattern(ChExpandCtx *ctx, ChValue pat, ChValue use, int under_e
     }
     if (ch_is_pair(pat)) {
         return match_list(ctx, pat, use, under_ellipsis);
+    }
+    if (ch_is_vector(pat)) {
+        if (!ch_is_vector(use)) {
+            return 0;
+        }
+        ChValue plist = vector_to_list(&ctx->vm->gc, ch_as_vector(pat));
+        ch_gc_push(&ctx->vm->gc, &plist);
+        ChValue ulist = vector_to_list(&ctx->vm->gc, ch_as_vector(use));
+        ch_gc_push(&ctx->vm->gc, &ulist);
+        int ok = match_list(ctx, plist, ulist, under_ellipsis);
+        ch_gc_pop_n(&ctx->vm->gc, 2);
+        return ok;
     }
     return ch_equal(pat, use);
 }
@@ -580,50 +689,30 @@ static ChValue deep_copy_instantiate(ChExpandCtx *ctx, ChValue v) {
 }
 
 static ChValue instantiate_with_index(ChExpandCtx *ctx, ChValue tmpl, int index) {
-    if (ch_is_symbol(tmpl)) {
-        ChBinding *b = find_bind(ctx, ch_as_symbol(tmpl));
-        if (b) {
-            if (b->ellipsis) {
-                return deep_copy_instantiate(ctx, nth_of(b->value, index));
-            }
-            return deep_copy_instantiate(ctx, b->value);
-        }
-        if (is_literal(ctx, ch_as_symbol(tmpl)) ||
-            is_well_known(ch_symbol_basename(ch_as_symbol(tmpl)))) {
-            return tmpl;
-        }
-        {
-            ChValue lib_val = CH_UNDEFINED;
-            if (lib_env_binding(ctx->vm, ch_as_symbol(tmpl), &lib_val)) {
-                if (!ch_is_transformer(lib_val)) {
-                    return bind_lib_ref(ctx, ch_as_symbol(tmpl));
-                }
-                return tmpl;
-            }
-        }
-        if (!ctx->escape && is_ellipsis_id(ctx, ch_as_symbol(tmpl))) {
-            return tmpl;
-        }
-        if (ctx->escape && is_ellipsis_id(ctx, ch_as_symbol(tmpl))) {
-            return tmpl;
-        }
-        ChSymbol *ren = hyg_rename(ctx, ch_as_symbol(tmpl));
-        return ch_make_pointer(&ren->header);
+    /* Peel one ellipsis level so nested `(b ...)` sees the index-th group. */
+    ChBinding saved[CH_BIND_MAX];
+    int nsaved = ctx->nbinds;
+    if (nsaved > CH_BIND_MAX) {
+        nsaved = CH_BIND_MAX;
     }
-    if (ch_is_pair(tmpl)) {
-        if (ch_is_symbol(ch_car(tmpl)) &&
-            strcmp(ch_symbol_basename(ch_as_symbol(ch_car(tmpl))), "quote") == 0) {
-            return tmpl;
+    memcpy(saved, ctx->binds, (size_t)nsaved * sizeof(ChBinding));
+    for (int i = 0; i < ctx->nbinds; i++) {
+        if (!ctx->binds[i].ellipsis) {
+            continue;
         }
-        ChValue car_v = instantiate_with_index(ctx, ch_car(tmpl), index);
-        ch_gc_push(&ctx->vm->gc, &car_v);
-        ChValue cdr_v = instantiate_with_index(ctx, ch_cdr(tmpl), index);
-        ch_gc_push(&ctx->vm->gc, &cdr_v);
-        ChValue out = ch_gc_cons(&ctx->vm->gc, car_v, cdr_v);
-        ch_gc_pop_n(&ctx->vm->gc, 2);
-        return out;
+        ChValue group = nth_of(ctx->binds[i].value, index);
+        if (ctx->binds[i].ellipsis > 1) {
+            ctx->binds[i].value = group;
+            ctx->binds[i].ellipsis -= 1;
+        } else {
+            ctx->binds[i].value = group;
+            ctx->binds[i].ellipsis = 0;
+        }
     }
-    return tmpl;
+    ChValue out = instantiate(ctx, tmpl);
+    memcpy(ctx->binds, saved, (size_t)nsaved * sizeof(ChBinding));
+    ctx->nbinds = nsaved;
+    return out;
 }
 
 static ChValue splice_values(ChGC *gc, ChValue vals, ChValue rest) {
@@ -735,6 +824,13 @@ static ChValue instantiate_list(ChExpandCtx *ctx, ChValue tmpl) {
     if (ch_is_pair(tcdr) && ch_is_symbol(ch_car(tcdr)) &&
         is_ellipsis_id(ctx, ch_as_symbol(ch_car(tcdr))) && !ctx->escape) {
         ChValue after = ch_cdr(tcdr);
+        /* Consecutive ellipses `(x ... ...)` flatten one nesting level. */
+        int extra_ellipsis = 0;
+        while (ch_is_pair(after) && ch_is_symbol(ch_car(after)) &&
+               is_ellipsis_id(ctx, ch_as_symbol(ch_car(after)))) {
+            extra_ellipsis++;
+            after = ch_cdr(after);
+        }
         int nrep = ellipsis_count_in_tmpl(ctx, tcar);
         if (nrep < 0) {
             nrep = 0;
@@ -750,7 +846,13 @@ static ChValue instantiate_list(ChExpandCtx *ctx, ChValue tmpl) {
         for (int i = np - 1; i >= 0; i--) {
             ChValue item = pieces[i];
             ch_gc_push(&ctx->vm->gc, &item);
-            result = ch_gc_cons(&ctx->vm->gc, item, result);
+            if (extra_ellipsis > 0 && ch_is_pair(item)) {
+                result = splice_values(&ctx->vm->gc, item, result);
+            } else if (extra_ellipsis > 0 && ch_is_nil(item)) {
+                /* empty group contributes nothing */
+            } else {
+                result = ch_gc_cons(&ctx->vm->gc, item, result);
+            }
             ch_gc_pop(&ctx->vm->gc);
         }
         ch_gc_pop(&ctx->vm->gc);
@@ -1009,10 +1111,64 @@ static ChValue lookup_macro_value(ChVM *vm, ChSymbol *name) {
     return CH_NIL;
 }
 
-static ChValue capture_template_syms(ChVM *vm, ChValue tmpl) {
+static int tr_is_ellipsis_sym(ChTransformer *tr, ChSymbol *s) {
+    const char *base = ch_symbol_basename(s);
+    if (tr->ellipsis_id) {
+        return strcmp(ch_symbol_basename(tr->ellipsis_id), base) == 0;
+    }
+    return strcmp(base, "...") == 0;
+}
+
+static int pvar_listed(ChSymbol **pvars, int npvars, ChSymbol *s) {
+    const char *base = ch_symbol_basename(s);
+    for (int i = 0; i < npvars; i++) {
+        if (strcmp(ch_symbol_basename(pvars[i]), base) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void collect_pattern_vars(ChTransformer *tr, ChValue pat, ChSymbol **pvars, int *npvars) {
+    if (ch_is_symbol(pat)) {
+        ChSymbol *s = ch_as_symbol(pat);
+        const char *base = ch_symbol_basename(s);
+        if (strcmp(base, "_") == 0 || tr_is_ellipsis_sym(tr, s) || literal_index(tr, s) >= 0) {
+            return;
+        }
+        if (pvar_listed(pvars, *npvars, s)) {
+            return;
+        }
+        if (*npvars < CH_BIND_MAX) {
+            pvars[(*npvars)++] = s;
+        }
+        return;
+    }
+    if (ch_is_pair(pat)) {
+        collect_pattern_vars(tr, ch_car(pat), pvars, npvars);
+        collect_pattern_vars(tr, ch_cdr(pat), pvars, npvars);
+        return;
+    }
+    if (ch_is_vector(pat)) {
+        ChVector *vec = ch_as_vector(pat);
+        for (size_t i = 0; i < vec->len; i++) {
+            collect_pattern_vars(tr, vec->items[i], pvars, npvars);
+        }
+    }
+}
+
+static ChValue capture_template_syms(ChVM *vm, ChTransformer *tr, ChValue tmpl, ChSymbol **pvars,
+                                     int npvars) {
     if (ch_is_symbol(tmpl)) {
         ChSymbol *s = ch_as_symbol(tmpl);
         if (is_well_known(ch_symbol_basename(s))) {
+            return tmpl;
+        }
+        /* Pattern variables must stay substitutable — do not rename them even
+         * if a same-named macro exists in the ambient environment (e.g. harness
+         * `test` colliding with a pattern var `test`). */
+        if (pvar_listed(pvars, npvars, s) || strcmp(ch_symbol_basename(s), "_") == 0 ||
+            tr_is_ellipsis_sym(tr, s)) {
             return tmpl;
         }
         ChValue macro = lookup_macro_value(vm, s);
@@ -1031,9 +1187,9 @@ static ChValue capture_template_syms(ChVM *vm, ChValue tmpl) {
             strcmp(ch_symbol_basename(ch_as_symbol(ch_car(tmpl))), "quote") == 0) {
             return tmpl;
         }
-        ChValue car_v = capture_template_syms(vm, ch_car(tmpl));
+        ChValue car_v = capture_template_syms(vm, tr, ch_car(tmpl), pvars, npvars);
         ch_gc_push(&vm->gc, &car_v);
-        ChValue cdr_v = capture_template_syms(vm, ch_cdr(tmpl));
+        ChValue cdr_v = capture_template_syms(vm, tr, ch_cdr(tmpl), pvars, npvars);
         ch_gc_push(&vm->gc, &cdr_v);
         ChValue out = ch_gc_cons(&vm->gc, car_v, cdr_v);
         ch_gc_pop_n(&vm->gc, 2);
@@ -1044,7 +1200,16 @@ static ChValue capture_template_syms(ChVM *vm, ChValue tmpl) {
 
 static void capture_transformer_templates(ChVM *vm, ChTransformer *tr) {
     for (size_t i = 0; i < tr->rule_count; i++) {
-        tr->templates[i] = capture_template_syms(vm, tr->templates[i]);
+        ChSymbol *pvars[CH_BIND_MAX];
+        int npvars = 0;
+        /* Skip the pattern keyword (car of list patterns). */
+        ChValue pat = tr->patterns[i];
+        if (ch_is_pair(pat) && ch_is_symbol(ch_car(pat))) {
+            collect_pattern_vars(tr, ch_cdr(pat), pvars, &npvars);
+        } else {
+            collect_pattern_vars(tr, pat, pvars, &npvars);
+        }
+        tr->templates[i] = capture_template_syms(vm, tr, tr->templates[i], pvars, npvars);
     }
 }
 
@@ -1286,11 +1451,277 @@ static int looks_like_r6rs_clause_syntax(ChValue args) {
     return 1;
 }
 
+static ChValue lookup_defined_value(ChVM *vm, const char *name) {
+    if (vm->active_lib_env) {
+        for (size_t i = 0; i < vm->active_lib_env->count; i++) {
+            if (vm->active_lib_env->bindings[i].defined &&
+                strcmp(ch_symbol_basename(vm->active_lib_env->bindings[i].name), name) == 0) {
+                return vm->active_lib_env->bindings[i].value;
+            }
+        }
+    }
+    for (size_t i = 0; i < vm->global_count; i++) {
+        if (vm->globals[i].defined && strcmp(ch_symbol_basename(vm->globals[i].name), name) == 0) {
+            return vm->globals[i].value;
+        }
+    }
+    return CH_UNDEFINED;
+}
+
+static ChExpandStatus expand_define_record_type_r6rs(ChVM *vm, ChValue args, ChValue *out, char *err,
+                                                    size_t err_len) {
+    if (!ch_is_pair(args)) {
+        snprintf(err, err_len, "define-record-type: bad R6RS syntax");
+        return CH_EXPAND_ERROR;
+    }
+    ChGC *gc = &vm->gc;
+    const char *type_name = NULL;
+    ChSymbol *ctor_sym = NULL;
+    ChSymbol *pred_sym = NULL;
+    ChValue name_spec = ch_car(args);
+    if (ch_is_symbol(name_spec)) {
+        type_name = ch_as_symbol(name_spec)->name;
+        char buf[256];
+        if (snprintf(buf, sizeof(buf), "make-%s", type_name) >= (int)sizeof(buf)) {
+            snprintf(err, err_len, "define-record-type: type name too long");
+            return CH_EXPAND_ERROR;
+        }
+        ctor_sym = ch_as_symbol(ch_gc_intern_symbol_cstr(gc, buf));
+        if (snprintf(buf, sizeof(buf), "%s?", type_name) >= (int)sizeof(buf)) {
+            snprintf(err, err_len, "define-record-type: type name too long");
+            return CH_EXPAND_ERROR;
+        }
+        pred_sym = ch_as_symbol(ch_gc_intern_symbol_cstr(gc, buf));
+    } else if (ch_is_pair(name_spec) && ch_is_symbol(ch_car(name_spec)) &&
+               ch_is_pair(ch_cdr(name_spec)) && ch_is_symbol(ch_car(ch_cdr(name_spec))) &&
+               ch_is_pair(ch_cdr(ch_cdr(name_spec))) &&
+               ch_is_symbol(ch_car(ch_cdr(ch_cdr(name_spec)))) &&
+               ch_is_nil(ch_cdr(ch_cdr(ch_cdr(name_spec))))) {
+        type_name = ch_as_symbol(ch_car(name_spec))->name;
+        ctor_sym = ch_as_symbol(ch_car(ch_cdr(name_spec)));
+        pred_sym = ch_as_symbol(ch_car(ch_cdr(ch_cdr(name_spec))));
+    } else {
+        snprintf(err, err_len, "define-record-type: bad R6RS name spec");
+        return CH_EXPAND_ERROR;
+    }
+
+    ChSymbol *parent_sym = NULL;
+    ChSymbol *field_names[CH_RECORD_MAX_FIELDS];
+    ChSymbol *acc_syms[CH_RECORD_MAX_FIELDS];
+    ChSymbol *mut_syms[CH_RECORD_MAX_FIELDS];
+    size_t nfields = 0;
+
+    for (ChValue clauses = ch_cdr(args); ch_is_pair(clauses); clauses = ch_cdr(clauses)) {
+        ChValue clause = ch_car(clauses);
+        if (!ch_is_pair(clause) || !ch_is_symbol(ch_car(clause))) {
+            snprintf(err, err_len, "define-record-type: bad R6RS clause");
+            return CH_EXPAND_ERROR;
+        }
+        const char *kw = ch_symbol_basename(ch_as_symbol(ch_car(clause)));
+        ChValue crest = ch_cdr(clause);
+        if (strcmp(kw, "fields") == 0) {
+            for (ChValue fs = crest; ch_is_pair(fs); fs = ch_cdr(fs)) {
+                if (nfields >= CH_RECORD_MAX_FIELDS) {
+                    snprintf(err, err_len, "define-record-type: too many fields");
+                    return CH_EXPAND_ERROR;
+                }
+                ChValue fspec = ch_car(fs);
+                const char *fname = NULL;
+                int is_mutable = 0;
+                ChSymbol *acc = NULL;
+                ChSymbol *mut = NULL;
+                if (ch_is_symbol(fspec)) {
+                    fname = ch_as_symbol(fspec)->name;
+                } else if (ch_is_pair(fspec) && ch_is_symbol(ch_car(fspec))) {
+                    const char *kind = ch_symbol_basename(ch_as_symbol(ch_car(fspec)));
+                    if (strcmp(kind, "mutable") == 0) {
+                        is_mutable = 1;
+                    } else if (strcmp(kind, "immutable") != 0) {
+                        snprintf(err, err_len, "define-record-type: bad field kind");
+                        return CH_EXPAND_ERROR;
+                    }
+                    ChValue r1 = ch_cdr(fspec);
+                    if (!ch_is_pair(r1) || !ch_is_symbol(ch_car(r1))) {
+                        snprintf(err, err_len, "define-record-type: bad field spec");
+                        return CH_EXPAND_ERROR;
+                    }
+                    fname = ch_as_symbol(ch_car(r1))->name;
+                    ChValue r2 = ch_cdr(r1);
+                    if (ch_is_pair(r2) && ch_is_symbol(ch_car(r2))) {
+                        acc = ch_as_symbol(ch_car(r2));
+                        ChValue r3 = ch_cdr(r2);
+                        if (is_mutable && ch_is_pair(r3) && ch_is_symbol(ch_car(r3))) {
+                            mut = ch_as_symbol(ch_car(r3));
+                        }
+                    }
+                } else {
+                    snprintf(err, err_len, "define-record-type: bad field spec");
+                    return CH_EXPAND_ERROR;
+                }
+                char buf[256];
+                field_names[nfields] = ch_as_symbol(ch_gc_intern_symbol_cstr(gc, fname));
+                if (!acc) {
+                    if (snprintf(buf, sizeof(buf), "%s-%s", type_name, fname) >= (int)sizeof(buf)) {
+                        snprintf(err, err_len, "define-record-type: field name too long");
+                        return CH_EXPAND_ERROR;
+                    }
+                    acc = ch_as_symbol(ch_gc_intern_symbol_cstr(gc, buf));
+                }
+                acc_syms[nfields] = acc;
+                if (is_mutable) {
+                    if (!mut) {
+                        if (snprintf(buf, sizeof(buf), "%s-set!", acc->name) >= (int)sizeof(buf)) {
+                            snprintf(err, err_len, "define-record-type: accessor name too long");
+                            return CH_EXPAND_ERROR;
+                        }
+                        mut = ch_as_symbol(ch_gc_intern_symbol_cstr(gc, buf));
+                    }
+                    mut_syms[nfields] = mut;
+                } else {
+                    mut_syms[nfields] = NULL;
+                }
+                nfields++;
+            }
+        } else if (strcmp(kw, "parent") == 0) {
+            if (!ch_is_pair(crest) || !ch_is_symbol(ch_car(crest)) || !ch_is_nil(ch_cdr(crest))) {
+                snprintf(err, err_len, "define-record-type: bad parent clause");
+                return CH_EXPAND_ERROR;
+            }
+            parent_sym = ch_as_symbol(ch_car(crest));
+        } else if (strcmp(kw, "sealed") == 0 || strcmp(kw, "opaque") == 0 ||
+                   strcmp(kw, "nongenerative") == 0 || strcmp(kw, "generative") == 0 ||
+                   strcmp(kw, "protocol") == 0 || strcmp(kw, "parent-rtd") == 0) {
+            /* Accepted for syntax compatibility; protocol/parent-rtd not fully
+             * implemented beyond parent flattening for the compliance suite. */
+            if (strcmp(kw, "protocol") == 0 || strcmp(kw, "parent-rtd") == 0) {
+                snprintf(err, err_len, "define-record-type: %s not yet supported", kw);
+                return CH_EXPAND_ERROR;
+            }
+        } else {
+            snprintf(err, err_len, "define-record-type: unknown R6RS clause");
+            return CH_EXPAND_ERROR;
+        }
+    }
+
+    char iname[256];
+    if (snprintf(iname, sizeof(iname), "__record_type_%s", type_name) >= (int)sizeof(iname)) {
+        snprintf(err, err_len, "define-record-type: type name too long");
+        return CH_EXPAND_ERROR;
+    }
+
+    uint16_t parent_n = 0;
+    ChValue parent_rt_name = CH_FALSE;
+    if (parent_sym) {
+        char pname[256];
+        if (snprintf(pname, sizeof(pname), "__record_type_%s", parent_sym->name) >=
+            (int)sizeof(pname)) {
+            snprintf(err, err_len, "define-record-type: parent name too long");
+            return CH_EXPAND_ERROR;
+        }
+        ChValue pval = lookup_defined_value(vm, pname);
+        if (!ch_is_record_type(pval)) {
+            snprintf(err, err_len, "define-record-type: unknown parent type");
+            return CH_EXPAND_ERROR;
+        }
+        parent_n = ch_as_record_type(pval)->num_fields;
+        parent_rt_name = ch_gc_intern_symbol_cstr(gc, pname);
+    }
+
+    ChValue begin_sym = ch_gc_intern_symbol_cstr(gc, "begin");
+    ChValue define_sym = ch_gc_intern_symbol_cstr(gc, "define");
+    ChValue let_sym = ch_gc_intern_symbol_cstr(gc, "let");
+    ChValue lambda_sym = ch_gc_intern_symbol_cstr(gc, "lambda");
+    ChValue mrt_sym = ch_gc_intern_symbol_cstr(gc, "%make-record-type");
+    ChValue mr_sym = ch_gc_intern_symbol_cstr(gc, "%make-record");
+    ChValue rp_sym = ch_gc_intern_symbol_cstr(gc, "%record?");
+    ChValue rr_sym = ch_gc_intern_symbol_cstr(gc, "%record-ref");
+    ChValue rs_sym = ch_gc_intern_symbol_cstr(gc, "%record-set!");
+    ChValue rt_name = ch_gc_intern_symbol_cstr(gc, iname);
+    ChValue rt_local = ch_gc_intern_symbol_cstr(gc, " __rt");
+    ChValue name_str = ch_gc_make_string_cstr(gc, type_name);
+    ChValue nfields_v = ch_make_fixnum((int64_t)nfields);
+
+    ChValue forms = CH_NIL;
+    ch_gc_push(gc, &forms);
+    ch_gc_push(gc, &name_str);
+    ch_gc_push(gc, &rt_name);
+    ch_gc_push(gc, &rt_local);
+    ch_gc_push(gc, &parent_rt_name);
+
+    /* (define __rt (%make-record-type "name" own-n [parent])) */
+    {
+        ChValue init;
+        if (parent_sym) {
+            init = list4(gc, mrt_sym, name_str, nfields_v, parent_rt_name);
+        } else {
+            init = list3(gc, mrt_sym, name_str, nfields_v);
+        }
+        forms = append_one(gc, forms, list3(gc, define_sym, rt_name, init));
+    }
+
+    /* Constructor: (lambda (p0.. p{parent_n-1} f0..) (%make-record __rt ...)) */
+    {
+        ChValue params = CH_NIL;
+        ChValue body_args = list1(gc, rt_local);
+        ch_gc_push(gc, &params);
+        ch_gc_push(gc, &body_args);
+        for (uint16_t i = 0; i < parent_n; i++) {
+            char pbuf[32];
+            snprintf(pbuf, sizeof(pbuf), " __pf%u", (unsigned)i);
+            ChValue ps = ch_gc_intern_symbol_cstr(gc, pbuf);
+            params = append_one(gc, params, ps);
+            body_args = append_one(gc, body_args, ps);
+        }
+        for (size_t fi = 0; fi < nfields; fi++) {
+            ChValue fs = ch_make_pointer(&field_names[fi]->header);
+            params = append_one(gc, params, fs);
+            body_args = append_one(gc, body_args, fs);
+        }
+        ChValue body = ch_gc_cons(gc, mr_sym, body_args);
+        ChValue lam = list3(gc, lambda_sym, params, body);
+        ChValue let_expr = list3(gc, let_sym, list1(gc, list2(gc, rt_local, rt_name)), lam);
+        forms = append_one(gc, forms, list3(gc, define_sym, ch_make_pointer(&ctor_sym->header), let_expr));
+        ch_gc_pop_n(gc, 2);
+    }
+
+    /* predicate */
+    {
+        ChValue v_sym = ch_gc_intern_symbol_cstr(gc, "v");
+        ChValue body = list3(gc, rp_sym, v_sym, rt_local);
+        ChValue lam = list3(gc, lambda_sym, list1(gc, v_sym), body);
+        ChValue let_expr = list3(gc, let_sym, list1(gc, list2(gc, rt_local, rt_name)), lam);
+        forms = append_one(gc, forms, list3(gc, define_sym, ch_make_pointer(&pred_sym->header), let_expr));
+    }
+
+    for (size_t fi = 0; fi < nfields; fi++) {
+        ChValue p_sym = ch_gc_intern_symbol_cstr(gc, "p");
+        ChValue idx = ch_make_fixnum((int64_t)parent_n + (int64_t)fi);
+        ChValue body = list4(gc, rr_sym, p_sym, idx, rt_local);
+        ChValue lam = list3(gc, lambda_sym, list1(gc, p_sym), body);
+        ChValue let_expr = list3(gc, let_sym, list1(gc, list2(gc, rt_local, rt_name)), lam);
+        forms = append_one(gc, forms, list3(gc, define_sym, ch_make_pointer(&acc_syms[fi]->header), let_expr));
+        if (mut_syms[fi]) {
+            ChValue v_sym = ch_gc_intern_symbol_cstr(gc, "v");
+            ChValue set_body = list1(gc, p_sym);
+            set_body = append_one(gc, set_body, idx);
+            set_body = append_one(gc, set_body, v_sym);
+            set_body = append_one(gc, set_body, rt_local);
+            set_body = ch_gc_cons(gc, rs_sym, set_body);
+            ChValue set_lam = list3(gc, lambda_sym, list2(gc, p_sym, v_sym), set_body);
+            ChValue set_let = list3(gc, let_sym, list1(gc, list2(gc, rt_local, rt_name)), set_lam);
+            forms = append_one(gc, forms, list3(gc, define_sym, ch_make_pointer(&mut_syms[fi]->header), set_let));
+        }
+    }
+
+    *out = ch_gc_cons(gc, begin_sym, forms);
+    ch_gc_pop_n(gc, 5);
+    return CH_EXPAND_OK;
+}
+
 static ChExpandStatus expand_define_record_type(ChVM *vm, ChValue args, ChValue *out, char *err,
                                                size_t err_len) {
     if (looks_like_r6rs_clause_syntax(args)) {
-        snprintf(err, err_len, "define-record-type: R6RS clause syntax not yet supported");
-        return CH_EXPAND_ERROR;
+        return expand_define_record_type_r6rs(vm, args, out, err, err_len);
     }
     /* (name (ctor f ...) pred (field acc [mut]) ...) */
     if (!ch_is_pair(args) || !ch_is_symbol(ch_car(args))) {
@@ -1570,6 +2001,12 @@ static ChExpandStatus expand_form(ChVM *vm, ChValue expr, ChValue *out, char *er
         }
         ChTransformer *tr = ch_vm_lookup_macro(vm, ch_as_symbol(head));
         if (tr) {
+            /* Macros with literals need use-site lexical binding info
+             * (R7RS §4.3.2). Top-level expand has no local contour — leave
+             * these uses for the compiler's ch_expand_macro_checked path. */
+            if (tr->literal_count > 0) {
+                return expand_list(vm, expr, out, err, err_len, depth);
+            }
             ChValue expanded = CH_NIL;
             ch_gc_push(&vm->gc, &expanded);
             if (ch_expand_macro(vm, tr, expr, &expanded, err, err_len) != CH_EXPAND_OK) {

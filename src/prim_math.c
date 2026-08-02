@@ -6,6 +6,7 @@
 #include "chaaya/rational.h"
 #include "chaaya/reader.h"
 
+#include <complex.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -664,6 +665,12 @@ static ChValue prim_expt(ChVM *vm, ChValue *args, int nargs) {
         /* Complex expt: defer — error for MVP unless both real */
         snprintf(vm->error, sizeof(vm->error), "expt: complex exponents not supported");
         return CH_UNDEFINED;
+    }
+    /* Negative real base with a non-integer real exponent → principal complex
+     * value (R7RS / IEEE). C pow() yields NaN on that domain. */
+    if (a < 0.0 && b != trunc(b)) {
+        double complex r = cpow(a + 0.0 * I, b + 0.0 * I);
+        return ch_make_complex(&vm->gc, creal(r), cimag(r));
     }
     return ch_make_flonum(pow(a, b));
 }

@@ -710,12 +710,19 @@ static ChCompileStatus compile_define(ChCompiler *c, ChFuncCompiler *fc, ChValue
         }
         ensure_temps_from(fc);
         int local = resolve_local(fc, name);
-        if (compile_expr(c, fc, val_expr, local_reg(fc, local), false) != CH_COMPILE_OK) {
+        uint8_t lreg = local_reg(fc, local);
+        if (compile_expr(c, fc, val_expr, lreg, false) != CH_COMPILE_OK) {
             return CH_COMPILE_ERROR;
         }
-        emit_byte(fc, CH_OP_MOVE);
-        emit_byte(fc, dst);
-        emit_byte(fc, local_reg(fc, local));
+        /* begin's shared body_dst is allocated before locals and often aliases
+         * local 0. Copying the define's value there would clobber an earlier
+         * local that open upvalues still point at. Define's value is discarded
+         * for non-final body forms, so skip the move when dst is another local. */
+        if (dst == lreg || dst >= (uint8_t)fc->local_count) {
+            emit_byte(fc, CH_OP_MOVE);
+            emit_byte(fc, dst);
+            emit_byte(fc, lreg);
+        }
         return CH_COMPILE_OK;
     }
 
@@ -749,6 +756,7 @@ static ChCompileStatus compile_define(ChCompiler *c, ChFuncCompiler *fc, ChValue
 }
 
 static ChCompileStatus finish_function(ChCompiler *c, ChFuncCompiler *fc);
+static int body_to_letrec_star(ChCompiler *c, ChValue body, ChValue *out);
 
 static ChCompileStatus compile_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue args, uint8_t dst) {
     if (!ch_is_pair(args) || !ch_is_pair(ch_cdr(args))) {
@@ -793,6 +801,34 @@ static ChCompileStatus compile_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue
     child.next_reg = (uint8_t)child.local_count;
     child.max_regs = child.next_reg;
 
+    /* R7RS internal defines → letrec* (also splices leading begin of defines
+     * from define-record-type expansion). */
+    {
+        ChValue rewritten = CH_NIL;
+        ch_gc_push(&c->vm->gc, &rewritten);
+        int rw = body_to_letrec_star(c, body, &rewritten);
+        if (rw < 0) {
+            ch_gc_pop(&c->vm->gc);
+            fc_discard(c, &child);
+            return CH_COMPILE_ERROR;
+        }
+        if (rw > 0) {
+            ensure_temps_from(&child);
+            uint8_t body_dst = alloc_reg(&child);
+            ChCompileStatus st = compile_expr(c, &child, rewritten, body_dst, true);
+            ch_gc_pop(&c->vm->gc);
+            if (st != CH_COMPILE_OK) {
+                fc_discard(c, &child);
+                return CH_COMPILE_ERROR;
+            }
+            emit_byte(&child, CH_OP_RETURN);
+            emit_byte(&child, body_dst);
+            end_scope(&child);
+            goto lambda_finish;
+        }
+        ch_gc_pop(&c->vm->gc);
+    }
+
     ensure_temps_from(&child);
     uint8_t body_dst = alloc_reg(&child);
     if (compile_begin(c, &child, body, body_dst, true) != CH_COMPILE_OK) {
@@ -803,6 +839,7 @@ static ChCompileStatus compile_lambda(ChCompiler *c, ChFuncCompiler *fc, ChValue
     emit_byte(&child, body_dst);
     end_scope(&child);
 
+lambda_finish:
     if (finish_function(c, &child) != CH_COMPILE_OK) {
         fc_discard(c, &child);
         return CH_COMPILE_ERROR;
@@ -839,7 +876,8 @@ static ChCompileStatus compile_case_lambda(ChCompiler *c, ChFuncCompiler *fc, Ch
     ChValue cond_sym = ch_gc_intern_symbol_cstr(gc, "cond");
     ChValue eq_sym = ch_gc_intern_symbol_cstr(gc, "=");
     ChValue ge_sym = ch_gc_intern_symbol_cstr(gc, ">=");
-    ChValue length_sym = ch_gc_intern_symbol_cstr(gc, "length");
+    /* %length is not a (scheme base) export — safe from user shadowing (#1714). */
+    ChValue length_sym = ch_gc_intern_symbol_cstr(gc, "%length");
     ChValue list_ref_sym = ch_gc_intern_symbol_cstr(gc, "list-ref");
     ChValue apply_sym = ch_gc_intern_symbol_cstr(gc, "apply");
     ChValue else_sym = ch_gc_intern_symbol_cstr(gc, "else");
@@ -1619,6 +1657,104 @@ static bool is_define_form(ChValue expr) {
            strcmp(ch_symbol_basename(ch_as_symbol(ch_car(expr))), "define") == 0;
 }
 
+static bool is_begin_form(ChValue expr) {
+    return ch_is_pair(expr) && ch_is_symbol(ch_car(expr)) &&
+           strcmp(ch_symbol_basename(ch_as_symbol(ch_car(expr))), "begin") == 0;
+}
+
+static int parse_define_binding(ChCompiler *c, ChValue def, ChSymbol **name_out, ChValue *init_out) {
+    ChValue drest = ch_cdr(def);
+    if (!ch_is_pair(drest)) {
+        fail(c, "define: bad syntax");
+        return -1;
+    }
+    ChValue name_form = ch_car(drest);
+    ChValue init_forms = ch_cdr(drest);
+    if (ch_is_symbol(name_form)) {
+        if (!ch_is_pair(init_forms) || !ch_is_nil(ch_cdr(init_forms))) {
+            fail(c, "define: bad syntax");
+            return -1;
+        }
+        *name_out = ch_as_symbol(name_form);
+        *init_out = ch_car(init_forms);
+        return 0;
+    }
+    if (ch_is_pair(name_form) && ch_is_symbol(ch_car(name_form))) {
+        *name_out = ch_as_symbol(ch_car(name_form));
+        ChValue lambda_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "lambda");
+        *init_out = ch_gc_cons(&c->vm->gc, lambda_sym,
+                               ch_gc_cons(&c->vm->gc, ch_cdr(name_form), init_forms));
+        return 0;
+    }
+    fail(c, "define: bad syntax");
+    return -1;
+}
+
+/* Rewrite leading internal defines (splicing begin) to letrec*. Returns 1 and
+ * sets *out when rewritten, 0 when there are no leading defines, -1 on error. */
+static int body_to_letrec_star(ChCompiler *c, ChValue body, ChValue *out) {
+    ChValue work = body;
+    ChValue defs = CH_NIL;
+    ch_gc_push(&c->vm->gc, &work);
+    ch_gc_push(&c->vm->gc, &defs);
+
+    for (;;) {
+        while (ch_is_pair(work) && is_begin_form(ch_car(work))) {
+            ChValue bargs = ch_cdr(ch_car(work));
+            ChValue rest = ch_cdr(work);
+            if (ch_is_nil(bargs)) {
+                work = rest;
+                continue;
+            }
+            /* Append rest onto a copy of begin's args. */
+            ChValue rev = CH_NIL;
+            ch_gc_push(&c->vm->gc, &rev);
+            for (ChValue p = bargs; ch_is_pair(p); p = ch_cdr(p)) {
+                rev = ch_gc_cons(&c->vm->gc, ch_car(p), rev);
+            }
+            ChValue spliced = rest;
+            ch_gc_push(&c->vm->gc, &spliced);
+            while (ch_is_pair(rev)) {
+                spliced = ch_gc_cons(&c->vm->gc, ch_car(rev), spliced);
+                rev = ch_cdr(rev);
+            }
+            work = spliced;
+            ch_gc_pop_n(&c->vm->gc, 2);
+        }
+        if (!ch_is_pair(work) || !is_define_form(ch_car(work))) {
+            break;
+        }
+        ChSymbol *name = NULL;
+        ChValue init = CH_NIL;
+        ch_gc_push(&c->vm->gc, &init);
+        if (parse_define_binding(c, ch_car(work), &name, &init) != 0) {
+            ch_gc_pop_n(&c->vm->gc, 3);
+            return -1;
+        }
+        ChValue bind = ch_gc_cons(&c->vm->gc, ch_make_pointer(&name->header),
+                                  ch_gc_cons(&c->vm->gc, init, CH_NIL));
+        defs = ch_gc_cons(&c->vm->gc, bind, defs);
+        ch_gc_pop(&c->vm->gc);
+        work = ch_cdr(work);
+    }
+
+    if (ch_is_nil(defs)) {
+        ch_gc_pop_n(&c->vm->gc, 2);
+        return 0;
+    }
+
+    ChValue rdefs = CH_NIL;
+    ch_gc_push(&c->vm->gc, &rdefs);
+    while (ch_is_pair(defs)) {
+        rdefs = ch_gc_cons(&c->vm->gc, ch_car(defs), rdefs);
+        defs = ch_cdr(defs);
+    }
+    ChValue letrec_star = ch_gc_intern_symbol_cstr(&c->vm->gc, "letrec*");
+    *out = ch_gc_cons(&c->vm->gc, letrec_star, ch_gc_cons(&c->vm->gc, rdefs, work));
+    ch_gc_pop_n(&c->vm->gc, 3);
+    return 1;
+}
+
 static ChCompileStatus compile_let(ChCompiler *c, ChFuncCompiler *fc, ChValue args, uint8_t dst,
                                    bool tail) {
     if (!ch_is_pair(args) || !ch_is_pair(ch_cdr(args))) {
@@ -1678,55 +1814,23 @@ static ChCompileStatus compile_let(ChCompiler *c, ChFuncCompiler *fc, ChValue ar
     ch_gc_push(&c->vm->gc, &body);
 
     /* R7RS: leading internal define in let → nested letrec*. */
-    if (ch_is_pair(body) && is_define_form(ch_car(body))) {
-        ChValue defs = CH_NIL;
-        ch_gc_push(&c->vm->gc, &defs);
-        while (ch_is_pair(body) && is_define_form(ch_car(body))) {
-            ChValue def = ch_car(body);
-            ChValue drest = ch_cdr(def);
-            if (!ch_is_pair(drest)) {
-                ch_gc_pop_n(&c->vm->gc, 3);
-                return fail(c, "define: bad syntax");
-            }
-            ChValue name_form = ch_car(drest);
-            ChValue init_forms = ch_cdr(drest);
-            ChSymbol *name = NULL;
-            ChValue init = CH_NIL;
-            if (ch_is_symbol(name_form)) {
-                name = ch_as_symbol(name_form);
-                if (!ch_is_pair(init_forms) || !ch_is_nil(ch_cdr(init_forms))) {
-                    ch_gc_pop(&c->vm->gc);
-                    return fail(c, "define: bad syntax");
-                }
-                init = ch_car(init_forms);
-            } else if (ch_is_pair(name_form) && ch_is_symbol(ch_car(name_form))) {
-                name = ch_as_symbol(ch_car(name_form));
-                ChValue lambda_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "lambda");
-                init = ch_gc_cons(&c->vm->gc, lambda_sym,
-                                  ch_gc_cons(&c->vm->gc, ch_cdr(name_form), init_forms));
-            } else {
-                ch_gc_pop_n(&c->vm->gc, 3);
-                return fail(c, "define: bad syntax");
-            }
-            ChValue bind = ch_gc_cons(&c->vm->gc, ch_make_pointer(&name->header),
-                                      ch_gc_cons(&c->vm->gc, init, CH_NIL));
-            defs = ch_gc_cons(&c->vm->gc, bind, defs);
-            body = ch_cdr(body);
+    {
+        ChValue inner = CH_NIL;
+        ch_gc_push(&c->vm->gc, &inner);
+        int rw = body_to_letrec_star(c, body, &inner);
+        if (rw < 0) {
+            ch_gc_pop_n(&c->vm->gc, 3);
+            return CH_COMPILE_ERROR;
         }
-        ChValue rdefs = CH_NIL;
-        ch_gc_push(&c->vm->gc, &rdefs);
-        while (ch_is_pair(defs)) {
-            rdefs = ch_gc_cons(&c->vm->gc, ch_car(defs), rdefs);
-            defs = ch_cdr(defs);
+        if (rw > 0) {
+            ChValue let_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "let");
+            ChValue form = ch_gc_cons(&c->vm->gc, let_sym,
+                                      ch_gc_cons(&c->vm->gc, bindings,
+                                                 ch_gc_cons(&c->vm->gc, inner, CH_NIL)));
+            ch_gc_pop_n(&c->vm->gc, 3);
+            return compile_expr(c, fc, form, dst, tail);
         }
-        ChValue letrec_star = ch_gc_intern_symbol_cstr(&c->vm->gc, "letrec*");
-        ChValue inner = ch_gc_cons(&c->vm->gc, letrec_star, ch_gc_cons(&c->vm->gc, rdefs, body));
-        ChValue let_sym = ch_gc_intern_symbol_cstr(&c->vm->gc, "let");
-        ChValue form = ch_gc_cons(&c->vm->gc, let_sym,
-                                  ch_gc_cons(&c->vm->gc, bindings,
-                                             ch_gc_cons(&c->vm->gc, inner, CH_NIL)));
-        ch_gc_pop_n(&c->vm->gc, 4);
-        return compile_expr(c, fc, form, dst, tail);
+        ch_gc_pop(&c->vm->gc);
     }
 
     ChValue params = CH_NIL;
@@ -2888,14 +2992,7 @@ ChCompileStatus ch_compile_toplevel(ChCompiler *c, ChValue expr, ChFunction **ou
     c->error[0] = '\0';
     size_t compile_base = c->vm->gc.root_count;
 
-    /* Root globals/macros before any allocation — first GC must see them. */
-    for (size_t i = 0; i < c->vm->global_count; i++) {
-        ch_gc_push(&c->vm->gc, &c->vm->globals[i].value);
-    }
-    for (size_t i = 0; i < c->vm->macro_count; i++) {
-        ch_gc_push(&c->vm->gc, &c->vm->macros[i].transformer);
-    }
-
+    /* Globals/macros are marked via ch_vm_mark_gc_roots; only root locals. */
     ChValue expr_r = expr;
     ch_gc_push(&c->vm->gc, &expr_r);
     {
@@ -2910,16 +3007,6 @@ ChCompileStatus ch_compile_toplevel(ChCompiler *c, ChValue expr, ChFunction **ou
         expr_r = expanded;
         ch_gc_pop(&c->vm->gc);
     }
-
-    /* Expansion / define-syntax may grow globals or macros — re-root the full set. */
-    ch_gc_pop_to(&c->vm->gc, compile_base);
-    for (size_t i = 0; i < c->vm->global_count; i++) {
-        ch_gc_push(&c->vm->gc, &c->vm->globals[i].value);
-    }
-    for (size_t i = 0; i < c->vm->macro_count; i++) {
-        ch_gc_push(&c->vm->gc, &c->vm->macros[i].transformer);
-    }
-    ch_gc_push(&c->vm->gc, &expr_r);
 
     ChValue fn_v = ch_gc_make_function(&c->vm->gc);
     ch_gc_push(&c->vm->gc, &fn_v);

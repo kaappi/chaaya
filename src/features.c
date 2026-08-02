@@ -16,6 +16,8 @@
 static const char *const k_features[] = {
     "r7rs",
     "chaaya",
+    /* Kaappi-compatible cond-expand id for shared deferred/portable suites. */
+    "kaappi",
     "chaaya-fibers",
     "chaaya-ffi",
     "ieee-float",

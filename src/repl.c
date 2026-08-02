@@ -23,7 +23,6 @@
 
 static ChVM *g_repl_vm = NULL; /* for completion callback */
 
-static size_t push_repl_vm_roots(ChVM *vm);
 static ChReadStatus read_repl_datum(ChVM *vm, ChReader *reader, ChValue *out);
 
 int ch_repl_paren_depth(const char *s) {
@@ -168,9 +167,7 @@ static int repl_import_spec(ChVM *vm, const char *spec_src) {
         return -1;
     }
 
-    size_t sticky_roots = push_repl_vm_roots(vm);
     if (ch_handle_import(vm, import_root) != 0) {
-        ch_gc_pop_n(&vm->gc, sticky_roots);
         if (vm->error[0]) {
             fprintf(stderr, "import error: %s\n", vm->error);
         } else {
@@ -179,7 +176,7 @@ static int repl_import_spec(ChVM *vm, const char *spec_src) {
         ch_gc_pop_n(&vm->gc, 2);
         return -1;
     }
-    ch_gc_pop_n(&vm->gc, sticky_roots + 2);
+    ch_gc_pop_n(&vm->gc, 2);
     return 0;
 }
 
@@ -215,22 +212,10 @@ static int repl_dis_expr(ChVM *vm, const char *expr_src) {
     return -1;
 }
 
-static size_t push_repl_vm_roots(ChVM *vm) {
-    for (size_t i = 0; i < vm->global_count; i++) {
-        ch_gc_push(&vm->gc, &vm->globals[i].value);
-    }
-    for (size_t i = 0; i < vm->macro_count; i++) {
-        ch_gc_push(&vm->gc, &vm->macros[i].transformer);
-    }
-    size_t lib_roots = ch_library_push_gc_roots(vm);
-    return vm->global_count + vm->macro_count + lib_roots;
-}
-
 static ChReadStatus read_repl_datum(ChVM *vm, ChReader *reader, ChValue *out) {
-    size_t sticky_roots = push_repl_vm_roots(vm);
-    ChReadStatus st = ch_read_datum(reader, out);
-    ch_gc_pop_n(&vm->gc, sticky_roots);
-    return st;
+    /* Globals/macros/libraries are marked during GC; no sticky root flood. */
+    (void)vm;
+    return ch_read_datum(reader, out);
 }
 
 static int repl_expand_expr(ChVM *vm, const char *expr_src) {
@@ -254,15 +239,12 @@ static int repl_expand_expr(ChVM *vm, const char *expr_src) {
 
         ChValue expanded = CH_NIL;
         ch_gc_push(&vm->gc, &expanded);
-        size_t sticky_roots = push_repl_vm_roots(vm);
         char err[256];
         if (ch_expand_toplevel(vm, form, &expanded, err, sizeof(err)) != CH_EXPAND_OK) {
-            ch_gc_pop_n(&vm->gc, sticky_roots);
             fprintf(stderr, "expand error: %s\n", err);
             ch_gc_pop_n(&vm->gc, 2);
             return -1;
         }
-        ch_gc_pop_n(&vm->gc, sticky_roots);
         if (expanded != CH_VOID) {
             ch_print_value(stdout, expanded, false);
             fputc('\n', stdout);

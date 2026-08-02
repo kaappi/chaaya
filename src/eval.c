@@ -184,18 +184,12 @@ int ch_eval_source(ChVM *vm, const char *source, size_t len, int print_results) 
     ch_reader_init(&reader, &vm->gc, source, len);
 
     for (;;) {
-        size_t base = vm->gc.root_count;
         ChValue expr = CH_NIL;
         ch_gc_push(&vm->gc, &expr);
-        for (size_t i = 0; i < vm->global_count; i++) {
-            ch_gc_push(&vm->gc, &vm->globals[i].value);
-        }
-        for (size_t i = 0; i < vm->macro_count; i++) {
-            ch_gc_push(&vm->gc, &vm->macros[i].transformer);
-        }
-        (void)ch_library_push_gc_roots(vm);
+        /* Globals/macros/libraries are marked via ch_vm_mark_gc_roots /
+         * ch_library_mark_gc_roots — do not push them all (hits CH_GC_ROOT_MAX
+         * once several libraries each hold a full (scheme base) import). */
         ChReadStatus rs = ch_read_datum(&reader, &expr);
-        ch_gc_pop_to(&vm->gc, base + 1);
         if (rs == CH_READ_EOF) {
             ch_gc_pop(&vm->gc);
             break;
@@ -244,18 +238,10 @@ int ch_eval_file(ChVM *vm, const char *path, ChValue env_or_void, ChValue *last_
 
     int rc = 0;
     for (;;) {
-        size_t base = vm->gc.root_count;
         ChValue expr = CH_NIL;
         ch_gc_push(&vm->gc, &expr);
-        for (size_t i = 0; i < vm->global_count; i++) {
-            ch_gc_push(&vm->gc, &vm->globals[i].value);
-        }
-        for (size_t i = 0; i < vm->macro_count; i++) {
-            ch_gc_push(&vm->gc, &vm->macros[i].transformer);
-        }
-        (void)ch_library_push_gc_roots(vm);
+        /* See ch_eval_source: VM/library mark roots cover globals and libs. */
         ChReadStatus rs = ch_read_datum(&reader, &expr);
-        ch_gc_pop_to(&vm->gc, base + 1);
         if (rs == CH_READ_EOF) {
             ch_gc_pop(&vm->gc);
             break;

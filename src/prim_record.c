@@ -10,8 +10,16 @@ static void define_prim(ChVM *vm, const char *name, ChNativeFn fn, int arity, in
     ch_vm_define_global(vm, idx, nv);
 }
 
+static int record_type_is_a(ChRecordType *rt, ChRecordType *want) {
+    for (ChRecordType *p = rt; p; p = p->parent) {
+        if (p == want) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static ChValue prim_make_record_type(ChVM *vm, ChValue *args, int nargs) {
-    (void)nargs;
     if (!ch_is_string(args[0])) {
         snprintf(vm->error, sizeof(vm->error), "%%make-record-type: expected string");
         return CH_UNDEFINED;
@@ -24,6 +32,18 @@ static ChValue prim_make_record_type(ChVM *vm, ChValue *args, int nargs) {
     if (n < 0 || n > CH_RECORD_MAX_FIELDS) {
         snprintf(vm->error, sizeof(vm->error), "%%make-record-type: bad field count");
         return CH_UNDEFINED;
+    }
+    if (nargs >= 3) {
+        if (!ch_is_record_type(args[2])) {
+            snprintf(vm->error, sizeof(vm->error), "%%make-record-type: expected parent record type");
+            return CH_UNDEFINED;
+        }
+        ChValue rt = ch_gc_make_record_type_ext(&vm->gc, args[0], (uint16_t)n, ch_as_record_type(args[2]));
+        if (rt == CH_UNDEFINED) {
+            snprintf(vm->error, sizeof(vm->error), "%%make-record-type: too many fields");
+            return CH_UNDEFINED;
+        }
+        return rt;
     }
     return ch_gc_make_record_type(&vm->gc, args[0], (uint16_t)n);
 }
@@ -51,7 +71,8 @@ static ChValue prim_record_p(ChVM *vm, ChValue *args, int nargs) {
     if (!ch_is_record(args[0])) {
         return CH_FALSE;
     }
-    return ch_as_record(args[0])->rtype == ch_as_record_type(args[1]) ? CH_TRUE : CH_FALSE;
+    ChRecordType *want = ch_as_record_type(args[1]);
+    return record_type_is_a(ch_as_record(args[0])->rtype, want) ? CH_TRUE : CH_FALSE;
 }
 
 static ChValue prim_record_ref(ChVM *vm, ChValue *args, int nargs) {
@@ -61,7 +82,7 @@ static ChValue prim_record_ref(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
     ChRecordType *rt = ch_as_record_type(args[2]);
-    if (!ch_is_record(args[0]) || ch_as_record(args[0])->rtype != rt) {
+    if (!ch_is_record(args[0]) || !record_type_is_a(ch_as_record(args[0])->rtype, rt)) {
         snprintf(vm->error, sizeof(vm->error), "%%record-ref: wrong record type");
         return CH_UNDEFINED;
     }
@@ -85,7 +106,7 @@ static ChValue prim_record_set(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
     ChRecordType *rt = ch_as_record_type(args[3]);
-    if (!ch_is_record(args[0]) || ch_as_record(args[0])->rtype != rt) {
+    if (!ch_is_record(args[0]) || !record_type_is_a(ch_as_record(args[0])->rtype, rt)) {
         snprintf(vm->error, sizeof(vm->error), "%%record-set!: wrong record type");
         return CH_UNDEFINED;
     }
@@ -105,7 +126,7 @@ static ChValue prim_record_set(ChVM *vm, ChValue *args, int nargs) {
 }
 
 void ch_register_record_primitives(ChVM *vm) {
-    define_prim(vm, "%make-record-type", prim_make_record_type, 2, 2);
+    define_prim(vm, "%make-record-type", prim_make_record_type, -1, 2);
     define_prim(vm, "%make-record", prim_make_record, -1, 1);
     define_prim(vm, "%record?", prim_record_p, 2, 2);
     define_prim(vm, "%record-ref", prim_record_ref, 3, 3);
