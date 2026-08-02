@@ -33,6 +33,7 @@ add_library(chaaya_core STATIC
   src/environment.c
   src/library.c
   src/features.c
+  src/diagnostics.c
   src/fiber.c
   src/reactor.c
   src/thread.c
@@ -490,6 +491,45 @@ add_test(NAME cli_check_compile_error
     -P ${CMAKE_SOURCE_DIR}/tests/cli/expect_check_compile_error.cmake
 )
 
+add_test(NAME cli_diagnostics_json
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -DINPUT=${CMAKE_SOURCE_DIR}/tests/cli/check_compile_error.scm
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/run_diagnostics_json.cmake
+)
+
+add_test(NAME cli_explain
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/run_explain.cmake
+)
+
+add_test(NAME cli_ir
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -DINPUT=${CMAKE_SOURCE_DIR}/tests/cli/check_ok.scm
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/run_ir.cmake
+)
+
+add_test(NAME cli_doctor
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/run_doctor.cmake
+)
+
+add_test(NAME cli_cache_status
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/run_cache_status.cmake
+)
+
+add_test(NAME cli_cache_roundtrip
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -DINPUT=${CMAKE_SOURCE_DIR}/tests/cli/cache_roundtrip.scm
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/run_cache_roundtrip.cmake
+)
+
 add_test(NAME cli_fmt_check
   COMMAND ${CMAKE_COMMAND}
     -DCHAAYA=$<TARGET_FILE:chaaya>
@@ -497,13 +537,15 @@ add_test(NAME cli_fmt_check
     -P ${CMAKE_SOURCE_DIR}/tests/cli/run_fmt_check.cmake
 )
 
-add_test(NAME cli_nyi_compile
+add_test(NAME cli_compile_mvp
   COMMAND ${CMAKE_COMMAND}
     -DCHAAYA=$<TARGET_FILE:chaaya>
+    -DINPUT=${CMAKE_SOURCE_DIR}/tests/cli/check_ok.scm
+    -DOUTPUT=${CMAKE_BINARY_DIR}/cli_compile_out
     -P ${CMAKE_SOURCE_DIR}/tests/cli/expect_nyi_compile.cmake
 )
 
-add_test(NAME cli_nyi_native
+add_test(NAME cli_native_mvp
   COMMAND ${CMAKE_COMMAND}
     -DCHAAYA=$<TARGET_FILE:chaaya>
     -DINPUT=${CMAKE_SOURCE_DIR}/tests/cli/check_ok.scm
@@ -520,6 +562,12 @@ add_test(NAME cli_lsp_initialize_shutdown
   COMMAND ${CMAKE_COMMAND}
     -DCHAAYA=$<TARGET_FILE:chaaya>
     -P ${CMAKE_SOURCE_DIR}/tests/cli/run_lsp_init_shutdown.cmake
+)
+
+add_test(NAME cli_lsp_didopen_diagnostics
+  COMMAND ${CMAKE_COMMAND}
+    -DCHAAYA=$<TARGET_FILE:chaaya>
+    -P ${CMAKE_SOURCE_DIR}/tests/cli/run_lsp_diagnostics.cmake
 )
 
 add_test(NAME cli_stdin

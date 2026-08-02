@@ -1,6 +1,161 @@
 #include "chaaya/ir.h"
 
+#include "chaaya/printer.h"
+#include "chaaya/value.h"
+
 #include <stdlib.h>
+#include <string.h>
+
+static const char *ir_kind_name(ChIrKind kind) {
+    switch (kind) {
+    case CH_IR_VOID:
+        return "void";
+    case CH_IR_LITERAL:
+        return "literal";
+    case CH_IR_QUOTE:
+        return "quote";
+    case CH_IR_VAR:
+        return "var";
+    case CH_IR_IF:
+        return "if";
+    case CH_IR_LAMBDA:
+        return "lambda";
+    case CH_IR_SEQ:
+        return "seq";
+    case CH_IR_CALL:
+        return "call";
+    case CH_IR_SET:
+        return "set!";
+    case CH_IR_DEFINE:
+        return "define";
+    case CH_IR_DEFINE_SYNTAX:
+        return "define-syntax";
+    case CH_IR_AND:
+        return "and";
+    case CH_IR_OR:
+        return "or";
+    case CH_IR_PRIM_CALL:
+        return "prim";
+    case CH_IR_RAW:
+        return "raw";
+    }
+    return "?";
+}
+
+static void print_indent(FILE *out, int indent) {
+    for (int i = 0; i < indent; i++) {
+        fputc(' ', out);
+    }
+}
+
+void ch_ir_print(FILE *out, const ChIrNode *node, int indent) {
+    if (!out) {
+        return;
+    }
+    if (!node) {
+        print_indent(out, indent);
+        fputs("(null)\n", out);
+        return;
+    }
+    print_indent(out, indent);
+    fprintf(out, "(%s", ir_kind_name(node->kind));
+    if (node->tail_position) {
+        fputs(" tail", out);
+    }
+    switch (node->kind) {
+    case CH_IR_VOID:
+        fputs(")\n", out);
+        break;
+    case CH_IR_LITERAL:
+        fputc(' ', out);
+        ch_print_value(out, node->as.literal, false);
+        fputs(")\n", out);
+        break;
+    case CH_IR_QUOTE:
+        fputc(' ', out);
+        ch_print_value(out, node->as.quoted, false);
+        fputs(")\n", out);
+        break;
+    case CH_IR_VAR:
+        fprintf(out, " %s)\n", node->as.var ? node->as.var->name : "?");
+        break;
+    case CH_IR_IF:
+        fputs("\n", out);
+        ch_ir_print(out, node->as.if_expr.test, indent + 2);
+        ch_ir_print(out, node->as.if_expr.consequent, indent + 2);
+        if (node->as.if_expr.has_alternate) {
+            ch_ir_print(out, node->as.if_expr.alternate, indent + 2);
+        }
+        print_indent(out, indent);
+        fputs(")\n", out);
+        break;
+    case CH_IR_LAMBDA:
+        fputc(' ', out);
+        ch_print_value(out, node->as.lambda.params, false);
+        fputs("\n", out);
+        for (size_t i = 0; i < node->as.lambda.body_count; i++) {
+            ch_ir_print(out, node->as.lambda.body[i], indent + 2);
+        }
+        print_indent(out, indent);
+        fputs(")\n", out);
+        break;
+    case CH_IR_SEQ:
+    case CH_IR_AND:
+    case CH_IR_OR: {
+        const ChIrNodeArray *arr =
+            node->kind == CH_IR_SEQ     ? &node->as.seq
+            : node->kind == CH_IR_AND   ? &node->as.and_expr
+                                        : &node->as.or_expr;
+        fputs("\n", out);
+        for (size_t i = 0; i < arr->count; i++) {
+            ch_ir_print(out, arr->items[i], indent + 2);
+        }
+        print_indent(out, indent);
+        fputs(")\n", out);
+        break;
+    }
+    case CH_IR_CALL:
+        fputs("\n", out);
+        ch_ir_print(out, node->as.call.callee, indent + 2);
+        for (size_t i = 0; i < node->as.call.arg_count; i++) {
+            ch_ir_print(out, node->as.call.args[i], indent + 2);
+        }
+        print_indent(out, indent);
+        fputs(")\n", out);
+        break;
+    case CH_IR_SET:
+        fprintf(out, " %s\n", node->as.set_expr.name ? node->as.set_expr.name->name : "?");
+        ch_ir_print(out, node->as.set_expr.value, indent + 2);
+        print_indent(out, indent);
+        fputs(")\n", out);
+        break;
+    case CH_IR_DEFINE:
+        fputc(' ', out);
+        ch_print_value(out, node->as.define_expr.target, false);
+        fputs("\n", out);
+        ch_ir_print(out, node->as.define_expr.value, indent + 2);
+        print_indent(out, indent);
+        fputs(")\n", out);
+        break;
+    case CH_IR_DEFINE_SYNTAX:
+        fputs(" ...)\n", out);
+        break;
+    case CH_IR_PRIM_CALL:
+        fprintf(out, " %s\n",
+                node->as.prim_call.symbol ? node->as.prim_call.symbol->name : "?");
+        for (size_t i = 0; i < node->as.prim_call.arg_count; i++) {
+            ch_ir_print(out, node->as.prim_call.args[i], indent + 2);
+        }
+        print_indent(out, indent);
+        fputs(")\n", out);
+        break;
+    case CH_IR_RAW:
+        fputc(' ', out);
+        ch_print_value(out, node->as.raw.expr, false);
+        fputs(")\n", out);
+        break;
+    }
+}
 
 ChIrNode *ch_ir_new_node(ChIrKind kind) {
     ChIrNode *node = (ChIrNode *)calloc(1, sizeof(*node));

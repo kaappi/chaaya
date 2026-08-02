@@ -21,6 +21,9 @@ void ch_reader_init(ChReader *r, ChGC *gc, const char *src, size_t len) {
     r->refill_ctx = NULL;
     r->nesting_depth = 0;
     r->error[0] = '\0';
+    r->error_code = (ChDiagCode)0;
+    r->error_line = 0;
+    r->error_column = 0;
     memset(r->label_set, 0, sizeof(r->label_set));
     for (size_t i = 0; i < CH_READER_MAX_LABELS; i++) {
         r->labels[i] = CH_UNDEFINED;
@@ -34,6 +37,13 @@ void ch_reader_set_refill(ChReader *r, ChReaderRefillFn refill, void *ctx) {
 
 const char *ch_reader_error(const ChReader *r) {
     return r->error;
+}
+
+ChDiagCode ch_reader_error_code(const ChReader *r) {
+    if (r->error_code) {
+        return r->error_code;
+    }
+    return ch_diag_classify_message(r->error, CH_DIAG_STAGE_READ);
 }
 
 static bool try_refill(ChReader *r) {
@@ -207,6 +217,8 @@ static bool is_ident_subsequent(int c) {
 
 static ChReadStatus fail(ChReader *r, const char *msg) {
     snprintf(r->error, sizeof(r->error), "%s", msg);
+    r->error_code = ch_diag_classify_message(msg, CH_DIAG_STAGE_READ);
+    ch_diag_location_from_offset(r->src, r->len, r->pos, &r->error_line, &r->error_column);
     return CH_READ_ERROR;
 }
 
@@ -1322,9 +1334,14 @@ static ChReadStatus read_atom(ChReader *r, ChValue *out) {
         }
         int first = peek(r);
         advance(r);
-        /* Named / hex forms continue with non-delimiter letters/digits. */
+        /* Named / hex forms continue with non-delimiter letters/digits.
+         * A single Unicode scalar (e.g. #\Λ) must consume UTF-8 continuations. */
         if (!is_delim(first) && (isalpha(first) || first == 'x' || first == 'X')) {
             while (!is_delim(peek(r))) {
+                advance(r);
+            }
+        } else if (is_utf8_lead_byte(first)) {
+            while (is_utf8_continuation_byte(peek(r))) {
                 advance(r);
             }
         }

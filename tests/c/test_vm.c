@@ -1,6 +1,16 @@
 #include "test_helpers.h"
 
 #include <stdio.h>
+#include <string.h>
+
+static int g_debug_hits = 0;
+
+static int test_debug_break_hook(ChVM *vm, const char *name) {
+    (void)vm;
+    (void)name;
+    g_debug_hits++;
+    return 0; /* continue */
+}
 
 int main(void) {
     ChVM vm;
@@ -86,6 +96,25 @@ int main(void) {
     CH_CHECK(ch_test_expect_bool(&vm, "(< 1 3 2)", false));
     CH_CHECK(ch_test_expect_bool(&vm, "(= 2 2 2)", true));
     CH_CHECK(ch_test_expect_bool(&vm, "(>= 3 2 2)", true));
+
+    /* Debugger: breakpoint hook fires then continues. */
+    g_debug_hits = 0;
+    {
+        ChValue ignored = CH_VOID;
+        CH_CHECK(ch_test_eval(&vm, "(define (dbg-target n) (+ n 1))", &ignored));
+    }
+    vm.debug_mode = true;
+    vm.breakpoint_count = 1;
+    snprintf(vm.breakpoints[0], sizeof(vm.breakpoints[0]), "dbg-target");
+    vm.debug_break_hook = test_debug_break_hook;
+    CH_CHECK(ch_test_expect_fixnum(&vm, "(dbg-target 41)", 42));
+    if (g_debug_hits < 1) {
+        fprintf(stderr, "expected debug breakpoint hit on dbg-target, got %d\n", g_debug_hits);
+        return 1;
+    }
+    vm.debug_mode = false;
+    vm.breakpoint_count = 0;
+    vm.debug_break_hook = NULL;
 
     ch_vm_deinit(&vm);
     printf("ok\n");

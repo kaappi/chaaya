@@ -119,13 +119,112 @@ static void print_comma_help(void) {
     puts("  ,break <name>     Break when calling the named procedure");
     puts("  ,breakpoints      List active breakpoints");
     puts("  ,delete <name>    Remove a breakpoint");
-    puts("  ,step <expr>       Evaluate with one call trace (preserves breakpoints)");
+    puts("  ,step <expr>      Evaluate; pause on next call (interactive debugger)");
+    puts("  ,continue         Resume from a breakpoint (debug> prompt)");
+    puts("  ,next / ,finish   Step/finish from a breakpoint");
+    puts("  ,backtrace        Show VM call frames at a breakpoint");
+    puts("  ,locals           Show current frame register count");
     puts("  ,gc               Show GC statistics");
     puts("  ,env [prefix]     List defined globals");
     puts("  ,time <expr>      Evaluate and print elapsed milliseconds");
     puts("  ,type <expr>      Evaluate and print result type");
     puts("");
-    puts("Other Kaappi comma-commands are not implemented yet in the bootstrap.");
+    puts("Other Kaappi comma-commands (,profile, ,apropos, …) are not implemented yet.");
+}
+
+static int g_debug_continue = 0;
+static int g_debug_abort = 0;
+
+static void debug_print_backtrace(ChVM *vm) {
+    printf("; backtrace (%zu frame%s):\n", vm->frame_count, vm->frame_count == 1 ? "" : "s");
+    for (size_t i = 0; i < vm->frame_count; i++) {
+        size_t idx = vm->frame_count - 1 - i;
+        ChCallFrame *fr = &vm->frames[idx];
+        const char *name = "<thunk>";
+        if (fr->closure && fr->closure->fn) {
+            /* Try match against globals */
+            ChValue clv = ch_make_pointer(&fr->closure->header);
+            for (size_t g = 0; g < vm->global_count; g++) {
+                if (vm->globals[g].defined && ch_eqv(vm->globals[g].value, clv)) {
+                    name = vm->globals[g].name->name;
+                    break;
+                }
+            }
+        }
+        printf(";   #%zu %s regs=%u\n", i, name, (unsigned)fr->num_regs);
+    }
+}
+
+static int debug_break_hook(ChVM *vm, const char *name) {
+    (void)name;
+    g_debug_continue = 0;
+    g_debug_abort = 0;
+    while (!g_debug_continue && !g_debug_abort) {
+        fputs("debug> ", stdout);
+        fflush(stdout);
+        char line[1024];
+        if (!fgets(line, sizeof(line), stdin)) {
+            g_debug_abort = 1;
+            break;
+        }
+        char *cmd = trim_left(line);
+        size_t L = strlen(cmd);
+        while (L > 0 && (cmd[L - 1] == '\n' || cmd[L - 1] == '\r')) {
+            cmd[--L] = '\0';
+        }
+        if (cmd[0] == '\0' || strcmp(cmd, ",continue") == 0 || strcmp(cmd, ",c") == 0) {
+            g_debug_continue = 1;
+            vm->debug_step_mode = 0;
+            break;
+        }
+        if (strcmp(cmd, ",step") == 0 || strcmp(cmd, ",s") == 0) {
+            vm->debug_step_mode = 1;
+            g_debug_continue = 1;
+            break;
+        }
+        if (strcmp(cmd, ",next") == 0 || strcmp(cmd, ",n") == 0) {
+            vm->debug_step_mode = 1;
+            g_debug_continue = 1;
+            break;
+        }
+        if (strcmp(cmd, ",finish") == 0 || strcmp(cmd, ",out") == 0) {
+            g_debug_continue = 1;
+            vm->debug_step_mode = 0;
+            break;
+        }
+        if (strcmp(cmd, ",backtrace") == 0 || strcmp(cmd, ",bt") == 0) {
+            debug_print_backtrace(vm);
+            continue;
+        }
+        if (strcmp(cmd, ",locals") == 0) {
+            if (vm->frame_count == 0) {
+                puts("; no frames");
+            } else {
+                ChCallFrame *fr = &vm->frames[vm->frame_count - 1];
+                printf("; frame regs=%u base=%zu\n", (unsigned)fr->num_regs, fr->reg_base);
+                for (uint8_t r = 0; r < fr->num_regs && r < 16; r++) {
+                    printf(";   r%u = ", (unsigned)r);
+                    ch_print_value(stdout, vm->regs[fr->reg_base + r], false);
+                    fputc('\n', stdout);
+                }
+            }
+            continue;
+        }
+        if (strcmp(cmd, ",up") == 0 || strcmp(cmd, ",down") == 0) {
+            puts("; frame navigation: use ,backtrace (single-frame focus MVP)");
+            continue;
+        }
+        if (strcmp(cmd, ",quit") == 0 || strcmp(cmd, ",abort") == 0) {
+            g_debug_abort = 1;
+            break;
+        }
+        if (strcmp(cmd, ",help") == 0) {
+            puts("debug commands: ,continue ,step ,next ,finish ,backtrace ,locals ,quit");
+            continue;
+        }
+        fprintf(stderr, "debug: unknown command (try ,help)\n");
+    }
+    return g_debug_abort ? 1 : 0;
 }
 
 static int repl_import_spec(ChVM *vm, const char *spec_src) {
@@ -452,7 +551,8 @@ static int handle_comma(ChVM *vm, char *line, int *should_exit) {
 static void completion_callback(const char *buf, linenoiseCompletions *lc) {
     static const char *cmds[] = {",help",     ",quit", ",exit", ",version", ",load ", ",expand ",
                                  ",import ", ",dis ",   ",break ",   ",breakpoints", ",delete ",
-                                 ",step ", ",gc", ",env", ",time ", ",type ", NULL};
+                                 ",step ", ",continue", ",backtrace", ",locals", ",gc", ",env",
+                                 ",time ", ",type ", NULL};
     if (buf[0] == ',') {
         for (int i = 0; cmds[i]; i++) {
             if (strncmp(cmds[i], buf, strlen(buf)) == 0) {
@@ -492,6 +592,7 @@ static int run_linenoise(ChVM *vm) {
     printf("%s\n", CHAAYA_VERSION_BANNER);
     printf("Type ,help for commands, ,quit to exit.\n\n");
 
+    vm->debug_break_hook = debug_break_hook;
     g_repl_vm = vm;
     linenoiseSetMultiLine(1);
     linenoiseHistorySetMaxLen(CH_HISTORY_MAX);
@@ -559,6 +660,7 @@ static int run_linenoise(ChVM *vm) {
 
 static int run_plain(ChVM *vm) {
     int interactive = isatty(STDIN_FILENO);
+    vm->debug_break_hook = debug_break_hook;
     if (interactive) {
         printf("%s\n", CHAAYA_VERSION_BANNER);
         printf("Type ,help for commands, ,quit to exit.\n\n");

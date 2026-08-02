@@ -1,79 +1,44 @@
 # Backends (MVP)
 
-This note documents the current backend integration surface for Phase 11 MVP.
+This note documents the current backend integration surface for Phase 11.
 
 ## Backend status
 
 | Backend | Entry point | Current behavior |
 |---------|-------------|------------------|
 | Bytecode VM | default `chaaya` run path | Implemented and primary execution path |
-| LLVM native | `chaaya --native <file.scm>` | Stubbed in [`src/llvm_backend.c`](../../src/llvm_backend.c): returns an explicit not-implemented diagnostic |
-| WASM | CMake option `CHAAYA_WASM` | Optional target scaffold; on non-WASI toolchains builds a stub binary that prints NYI |
-| LSP | stdin/stdout JSON-RPC | MVP in [`src/lsp.c`](../../src/lsp.c): `initialize` / `shutdown` only |
-| Compile cache | [`include/chaaya/cache.h`](../../include/chaaya/cache.h) | Header + CLI hooks; no persistent cache yet |
+| LLVM native | `chaaya compile` / `--native` / `--emit-llvm` | Emits LLVM IR text from post-opt IR; links a tiny `ch_rt_main` stub via `cc` |
+| WASM | CMake option `CHAAYA_WASM` | Optional target; WASI toolchain builds interpreter; host builds stub |
+| LSP | stdin/stdout JSON-RPC | `initialize`, `didOpen`/`didChange` → `publishDiagnostics`, document symbols, definition stub |
+| Compile cache | `$CHAAYA_HOME/cache/*.chbc` | Auto read/write on plain file runs (skipped when source mentions `import`, or when `CHAAYA_NO_CACHE` is set). Blob includes bytecode plus the global name table so absolute global indices stay valid on cold load. |
 
-## Phase 11+ backlog
+## LLVM native
 
-Work tracked here intentionally stays **documentation and stubs** until a dedicated track lands implementation.
+- **`--emit-llvm [-o out.ll]`:** lower expand → IR → comments-as-IR MVP module with `main` calling `@ch_rt_main`.
+- **`compile` / `--native`:** emit IR to a temp file, compile a stub C runtime with `cc`, optionally run it.
+- **Next:** real LLVM IR for fixnums/calls, `libchaaya_rt` C-ABI bridge, aarch64/x86_64 only.
 
-### LLVM native
-
-- **Today:** `--native` fails with a clear NYI message ([`src/llvm_backend.c`](../../src/llvm_backend.c)).
-- **Scope when implemented:** lower Chaaya IR (post-opts `ChIrNode`; see [ir.md](ir.md)) to LLVM IR for `aarch64` / `x86_64`, link against a small C-ABI runtime exporting GC + procedure call helpers.
-- **Out of scope for first cut:** full separate compilation of user `.sld` trees, cross-compilation matrix beyond macOS/Linux host dev.
-
-### WASM (wasm32-wasi)
-
-- **Today:** `CHAAYA_WASM=ON` builds `chaaya-wasm`; non-WASI toolchains link [`src/wasm_stub.c`](../../src/wasm_stub.c).
-- **Next:** WASI SDK CI job, `wasi_snapshot_preview1` I/O for `scheme.base` ports, release artifact alongside Kaappi playground updates.
-- **Deferred:** browser JS glue (Kaappi.github.io owns playground integration).
-
-### LSP
-
-- **Today:** enough for CTest `cli_lsp_initialize_shutdown`.
-- **Next:** `textDocument/didOpen`, publish diagnostics from expand/check, symbol at point for built-in libraries.
-
-### Compile cache
-
-- **Today:** [`include/chaaya/cache.h`](../../include/chaaya/cache.h) defines keying hooks; CLI accepts cache flags but does not persist bytecode.
-- **Next:** content-addressed keys (source + lib-path + feature set), atomic write under `$CHAAYA_HOME/cache`.
-
-### thottam / packages
-
-- **Policy:** do **not** re-implement thottam in C — use Kaappi's Zig thottam in the sibling [`kaappi`](../../kaappi) repo ([`docs/dev/thottam.md`](thottam.md)).
-- **Chaaya integration milestones:** document `--lib-path` layout for thottam installs; optional [`scripts/thottam-smoke.sh`](../../scripts/thottam-smoke.sh) as a SKIP-friendly CI probe.
-
-### kaappi-deferred compliance in CTest
-
-- Runner: [`tests/scheme/run_kaappi_deferred.cmake`](../scheme/run_kaappi_deferred.cmake) (mirrors R7RS runner).
-- **Tier 1 enabled (CTest, green):** `sqrt-exact`, `lists`, `vectors`
-- **Tier 2 enabled (CTest, green):** `macro-export-scope`, `chars`, `bytevectors`, `eval`, `lazy`
-- **Next engine work:** remaining kaappi-deferred smoke/differential trees; further R7RS edge cases as suites expand.
-
-## LLVM native stub
-
-- CLI switch: `--native`
-- Current dispatch: handled by [`src/cli.c`](../../src/cli.c), delegated to
-  [`src/llvm_backend.c`](../../src/llvm_backend.c)
-- MVP contract: fail honestly with a clear message instead of pretending to
-  compile/execute native code.
-
-## WASM target scaffold
-
-Enable with CMake:
+## WASM (wasm32-wasi)
 
 ```bash
-cmake -S . -B build -DCHAAYA_WASM=ON
-cmake --build build -j
+# Host stub (default when CHAAYA_WASM=ON without WASI toolchain)
+cmake -S . -B build-wasm -DCHAAYA_WASM=ON
+cmake --build build-wasm -j --target chaaya-wasm
+
+# Real WASI build (requires WASI SDK / wasi-sdk toolchain file)
+cmake -S . -B build-wasi -DCHAAYA_WASM=ON -DCMAKE_SYSTEM_NAME=WASI \
+  -DCMAKE_C_COMPILER=clang --toolchain path/to/wasi-sdk.cmake
 ```
 
-Behavior:
+See also [`scripts/build-wasm.sh`](../../scripts/build-wasm.sh).
 
-- `CMAKE_SYSTEM_NAME=WASI`: builds `chaaya-wasm` from the normal runtime entry
-  (`src/main.c` + `chaaya_core`).
-- Any other toolchain: builds `chaaya-wasm` from
-  [`src/wasm_stub.c`](../../src/wasm_stub.c), which prints an NYI message and
-  exits non-zero.
+## LSP
 
-This keeps the build graph ready for wasm32-wasi without claiming interpreter
-parity on host toolchains that are not configured for WASI.
+- Diagnostics use the shared [diagnostics.md](diagnostics.md) funnel (`CH` codes, JSON Diagnostic shape).
+- Next: completion, hover, references.
+
+## Compile cache
+
+- Format: `CHBC` magic, version 1, source/compiler hashes, serialized top-level functions.
+- CLI: `chaaya cache status|clear`.
+- Auto-cache on `chaaya file.scm` when the source does not mention `import`.

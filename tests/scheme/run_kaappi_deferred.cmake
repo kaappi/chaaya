@@ -5,8 +5,15 @@ endif()
 get_filename_component(input_dir "${INPUT}" DIRECTORY)
 get_filename_component(input_name "${INPUT}" NAME)
 
+# Isolate bytecode cache from the developer home directory.
+set(test_home "${CMAKE_BINARY_DIR}/chaaya-deferred-home")
+file(MAKE_DIRECTORY "${test_home}")
+
 execute_process(
-  COMMAND "${CHAAYA}" "--lib-path" "${LIB_PATH}" "${input_name}"
+  COMMAND ${CMAKE_COMMAND} -E env
+    "CHAAYA_HOME=${test_home}"
+    "CHAAYA_NO_CACHE=1"
+    "${CHAAYA}" "--lib-path" "${LIB_PATH}" "${input_name}"
   WORKING_DIRECTORY "${input_dir}"
   RESULT_VARIABLE rc
   OUTPUT_VARIABLE out

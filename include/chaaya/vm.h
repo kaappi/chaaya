@@ -1,6 +1,7 @@
 #ifndef CHAAYA_VM_H
 #define CHAAYA_VM_H
 
+#include "chaaya/diagnostics.h"
 #include "chaaya/gc.h"
 #include "chaaya/value.h"
 
@@ -73,6 +74,9 @@ typedef struct ChVM {
     ChUpvalue *open_upvalues;
     ChValue result;
     char error[256];
+    ChDiagCode error_code;
+    int error_line;
+    int error_column;
 
     /* dynamic-wind + exception handlers */
     ChWindRecord wind_stack[CH_VM_MAX_WINDS];
@@ -136,11 +140,15 @@ typedef struct ChVM {
     ChValue ffi_callback_deferred_value;
     ChValue ffi_callback_raise_result;
 
-    /* REPL debugger (Phase 8 MVP). */
+    /* REPL debugger. */
     bool debug_mode;
     bool step_trace;
     char breakpoints[CH_VM_MAX_BREAKPOINTS][64];
     size_t breakpoint_count;
+    /* Optional hook: return 0 to continue, 1 to abort current eval. */
+    int (*debug_break_hook)(struct ChVM *vm, const char *name);
+    /* Step modes after a pause: 0=none, 1=step into next call. */
+    int debug_step_mode;
 } ChVM;
 
 void ch_vm_init(ChVM *vm);

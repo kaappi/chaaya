@@ -1,6 +1,7 @@
 #include "chaaya/eval.h"
 
 #include "chaaya/compiler.h"
+#include "chaaya/diagnostics.h"
 #include "chaaya/environment.h"
 #include "chaaya/library.h"
 #include "chaaya/printer.h"
@@ -211,14 +212,20 @@ int ch_eval_source(ChVM *vm, const char *source, size_t len, int print_results) 
             break;
         }
         if (rs == CH_READ_ERROR) {
-            fprintf(stderr, "read error: %s\n", ch_reader_error(&reader));
+            ChDiagCode code = ch_reader_error_code(&reader);
+            ch_diag_report_read(stderr, vm->script_path, source, len, reader.pos, code,
+                                ch_reader_error(&reader));
             ch_gc_pop(&vm->gc);
             return 1;
         }
 
         ChValue result = CH_VOID;
         if (ch_eval_datum(vm, expr, CH_VOID, &result) != 0) {
-            fprintf(stderr, "error: %s\n", ch_vm_error(vm));
+            ChDiagCode code = vm->error_code
+                                  ? vm->error_code
+                                  : ch_diag_classify_message(ch_vm_error(vm), CH_DIAG_STAGE_RUNTIME);
+            ch_diag_report_simple(stderr, vm->script_path, vm->error_line, vm->error_column, code,
+                                  NULL, ch_vm_error(vm));
             ch_gc_pop(&vm->gc);
             return 1;
         }

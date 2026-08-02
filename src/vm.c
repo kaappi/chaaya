@@ -144,6 +144,7 @@ const char *ch_vm_error(const ChVM *vm) {
 
 static ChVMStatus runtime_error(ChVM *vm, const char *msg) {
     snprintf(vm->error, sizeof(vm->error), "%s", msg);
+    vm->error_code = ch_diag_classify_message(msg, CH_DIAG_STAGE_RUNTIME);
     return CH_VM_RUNTIME_ERROR;
 }
 
@@ -940,36 +941,49 @@ static ChValue build_rest_list(ChVM *vm, ChValue *args, int start, int nargs) {
 
 static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int nargs, bool tail);
 
+static const char *debug_callee_name(ChVM *vm, ChValue callee) {
+    if (ch_is_native(callee)) {
+        return ch_as_native(callee)->name;
+    }
+    for (size_t g = 0; g < vm->global_count; g++) {
+        if (!vm->globals[g].defined) {
+            continue;
+        }
+        if (ch_eqv(vm->globals[g].value, callee)) {
+            return vm->globals[g].name->name;
+        }
+    }
+    return NULL;
+}
+
 static void vm_debug_on_call(ChVM *vm, ChValue callee) {
-    if (vm->step_trace) {
+    const char *name = debug_callee_name(vm, callee);
+    bool hit = false;
+    if (vm->step_trace || vm->debug_step_mode == 1) {
         fputs("; step ", stderr);
         ch_print_value(stderr, callee, false);
         fputc('\n', stderr);
         vm->step_trace = false;
-    }
-    if (!vm->debug_mode || vm->breakpoint_count == 0) {
-        return;
-    }
-    for (size_t b = 0; b < vm->breakpoint_count; b++) {
-        const char *bp = vm->breakpoints[b];
-        if (ch_is_native(callee)) {
-            if (strcmp(ch_as_native(callee)->name, bp) == 0) {
-                fprintf(stderr, "; break at %s\n", bp);
-                continue;
-            }
+        vm->debug_step_mode = 0;
+        hit = true;
+        if (!name) {
+            name = "<anonymous>";
         }
-        for (size_t g = 0; g < vm->global_count; g++) {
-            if (!vm->globals[g].defined) {
-                continue;
-            }
-            if (strcmp(vm->globals[g].name->name, bp) != 0) {
-                continue;
-            }
-            if (ch_eqv(vm->globals[g].value, callee)) {
-                fprintf(stderr, "; break at %s\n", bp);
+    }
+    if (!hit && vm->debug_mode && vm->breakpoint_count > 0 && name) {
+        for (size_t b = 0; b < vm->breakpoint_count; b++) {
+            if (strcmp(vm->breakpoints[b], name) == 0) {
+                hit = true;
                 break;
             }
         }
+    }
+    if (!hit) {
+        return;
+    }
+    fprintf(stderr, "; break at %s\n", name ? name : "<anonymous>");
+    if (vm->debug_break_hook) {
+        (void)vm->debug_break_hook(vm, name ? name : "<anonymous>");
     }
 }
 

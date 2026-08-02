@@ -60,6 +60,9 @@ typedef struct ChFuncCompiler {
 void ch_compiler_init(ChCompiler *c, ChVM *vm) {
     c->vm = vm;
     c->error[0] = '\0';
+    c->error_code = (ChDiagCode)0;
+    c->error_line = 0;
+    c->error_column = 0;
     c->next_binding_id = 1;
 }
 
@@ -67,8 +70,16 @@ const char *ch_compiler_error(const ChCompiler *c) {
     return c->error;
 }
 
+ChDiagCode ch_compiler_error_code(const ChCompiler *c) {
+    if (c->error_code) {
+        return c->error_code;
+    }
+    return ch_diag_classify_message(c->error, CH_DIAG_STAGE_COMPILE);
+}
+
 static ChCompileStatus fail(ChCompiler *c, const char *msg) {
     snprintf(c->error, sizeof(c->error), "%s", msg);
+    c->error_code = ch_diag_classify_message(msg, CH_DIAG_STAGE_COMPILE);
     return CH_COMPILE_ERROR;
 }
 

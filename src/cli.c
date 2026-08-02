@@ -5,6 +5,7 @@
 #include "chaaya/eval.h"
 #include "chaaya/expander.h"
 #include "chaaya/features.h"
+#include "chaaya/ir.h"
 #include "chaaya/library.h"
 #include "chaaya/llvm_backend.h"
 #include "chaaya/lsp.h"
@@ -12,8 +13,10 @@
 #include "chaaya/printer.h"
 #include "chaaya/reader.h"
 #include "chaaya/repl.h"
+#include "chaaya/value.h"
 #include "chaaya/version.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,7 +53,7 @@ void ch_cli_print_help(const char *argv0) {
     printf("Commands:\n");
     printf("  compile <file>     Compile to native binary via LLVM\n");
     printf("  check <file>       Compile-only static analysis (no execution)\n");
-    printf("  explain <code>     Explain a diagnostic code (e.g. KP3001)\n");
+    printf("  explain <code>     Explain a diagnostic code (e.g. CH3001)\n");
     printf("  features           Report this build's capabilities; --json\n");
     printf("  test [paths...]    Run SRFI-64 suites\n");
     printf("  ast <file>         Print post-read datums (read + write)\n");
@@ -218,7 +221,6 @@ int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
         }
         if (strcmp(a, "--emit-llvm") == 0) {
             out->flag_emit_llvm = 1;
-            mark_nyi(out, "--emit-llvm");
             continue;
         }
         if (strcmp(a, "--disassemble") == 0) {
@@ -248,12 +250,10 @@ int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
         }
         if (strcmp(a, "--no-ir-opt") == 0 || strcmp(a, "--no-opt") == 0) {
             out->flag_no_ir_opt = 1;
-            mark_nyi(out, a);
             continue;
         }
         if (strcmp(a, "--deny-warnings") == 0) {
             out->flag_deny_warnings = 1;
-            mark_nyi(out, "--deny-warnings");
             continue;
         }
         if (strcmp(a, "--timings") == 0 || strncmp(a, "--timings=", 10) == 0) {
@@ -262,8 +262,17 @@ int ch_cli_parse(int argc, char **argv, ChCliOptions *out) {
             continue;
         }
         if (strncmp(a, "--diagnostics=", 14) == 0) {
+            const char *fmt = a + 14;
             out->flag_diagnostics = 1;
-            mark_nyi(out, "--diagnostics");
+            if (strcmp(fmt, "json") == 0) {
+                out->diagnostics_format = CH_DIAG_FMT_JSON;
+            } else if (strcmp(fmt, "text") == 0) {
+                out->diagnostics_format = CH_DIAG_FMT_TEXT;
+            } else {
+                fprintf(stderr, "--diagnostics expects text or json\n");
+                usage_hint(argv0);
+                return CH_EXIT_USAGE;
+            }
             continue;
         }
         if (strcmp(a, "--timeout") == 0) {
@@ -824,6 +833,114 @@ static int cmd_fmt(const char *path, const ChCliOptions *opts) {
     return rc;
 }
 
+static void report_reader_diag(const char *path, const char *src, size_t len, const ChReader *reader) {
+    ChDiagCode code = ch_reader_error_code(reader);
+    ch_diag_report_read(stderr, path, src, len, reader->pos, code, ch_reader_error(reader));
+}
+
+static void report_compiler_diag(const char *path, const ChCompiler *compiler) {
+    ChDiagCode code = ch_compiler_error_code(compiler);
+    ch_diag_report_simple(stderr, path, compiler->error_line, compiler->error_column, code, NULL,
+                          ch_compiler_error(compiler));
+}
+
+static int is_special_symbol(const char *name) {
+    static const char *const specials[] = {
+        "quote",    "if",         "lambda",  "define", "set!",     "begin",
+        "and",      "or",         "let",     "let*",   "letrec",   "letrec*",
+        "cond",     "case",       "do",      "delay",  "delay-force", "quasiquote",
+        "unquote",  "unquote-splicing", "define-syntax", "let-syntax", "letrec-syntax",
+        "syntax-rules", "include", "include-ci", "cond-expand", "import", "define-library",
+        "define-values", "let-values", "let*-values", "case-lambda", "parameterize",
+        "guard", "when", "unless", "else", "=>", "...", "_", NULL};
+    for (int i = 0; specials[i]; i++) {
+        if (strcmp(name, specials[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int global_is_defined(ChVM *vm, const char *name) {
+    for (size_t i = 0; i < vm->global_count; i++) {
+        if (vm->globals[i].defined && strcmp(vm->globals[i].name->name, name) == 0) {
+            return 1;
+        }
+    }
+    for (size_t i = 0; i < vm->macro_count; i++) {
+        if (vm->macros[i].name && strcmp(vm->macros[i].name->name, name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static ChNative *find_native(ChVM *vm, const char *name) {
+    for (size_t i = 0; i < vm->global_count; i++) {
+        if (!vm->globals[i].defined) {
+            continue;
+        }
+        if (strcmp(vm->globals[i].name->name, name) != 0) {
+            continue;
+        }
+        if (ch_is_native(vm->globals[i].value)) {
+            return ch_as_native(vm->globals[i].value);
+        }
+    }
+    return NULL;
+}
+
+static void lint_walk(ChVM *vm, ChValue expr, const char *path, int *warns, int *errors,
+                      int deny_warnings) {
+    if (ch_is_symbol(expr)) {
+        const char *name = ch_as_symbol(expr)->name;
+        if (!is_special_symbol(name) && !global_is_defined(vm, name)) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "unknown top-level variable '%s'", name);
+            ch_diag_report_simple(stderr, path, 0, 0, CH_DIAG_UNKNOWN_TOPLEVEL_VARIABLE, NULL, msg);
+            (*warns)++;
+            if (deny_warnings) {
+                (*errors)++;
+            }
+        }
+        return;
+    }
+    if (!ch_is_pair(expr)) {
+        return;
+    }
+    ChValue head = ch_car(expr);
+    if (ch_is_symbol(head)) {
+        const char *name = ch_as_symbol(head)->name;
+        ChNative *nat = find_native(vm, name);
+        if (nat) {
+            int nargs = 0;
+            for (ChValue a = ch_cdr(expr); ch_is_pair(a); a = ch_cdr(a)) {
+                nargs++;
+            }
+            int bad = 0;
+            if (nat->arity >= 0) {
+                bad = nargs != nat->arity;
+            } else {
+                bad = nargs < nat->min_arity;
+            }
+            if (bad) {
+                char msg[256];
+                snprintf(msg, sizeof(msg), "primitive '%s' arity mismatch (got %d)", name, nargs);
+                ch_diag_report_simple(stderr, path, 0, 0, CH_DIAG_PRIMITIVE_ARITY_MISMATCH, NULL,
+                                      msg);
+                (*errors)++;
+            }
+        }
+    }
+    ChValue p = expr;
+    for (; ch_is_pair(p); p = ch_cdr(p)) {
+        lint_walk(vm, ch_car(p), path, warns, errors, deny_warnings);
+    }
+    if (!ch_is_nil(p)) {
+        lint_walk(vm, p, path, warns, errors, deny_warnings);
+    }
+}
+
 static int cmd_check(const char *path, const ChCliOptions *opts) {
     size_t len = 0;
     char *src = ch_read_file(path, &len);
@@ -844,6 +961,8 @@ static int cmd_check(const char *path, const ChCliOptions *opts) {
     ch_reader_init(&reader, &vm.gc, src, len);
 
     size_t forms = 0;
+    int warns = 0;
+    int errors = 0;
     int rc = CH_EXIT_OK;
     for (;;) {
         ChValue v = CH_NIL;
@@ -854,33 +973,244 @@ static int cmd_check(const char *path, const ChCliOptions *opts) {
             break;
         }
         if (st != CH_READ_OK) {
-            fprintf(stderr, "read error: %s\n", ch_reader_error(&reader));
+            report_reader_diag(path, src, len, &reader);
             ch_gc_pop(&vm.gc);
+            rc = CH_EXIT_ERROR;
+            break;
+        }
+
+        ChValue expanded = CH_NIL;
+        ch_gc_push(&vm.gc, &expanded);
+        char err[256];
+        if (ch_expand_toplevel(&vm, v, &expanded, err, sizeof(err)) != CH_EXPAND_OK) {
+            ChDiagCode code = ch_diag_classify_message(err, CH_DIAG_STAGE_COMPILE);
+            ch_diag_report_simple(stderr, path, 0, 0, code, NULL, err);
+            ch_gc_pop_n(&vm.gc, 2);
+            rc = CH_EXIT_ERROR;
+            break;
+        }
+
+        lint_walk(&vm, expanded, path, &warns, &errors, opts->flag_deny_warnings);
+
+        ChCompiler compiler;
+        ch_compiler_init(&compiler, &vm);
+        ChFunction *fn = NULL;
+        if (ch_compile_toplevel(&compiler, expanded, &fn) != CH_COMPILE_OK) {
+            report_compiler_diag(path, &compiler);
+            ch_gc_pop_n(&vm.gc, 2);
+            rc = CH_EXIT_ERROR;
+            break;
+        }
+        (void)fn;
+        forms++;
+        ch_gc_pop_n(&vm.gc, 2);
+    }
+
+    if (errors > 0) {
+        rc = CH_EXIT_ERROR;
+    }
+    if (rc == CH_EXIT_OK) {
+        if (warns > 0) {
+            printf("check: ok with %d warning%s (%zu form%s)\n", warns, warns == 1 ? "" : "s", forms,
+                   forms == 1 ? "" : "s");
+        } else {
+            printf("check: ok (%zu form%s)\n", forms, forms == 1 ? "" : "s");
+        }
+    }
+
+    free(src);
+    ch_vm_deinit(&vm);
+    return rc;
+}
+
+static int cmd_ir(const char *path, const ChCliOptions *opts) {
+    size_t len = 0;
+    char *src = ch_read_file(path, &len);
+    if (!src) {
+        fprintf(stderr, "Error opening file '%s'\n", path);
+        return CH_EXIT_ERROR;
+    }
+
+    ChVM vm;
+    ch_vm_init(&vm);
+    ch_vm_register_primitives(&vm);
+    vm.script_path = path;
+    for (size_t i = 0; i < opts->lib_path_count; i++) {
+        vm.lib_paths[vm.lib_path_count++] = opts->lib_paths[i];
+    }
+
+    ChReader reader;
+    ch_reader_init(&reader, &vm.gc, src, len);
+    int rc = CH_EXIT_OK;
+    for (;;) {
+        ChValue v = CH_NIL;
+        ch_gc_push(&vm.gc, &v);
+        ChReadStatus st = read_cli_datum(&vm, &reader, &v);
+        if (st == CH_READ_EOF) {
+            ch_gc_pop(&vm.gc);
+            break;
+        }
+        if (st != CH_READ_OK) {
+            report_reader_diag(path, src, len, &reader);
+            ch_gc_pop(&vm.gc);
+            rc = CH_EXIT_ERROR;
+            break;
+        }
+
+        ChValue expanded = CH_NIL;
+        ch_gc_push(&vm.gc, &expanded);
+        char err[256];
+        if (ch_expand_toplevel(&vm, v, &expanded, err, sizeof(err)) != CH_EXPAND_OK) {
+            ChDiagCode code = ch_diag_classify_message(err, CH_DIAG_STAGE_COMPILE);
+            ch_diag_report_simple(stderr, path, 0, 0, code, NULL, err);
+            ch_gc_pop_n(&vm.gc, 2);
             rc = CH_EXIT_ERROR;
             break;
         }
 
         ChCompiler compiler;
         ch_compiler_init(&compiler, &vm);
-        ChFunction *fn = NULL;
-        if (ch_compile_toplevel(&compiler, v, &fn) != CH_COMPILE_OK) {
-            fprintf(stderr, "check error: %s\n", ch_compiler_error(&compiler));
-            ch_gc_pop(&vm.gc);
+        ChIrNode *ir = NULL;
+        if (ch_ir_lower(&compiler, expanded, &ir) != CH_COMPILE_OK) {
+            report_compiler_diag(path, &compiler);
+            ch_gc_pop_n(&vm.gc, 2);
             rc = CH_EXIT_ERROR;
             break;
         }
-        (void)fn;
-        forms++;
-        ch_gc_pop(&vm.gc);
-    }
-
-    if (rc == CH_EXIT_OK) {
-        printf("check: ok (%zu form%s)\n", forms, forms == 1 ? "" : "s");
+        ch_ir_analyze(ir);
+        if (!opts->flag_no_ir_opt) {
+            if (ch_ir_optimize(&compiler, &ir) != CH_COMPILE_OK) {
+                report_compiler_diag(path, &compiler);
+                ch_ir_free(ir);
+                ch_gc_pop_n(&vm.gc, 2);
+                rc = CH_EXIT_ERROR;
+                break;
+            }
+        }
+        ch_ir_print(stdout, ir, 0);
+        fputc('\n', stdout);
+        ch_ir_free(ir);
+        ch_gc_pop_n(&vm.gc, 2);
     }
 
     free(src);
     ch_vm_deinit(&vm);
     return rc;
+}
+
+static int source_has_import(const char *src, size_t len) {
+    /* Cheap skip: auto-cache disabled when the file mentions import. */
+    (void)len;
+    return strstr(src, "import") != NULL;
+}
+
+static int eval_function_list(ChVM *vm, const char *path, ChFunction **fns, size_t n) {
+    ChValue *keeps = (ChValue *)calloc(n ? n : 1, sizeof(ChValue));
+    if (!keeps) {
+        return CH_EXIT_ERROR;
+    }
+    for (size_t i = 0; i < n; i++) {
+        keeps[i] = ch_make_pointer(&fns[i]->header);
+        ch_gc_push(&vm->gc, &keeps[i]);
+    }
+    int rc = CH_EXIT_OK;
+    for (size_t i = 0; i < n; i++) {
+        ChValue result = CH_VOID;
+        ChVMStatus st = ch_vm_eval_function(vm, fns[i], &result);
+        if (st != CH_VM_OK || (vm->error[0] && result == CH_UNDEFINED)) {
+            ChDiagCode code = vm->error_code
+                                  ? vm->error_code
+                                  : ch_diag_classify_message(ch_vm_error(vm), CH_DIAG_STAGE_RUNTIME);
+            ch_diag_report_simple(stderr, path, vm->error_line, vm->error_column, code, NULL,
+                                  ch_vm_error(vm));
+            rc = CH_EXIT_ERROR;
+            break;
+        }
+    }
+    ch_gc_pop_n(&vm->gc, n);
+    free(keeps);
+    return rc;
+}
+
+/* Compile+eval in a fresh VM so bytecode global indices match a cold cache load. */
+static int cache_store_from_source(const char *path, const char *src, size_t len) {
+    ChVM cold;
+    ch_vm_init(&cold);
+    ch_vm_register_primitives(&cold);
+    cold.script_path = path;
+
+    ChReader reader;
+    ch_reader_init(&reader, &cold.gc, src, len);
+    ChFunction **compiled = NULL;
+    ChValue *keeps = NULL;
+    size_t compiled_n = 0;
+    size_t compiled_cap = 0;
+    int ok = 1;
+
+    for (;;) {
+        ChValue expr = CH_NIL;
+        ch_gc_push(&cold.gc, &expr);
+        ChReadStatus rs = ch_read_datum(&reader, &expr);
+        if (rs == CH_READ_EOF) {
+            ch_gc_pop(&cold.gc);
+            break;
+        }
+        if (rs != CH_READ_OK) {
+            ch_gc_pop(&cold.gc);
+            ok = 0;
+            break;
+        }
+        if (ch_is_pair(expr) && ch_is_symbol(ch_car(expr))) {
+            const char *h = ch_symbol_basename(ch_as_symbol(ch_car(expr)));
+            if (strcmp(h, "import") == 0 || strcmp(h, "define-library") == 0 ||
+                strcmp(h, "include") == 0 || strcmp(h, "include-ci") == 0 ||
+                strcmp(h, "cond-expand") == 0) {
+                ch_gc_pop(&cold.gc);
+                ok = 0;
+                break;
+            }
+        }
+        ChCompiler compiler;
+        ch_compiler_init(&compiler, &cold);
+        ChFunction *fn = NULL;
+        if (ch_compile_toplevel(&compiler, expr, &fn) != CH_COMPILE_OK || !fn) {
+            ch_gc_pop(&cold.gc);
+            ok = 0;
+            break;
+        }
+        if (compiled_n >= compiled_cap) {
+            size_t ncap = compiled_cap ? compiled_cap * 2 : 8;
+            ChFunction **ncompiled = (ChFunction **)realloc(compiled, ncap * sizeof(ChFunction *));
+            ChValue *nkeeps = (ChValue *)realloc(keeps, ncap * sizeof(ChValue));
+            if (!ncompiled || !nkeeps) {
+                free(ncompiled);
+                free(nkeeps);
+                ch_gc_pop(&cold.gc);
+                ok = 0;
+                break;
+            }
+            compiled = ncompiled;
+            keeps = nkeeps;
+            compiled_cap = ncap;
+        }
+        compiled[compiled_n] = fn;
+        keeps[compiled_n] = ch_make_pointer(&fn->header);
+        ch_gc_push(&cold.gc, &keeps[compiled_n]);
+        compiled_n++;
+        ch_gc_pop(&cold.gc);
+        /* Compile-only: DEFINE interns global names; values are filled on cache load.
+         * Skip files that need runtime define-syntax via the special-form guard above. */
+    }
+
+    int stored = -1;
+    if (ok && compiled_n > 0) {
+        stored = ch_cache_store(&cold, path, src, len, compiled, compiled_n);
+    }
+    ch_gc_pop_n(&cold.gc, compiled_n);
+    free(compiled);
+    free(keeps);
+    ch_vm_deinit(&cold);
+    return stored;
 }
 
 static int run_file(ChVM *vm, const char *path) {
@@ -890,9 +1220,25 @@ static int run_file(ChVM *vm, const char *path) {
         fprintf(stderr, "Error opening file '%s'\n", path);
         return CH_EXIT_ERROR;
     }
+
+    int use_cache = !source_has_import(src, len);
+    if (use_cache) {
+        ChFunction **fns = NULL;
+        size_t n = 0;
+        if (ch_cache_try_load(vm, path, src, len, &fns, &n)) {
+            int rc = eval_function_list(vm, path, fns, n);
+            free(fns);
+            free(src);
+            return rc;
+        }
+    }
+
     int rc = ch_eval_source(vm, src, len, 0);
+    if (rc == 0 && use_cache) {
+        (void)cache_store_from_source(path, src, len);
+    }
     free(src);
-    return rc;
+    return rc == 0 ? CH_EXIT_OK : CH_EXIT_ERROR;
 }
 
 static int run_stdin(ChVM *vm) {
@@ -938,6 +1284,10 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
     (void)argc;
     const char *argv0 = argv[0];
 
+    if (opts->flag_diagnostics) {
+        ch_diag_set_format(opts->diagnostics_format);
+    }
+
     if (opts->help) {
         ch_cli_print_help(argv0);
         return CH_EXIT_OK;
@@ -957,17 +1307,22 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
         return CH_EXIT_OK;
     }
 
-    if (opts->flag_native) {
-        if (opts->command != CH_CMD_RUN) {
-            fprintf(stderr, "chaaya: --native is only supported for file execution\n");
-            return CH_EXIT_USAGE;
-        }
+    if (opts->flag_emit_llvm) {
         if (!opts->file) {
-            fprintf(stderr, "chaaya: --native requires a Scheme file argument\n");
+            fprintf(stderr, "chaaya: --emit-llvm requires a Scheme file argument\n");
             usage_hint(argv0);
             return CH_EXIT_USAGE;
         }
-        return ch_llvm_backend_run_file(opts->file);
+        return ch_llvm_backend_emit_ir(opts->file, opts->output);
+    }
+
+    if (opts->flag_native || opts->command == CH_CMD_COMPILE) {
+        if (!opts->file) {
+            fprintf(stderr, "chaaya: compile/--native requires a Scheme file argument\n");
+            usage_hint(argv0);
+            return CH_EXIT_USAGE;
+        }
+        return ch_llvm_backend_compile_native(opts->file, opts->output);
     }
 
     /* NYI flags on an otherwise valid command */
@@ -996,7 +1351,8 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
     case CH_CMD_CACHE_CLEAR:
         return ch_cache_clear();
     case CH_CMD_COMPILE:
-        return not_implemented("compile");
+        /* handled above with --native */
+        return CH_EXIT_ERROR;
     case CH_CMD_CHECK:
         if (!opts->file) {
             fprintf(stderr, "check: missing file\n");
@@ -1005,7 +1361,12 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
         }
         return cmd_check(opts->file, opts);
     case CH_CMD_EXPLAIN:
-        return not_implemented("explain");
+        if (!opts->explain_code) {
+            fprintf(stderr, "explain: missing diagnostic code\n");
+            usage_hint(argv0);
+            return CH_EXIT_USAGE;
+        }
+        return ch_diag_explain(opts->explain_code, opts->json);
     case CH_CMD_TEST:
         return cmd_test(argv0, opts);
     case CH_CMD_EXPAND:
@@ -1016,7 +1377,12 @@ int ch_cli_dispatch(ChCliOptions *opts, int argc, char **argv) {
         }
         return cmd_expand(opts->file, opts);
     case CH_CMD_IR:
-        return not_implemented("ir");
+        if (!opts->file) {
+            fprintf(stderr, "ir: missing file\n");
+            usage_hint(argv0);
+            return CH_EXIT_USAGE;
+        }
+        return cmd_ir(opts->file, opts);
     case CH_CMD_FMT:
         if (!opts->file) {
             fprintf(stderr, "fmt: missing file\n");

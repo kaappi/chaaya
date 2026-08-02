@@ -1,6 +1,7 @@
 #ifndef CHAAYA_READER_H
 #define CHAAYA_READER_H
 
+#include "chaaya/diagnostics.h"
 #include "chaaya/gc.h"
 #include "chaaya/value.h"
 
@@ -31,6 +32,9 @@ typedef struct ChReader {
     void *refill_ctx;
     uint32_t nesting_depth;
     char error[256];
+    ChDiagCode error_code;
+    int error_line;   /* 1-based; 0 if unknown */
+    int error_column; /* 1-based; 0 if unknown */
     /* Datum labels (#n= / #n#) for the current top-level read. */
     ChValue labels[CH_READER_MAX_LABELS];
     uint8_t label_set[CH_READER_MAX_LABELS];
@@ -40,6 +44,7 @@ void ch_reader_init(ChReader *r, ChGC *gc, const char *src, size_t len);
 void ch_reader_set_refill(ChReader *r, ChReaderRefillFn refill, void *ctx);
 ChReadStatus ch_read_datum(ChReader *r, ChValue *out);
 const char *ch_reader_error(const ChReader *r);
+ChDiagCode ch_reader_error_code(const ChReader *r);
 
 /* Parse a full numeric literal (no surrounding whitespace). Returns false on failure. */
 bool ch_parse_number(ChGC *gc, const char *text, size_t len, ChValue *out);

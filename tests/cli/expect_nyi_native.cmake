@@ -4,10 +4,11 @@ execute_process(
   OUTPUT_VARIABLE out
   ERROR_VARIABLE err
 )
-if(rc EQUAL 0)
-  message(FATAL_ERROR "expected non-zero exit for --native backend stub")
-endif()
 set(combined "${out}${err}")
-if(NOT combined MATCHES "LLVM backend MVP is not implemented")
-  message(FATAL_ERROR "expected native backend stub message, got: ${combined}")
+# MVP native path should compile stub runtime and run it successfully.
+if(NOT rc EQUAL 0)
+  message(FATAL_ERROR "expected --native MVP to succeed, got rc=${rc}: ${combined}")
+endif()
+if(NOT combined MATCHES "compile: wrote")
+  message(FATAL_ERROR "expected native compile message, got: ${combined}")
 endif()

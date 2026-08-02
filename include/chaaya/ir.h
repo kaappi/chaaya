@@ -3,6 +3,8 @@
 
 #include "chaaya/compiler.h"
 
+#include <stdio.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -118,6 +120,9 @@ ChCompileStatus ch_ir_optimize(ChCompiler *c, ChIrNode **root_slot);
 
 ChCompileStatus ch_ir_emit(ChCompiler *c, ChIrNode *root, ChIrLegacyEmitFn emit_fn, void *emit_ctx,
                            uint8_t dst, bool tail);
+
+/* Pretty-print IR tree (used by `chaaya ir`). */
+void ch_ir_print(FILE *out, const ChIrNode *node, int indent);
 
 #ifdef __cplusplus
 }

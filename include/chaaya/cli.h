@@ -1,6 +1,7 @@
 #ifndef CHAAYA_CLI_H
 #define CHAAYA_CLI_H
 
+#include "chaaya/diagnostics.h"
 #include "chaaya/vm.h"
 
 #ifdef __cplusplus
@@ -33,7 +34,7 @@ typedef struct ChCliOptions {
     ChCliCommand command;
     int help;
     int version;
-    int json; /* features / doctor */
+    int json; /* features / doctor / explain */
     const char *completions_shell; /* bash|zsh|fish or NULL */
     const char *file;              /* primary file for run/ast/... */
     const char *output;            /* -o */
@@ -42,7 +43,7 @@ typedef struct ChCliOptions {
     size_t lib_path_count;
     const char *script_args[CH_VM_MAX_SCRIPT_ARGS];
     size_t script_arg_count;
-    /* Flags accepted but not implemented (set → exit with message) */
+    /* Flags */
     int flag_native;
     int flag_compile;
     int flag_emit_llvm;
@@ -54,7 +55,8 @@ typedef struct ChCliOptions {
     int flag_no_ir_opt;
     int flag_deny_warnings;
     int flag_timings;
-    int flag_diagnostics;
+    int flag_diagnostics; /* set when --diagnostics= given */
+    ChDiagFormat diagnostics_format;
     int flag_timeout;
     int flag_max_memory;
     int flag_profile_json;

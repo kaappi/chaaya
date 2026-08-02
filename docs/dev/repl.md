@@ -34,10 +34,14 @@ The variable `_` holds the last non-void result.
 | `,expand <expr>` | Macro-expand and print |
 | `,import <lib>` | Import a library (e.g. `,import (srfi 64)`) |
 | `,dis <expr>` | Disassemble a procedure's bytecode |
-| `,break <name>` | Break when calling named procedure |
+| `,break <name>` | Break when calling named procedure (pauses at `debug>`) |
 | `,breakpoints` | List breakpoints |
 | `,delete <name>` | Remove breakpoint |
-| `,step <expr>` | Eval with one call trace |
+| `,step <expr>` | Eval; pause on next call |
+| `,continue` / `,backtrace` / `,locals` | Debugger commands at `debug>` |
+
+At a breakpoint the REPL enters a nested `debug>` prompt (`,continue`, `,step`,
+`,next`, `,finish`, `,backtrace`, `,locals`, `,quit`).
 
 Other Kaappi comma-commands (`,profile`, `,describe`, `,apropos`, …) print a
 not-implemented message.

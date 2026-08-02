@@ -23,22 +23,28 @@ Chaaya Scheme v0.1.0
 
 1. No file + TTY stdin → REPL ([`src/repl.c`](../../src/repl.c))
 2. No file + non-TTY → evaluate stdin as a script
-3. `chaaya file.scm [args…]` → run file; args stored on `ChVM` for a future `(command-line)`
+3. `chaaya file.scm [args…]` → run file; args stored on `ChVM` for `(command-line)`
 
 ## Implemented vs stubbed
 
-**Working now:** run/REPL/stdin, `features`, `doctor`, `ast`, `expand`, `check`, `fmt`,
-`cache status|clear` (filesystem-backed status + clear; cache writer still NYI),
-`lsp` (minimal initialize/shutdown JSON-RPC), `--lib-path` (stored),
-`--completions bash|zsh|fish`.
+**Working now:** run/REPL/stdin, `features`, `doctor`, `ast`, `expand`, `ir`,
+`check` (expand + compile + CH4xxx lint), `explain`, `fmt`, `test` (fork/exec),
+`cache status|clear` + auto `.chbc` writer on plain runs,
+`lsp` (init/shutdown + didOpen diagnostics + symbols),
+`--lib-path`, `--completions`, `--diagnostics=text|json`, `--deny-warnings`,
+`--no-ir-opt` / `--no-opt`, `--emit-llvm`, `compile` / `--native` (MVP stub runtime).
 
-**Accepted in help, exit 1 if invoked:** `compile`, `explain`, `test`, `ir`,
-`wasm`, and engine flags (`--compile`, `--emit-llvm`, `--sandbox`,
-`--profile`, …). `--native` is routed to an explicit LLVM backend stub.
+**Still NYI / limited:** `--sandbox`, `--profile`, `--coverage`, `--timings`,
+`--timeout`, `--max-memory`, `--disassemble`, full LLVM object lowering.
+
+## Diagnostics
+
+See [diagnostics.md](diagnostics.md). Prefer `CH` codes; `explain` also accepts `KP` aliases.
 
 ## Environment
 
 | Variable | Role |
 |----------|------|
-| `CHAAYA_HOME` | Override `~/.chaaya` (history; future cache/lib) |
+| `CHAAYA_HOME` | Override `~/.chaaya` (history; bytecode cache) |
+| `CHAAYA_NO_CACHE` | If set and not `0`, disable automatic `.chbc` read/write |
 | `CHAAYA_LIB_DIR` | Reserved for native runtime libs |

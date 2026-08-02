@@ -1,13 +1,13 @@
 execute_process(
-  COMMAND ${CHAAYA} compile x.scm
+  COMMAND ${CHAAYA} compile ${INPUT} -o ${OUTPUT}
   RESULT_VARIABLE rc
   OUTPUT_VARIABLE out
   ERROR_VARIABLE err
 )
-if(rc EQUAL 0)
-  message(FATAL_ERROR "expected non-zero exit for compile")
-endif()
 set(combined "${out}${err}")
-if(NOT combined MATCHES "not implemented")
-  message(FATAL_ERROR "expected not-implemented message, got: ${combined}")
+if(NOT rc EQUAL 0)
+  message(FATAL_ERROR "expected compile to succeed (MVP), got rc=${rc}: ${combined}")
+endif()
+if(NOT combined MATCHES "compile: wrote")
+  message(FATAL_ERROR "expected compile success message, got: ${combined}")
 endif()
