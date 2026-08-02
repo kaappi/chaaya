@@ -113,6 +113,7 @@ void ch_random_source_seed(ChRandomSource *rs, uint64_t seed);
 uint64_t ch_random_source_next_u64(ChRandomSource *rs);
 ChValue ch_gc_make_ephemeron(ChGC *gc, ChValue key, ChValue value);
 ChValue ch_gc_make_file_info(ChGC *gc, const ChFileInfo *info);
+ChValue ch_gc_make_group_info(ChGC *gc, ChValue name, uint32_t gid);
 
 #ifdef __cplusplus
 }

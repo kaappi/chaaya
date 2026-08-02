@@ -671,6 +671,8 @@ static ChValue dc_copy_value(ChGC *dest, ChValue src, DcVisited *vis) {
         return dc_reject(dest, "deep-copy: ephemeron");
     case CH_TAG_FILE_INFO:
         return dc_reject(dest, "deep-copy: file-info");
+    case CH_TAG_GROUP_INFO:
+        return dc_reject(dest, "deep-copy: group-info");
 
     default:
         return dc_reject(dest, "deep-copy: unsupported heap type");

@@ -1,8 +1,8 @@
 # Chaaya — remaining work
 
-Tracked gaps after the expander bug campaign (2026-08-02) and Batch 10
-smoke fixes (same day). Detail and repro context live in the linked docs;
-this file is the checklist.
+Tracked gaps after the expander bug campaign (2026-08-02), Batch 10, and
+Batch 11 SRFI-170 POSIX smokes (same day). Detail and repro context live in
+the linked docs; this file is the checklist.
 
 Sources: [scheme-tests.md](dev/scheme-tests.md),
 [srfi-import-audit.md](dev/srfi-import-audit.md),
@@ -10,9 +10,9 @@ Sources: [scheme-tests.md](dev/scheme-tests.md),
 
 ---
 
-## Unwired kaappi-deferred smokes (29)
+## Unwired kaappi-deferred smokes (27)
 
-Non-backend corpus is **228/257** wired (~89%). Wire only after local green +
+Non-backend corpus is **230/257** wired (~89%). Wire only after local green +
 `make test`. Permanently skipped: `jit-*.scm` / `llvm-*.scm` (no JIT/LLVM
 backend in Chaaya).
 
@@ -38,12 +38,13 @@ out under parallel `ctest -j`.
 - [ ] `thread-port-isolation`
 - [ ] `deep-copy-list-801`
 
-### SRFI-170 POSIX primitives (2)
+### SRFI-170 POSIX primitives (0 remaining)
 
 - [x] `filesystem-intcast` — `set-file-mode` / `set-umask!` / `umask` / `nice` (Batch 10)
 - [x] `filesystem-nul-path-805` — embedded NUL rejected in path args (Batch 10)
-- [ ] `group-info-by-name-1161` — `user-gid` / `group-info` unimplemented
-- [ ] `srfi170-time-objects` — `posix-time` / `monotonic-time` gaps
+- [x] `group-info-by-name-1161` — `user-uid` / `user-gid` / `user-effective-*` /
+  `user-supplementary-gids` / `group-info` (+ accessors) (Batch 11)
+- [x] `srfi170-time-objects` — `posix-time` / `monotonic-time` return SRFI-19 time objects (Batch 11)
 
 ### Fixed compiler limits (`uint8_t` register file) (5)
 

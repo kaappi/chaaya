@@ -65,6 +65,7 @@ typedef enum ChObjectTag {
     CH_TAG_FILE_INFO = 29,
     CH_TAG_MUTEX = 30,
     CH_TAG_CONDVAR = 31,
+    CH_TAG_GROUP_INFO = 32,
 } ChObjectTag;
 
 typedef struct ChObject {
@@ -409,6 +410,12 @@ typedef struct ChCondvar {
     ChValue specific;
 } ChCondvar;
 
+typedef struct ChGroupInfo {
+    ChObject header;
+    ChValue name; /* string */
+    uint32_t gid;
+} ChGroupInfo;
+
 /* Signed i48 fixnum range. */
 #define CH_FIXNUM_MIN (-((int64_t)1 << 47))
 #define CH_FIXNUM_MAX (((int64_t)1 << 47) - 1)
@@ -483,6 +490,7 @@ bool ch_is_ephemeron(ChValue v);
 bool ch_is_file_info(ChValue v);
 bool ch_is_mutex(ChValue v);
 bool ch_is_condvar(ChValue v);
+bool ch_is_group_info(ChValue v);
 bool ch_is_exact_integer(ChValue v);
 bool ch_is_exact(ChValue v); /* integer or rational */
 bool ch_is_number(ChValue v);
@@ -519,6 +527,7 @@ ChEphemeron *ch_as_ephemeron(ChValue v);
 ChFileInfo *ch_as_file_info(ChValue v);
 ChMutex *ch_as_mutex(ChValue v);
 ChCondvar *ch_as_condvar(ChValue v);
+ChGroupInfo *ch_as_group_info(ChValue v);
 
 /* Collapse multiple values to the first (or void if none). */
 ChValue ch_coerce_single(ChValue v);

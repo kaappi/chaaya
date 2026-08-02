@@ -160,7 +160,13 @@ int ch_register_builtin_libraries(ChVM *vm) {
         "real-path",               "current-directory",   "set-current-directory!",
         "file-exists?",            "delete-file",
         "set-file-mode",           "umask",               "set-umask!",
-        "nice"};
+        "nice",
+        "user-uid",                "user-gid",
+        "user-effective-uid",      "user-effective-gid",
+        "user-supplementary-gids",
+        "group-info",              "group-info?",
+        "group-info:name",         "group-info:gid",
+        "posix-time",              "monotonic-time"};
     static const char *const srfi18_exports[] = {
         "make-thread",      "thread-start!",    "thread-join!",     "thread-sleep!",
         "thread-yield!",    "current-thread",   "thread?",          "thread-name",

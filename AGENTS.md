@@ -13,7 +13,7 @@ Requires CMake 3.21+, a C23-capable compiler, and libc. POSIX REPL uses vendored
 
 ```bash
 make            # configure + build → build/chaaya
-make test       # build + ctest (341 tests)
+make test       # build + ctest (343 tests)
 make bootstrap-scheme   # Kaappi-shaped bootstrap suites (17 files)
 make run        # REPL
 ```
@@ -105,7 +105,7 @@ stop-the-world mark-and-sweep with no write barrier.
 
 | Suite | Command | Notes |
 |-------|---------|-------|
-| C + Scheme (CTest) | `make test` | 341 tests; CI runs this |
+| C + Scheme (CTest) | `make test` | 343 tests; CI runs this |
 | Bootstrap | `make bootstrap-scheme` | Uses `run-bootstrap.sh`; needs suite-dir cwd for `include` fixtures |
 | Single bootstrap file | See `tests/scheme/run_bootstrap.cmake` | CTest prepends `harness.scm` |
 
@@ -121,8 +121,8 @@ When adding surface area, extend the relevant bootstrap suite
 see [docs/dev/scheme-tests.md](docs/dev/scheme-tests.md) for current
 wired/unwired counts. `jit-*.scm`/`llvm-*.scm` smoke files stay permanently
 unwired (no JIT/LLVM backend in Chaaya); a smaller remainder is gated on
-fiber/thread scheduler races, macro-expander depth/hygiene gaps, and missing
-SRFI-170 POSIX primitives (tracked in that doc, not in CTest).
+fiber/thread scheduler races, macro-expander depth/hygiene gaps, and fixed
+`uint8_t` register-file limits (tracked in that doc, not all wired in CTest).
 
 ## Conventions
 

@@ -3,12 +3,14 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <grp.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 static void define_prim(ChVM *vm, const char *name, ChNativeFn fn, int arity, int min_arity) {
@@ -457,6 +459,165 @@ static ChValue prim_create_temp_file(ChVM *vm, ChValue *args, int nargs) {
     return ch_gc_make_string_cstr(&vm->gc, template_buf);
 }
 
+
+static ChValue prim_user_uid(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)args;
+    (void)nargs;
+    return ch_make_fixnum((int64_t)getuid());
+}
+
+static ChValue prim_user_gid(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)args;
+    (void)nargs;
+    return ch_make_fixnum((int64_t)getgid());
+}
+
+static ChValue prim_user_effective_uid(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)args;
+    (void)nargs;
+    return ch_make_fixnum((int64_t)geteuid());
+}
+
+static ChValue prim_user_effective_gid(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)args;
+    (void)nargs;
+    return ch_make_fixnum((int64_t)getegid());
+}
+
+static ChValue prim_user_supplementary_gids(ChVM *vm, ChValue *args, int nargs) {
+    (void)args;
+    (void)nargs;
+    int count = getgroups(0, NULL);
+    if (count < 0) {
+        return raise_file_error(vm, "user-supplementary-gids: cannot query supplementary groups",
+                               CH_NIL);
+    }
+    gid_t *gids = NULL;
+    if (count > 0) {
+        gids = (gid_t *)malloc((size_t)count * sizeof(gid_t));
+        if (!gids) {
+            snprintf(vm->error, sizeof(vm->error), "user-supplementary-gids: out of memory");
+            return CH_UNDEFINED;
+        }
+        int n = getgroups(count, gids);
+        if (n < 0) {
+            free(gids);
+            return raise_file_error(vm, "user-supplementary-gids: cannot query supplementary groups",
+                                   CH_NIL);
+        }
+        count = n;
+    }
+    ChValue result = CH_NIL;
+    ch_gc_push(&vm->gc, &result);
+    for (int i = count - 1; i >= 0; i--) {
+        result = ch_gc_cons(&vm->gc, ch_make_fixnum((int64_t)gids[i]), result);
+    }
+    ch_gc_pop(&vm->gc);
+    free(gids);
+    return result;
+}
+
+static ChGroupInfo *require_group_info(ChVM *vm, ChValue v, const char *who) {
+    if (!ch_is_group_info(v)) {
+        snprintf(vm->error, sizeof(vm->error), "%s: expected group-info", who);
+        return NULL;
+    }
+    return ch_as_group_info(v);
+}
+
+static ChValue make_group_info_value(ChVM *vm, const char *name, gid_t gid) {
+    ChValue name_v = ch_gc_make_string_cstr(&vm->gc, name ? name : "");
+    return ch_gc_make_group_info(&vm->gc, name_v, (uint32_t)gid);
+}
+
+static ChValue prim_group_info(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (ch_is_fixnum(args[0])) {
+        int64_t id = ch_to_fixnum(args[0]);
+        if (id < 0 || (uint64_t)id > (uint64_t)UINT32_MAX) {
+            snprintf(vm->error, sizeof(vm->error), "group-info: expected valid group ID");
+            return CH_UNDEFINED;
+        }
+        struct group *g = getgrgid((gid_t)id);
+        if (!g) {
+            return CH_FALSE;
+        }
+        return make_group_info_value(vm, g->gr_name, g->gr_gid);
+    }
+    if (ch_is_string(args[0])) {
+        ChString *s = ch_as_string(args[0]);
+        if (memchr(s->data, '\0', s->len) != NULL) {
+            return raise_file_error(vm, "path contains embedded NUL byte", args[0]);
+        }
+        struct group *g = getgrnam(s->data);
+        if (!g) {
+            return CH_FALSE;
+        }
+        return make_group_info_value(vm, g->gr_name, g->gr_gid);
+    }
+    snprintf(vm->error, sizeof(vm->error), "group-info: expected string or integer");
+    return CH_UNDEFINED;
+}
+
+static ChValue prim_group_info_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)nargs;
+    return ch_is_group_info(args[0]) ? CH_TRUE : CH_FALSE;
+}
+
+static ChValue prim_group_info_name(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChGroupInfo *gi = require_group_info(vm, args[0], "group-info:name");
+    if (!gi) {
+        return CH_UNDEFINED;
+    }
+    return gi->name;
+}
+
+static ChValue prim_group_info_gid(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChGroupInfo *gi = require_group_info(vm, args[0], "group-info:gid");
+    if (!gi) {
+        return CH_UNDEFINED;
+    }
+    return ch_make_fixnum((int64_t)gi->gid);
+}
+
+static ChValue prim_posix_time(ChVM *vm, ChValue *args, int nargs) {
+    (void)args;
+    (void)nargs;
+    struct timespec ts;
+    if (timespec_get(&ts, TIME_UTC) == 0) {
+        snprintf(vm->error, sizeof(vm->error), "posix-time: could not read system clock");
+        return CH_UNDEFINED;
+    }
+    ChValue type_sym = ch_gc_intern_symbol_cstr(&vm->gc, "time-utc");
+    return ch_gc_make_time(&vm->gc, (int64_t)ts.tv_sec, (int32_t)ts.tv_nsec, type_sym);
+}
+
+static ChValue prim_monotonic_time(ChVM *vm, ChValue *args, int nargs) {
+    (void)args;
+    (void)nargs;
+    struct timespec ts;
+#if defined(CLOCK_MONOTONIC)
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        snprintf(vm->error, sizeof(vm->error), "monotonic-time: could not read monotonic clock");
+        return CH_UNDEFINED;
+    }
+#else
+    if (timespec_get(&ts, TIME_UTC) == 0) {
+        snprintf(vm->error, sizeof(vm->error), "monotonic-time: could not read system clock");
+        return CH_UNDEFINED;
+    }
+#endif
+    ChValue type_sym = ch_gc_intern_symbol_cstr(&vm->gc, "time-monotonic");
+    return ch_gc_make_time(&vm->gc, (int64_t)ts.tv_sec, (int32_t)ts.tv_nsec, type_sym);
+}
+
 void ch_register_filesystem_primitives(ChVM *vm) {
     define_prim(vm, "directory-files", prim_directory_files, -1, 1);
     define_prim(vm, "file-info", prim_file_info, -1, 1);
@@ -481,4 +642,16 @@ void ch_register_filesystem_primitives(ChVM *vm) {
     define_prim(vm, "umask", prim_umask, 0, 0);
     define_prim(vm, "set-umask!", prim_set_umask, 1, 1);
     define_prim(vm, "nice", prim_nice, -1, 0);
+    define_prim(vm, "user-uid", prim_user_uid, 0, 0);
+    define_prim(vm, "user-gid", prim_user_gid, 0, 0);
+    define_prim(vm, "user-effective-uid", prim_user_effective_uid, 0, 0);
+    define_prim(vm, "user-effective-gid", prim_user_effective_gid, 0, 0);
+    define_prim(vm, "user-supplementary-gids", prim_user_supplementary_gids, 0, 0);
+    define_prim(vm, "group-info", prim_group_info, 1, 1);
+    define_prim(vm, "group-info?", prim_group_info_p, 1, 1);
+    define_prim(vm, "group-info:name", prim_group_info_name, 1, 1);
+    define_prim(vm, "group-info:gid", prim_group_info_gid, 1, 1);
+    define_prim(vm, "posix-time", prim_posix_time, 0, 0);
+    define_prim(vm, "monotonic-time", prim_monotonic_time, 0, 0);
 }
+

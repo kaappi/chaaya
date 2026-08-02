@@ -186,6 +186,10 @@ bool ch_is_condvar(ChValue v) {
     return CH_IS_TAG(v, CH_TAG_CONDVAR);
 }
 
+bool ch_is_group_info(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_GROUP_INFO);
+}
+
 bool ch_is_exact_integer(ChValue v) {
     return ch_is_fixnum(v) || ch_is_bignum(v);
 }
@@ -330,6 +334,10 @@ ChMutex *ch_as_mutex(ChValue v) {
 
 ChCondvar *ch_as_condvar(ChValue v) {
     return (ChCondvar *)ch_to_object(v);
+}
+
+ChGroupInfo *ch_as_group_info(ChValue v) {
+    return (ChGroupInfo *)ch_to_object(v);
 }
 
 const char *ch_symbol_basename(ChSymbol *sym) {

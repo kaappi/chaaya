@@ -645,6 +645,9 @@ chaaya_kaappi_deferred_test(smoke_bignum_rational_ffi_793 tests/scheme/kaappi-de
 chaaya_kaappi_deferred_test(smoke_gc_root_growth tests/scheme/kaappi-deferred/smoke/gc-root-growth.scm)
 chaaya_kaappi_deferred_test(smoke_filesystem_intcast tests/scheme/kaappi-deferred/smoke/filesystem-intcast.scm)
 chaaya_kaappi_deferred_test(smoke_filesystem_nul_path_805 tests/scheme/kaappi-deferred/smoke/filesystem-nul-path-805.scm)
+# Batch 11 smoke (SRFI-170 group/time — 2026-08-02)
+chaaya_kaappi_deferred_test(smoke_group_info_by_name_1161 tests/scheme/kaappi-deferred/smoke/group-info-by-name-1161.scm)
+chaaya_kaappi_deferred_test(smoke_srfi170_time_objects tests/scheme/kaappi-deferred/smoke/srfi170-time-objects.scm)
 # nested-wait-under-sleep-dirty-snapshot-1490.scm: passes in isolation but
 # times out under parallel ctest load (contended scheduler timing) — a
 # cross-thread scheduler race, not a quick fix; left unwired (see

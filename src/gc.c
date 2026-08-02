@@ -142,6 +142,7 @@ static void free_object(ChObject *obj) {
     case CH_TAG_FILE_INFO:
     case CH_TAG_MUTEX:
     case CH_TAG_CONDVAR:
+    case CH_TAG_GROUP_INFO:
         break;
     default:
         break;
@@ -558,6 +559,9 @@ static void mark_object_contents(ChObject *obj) {
         mark_value(c->specific);
         break;
     }
+    case CH_TAG_GROUP_INFO:
+        mark_value(((ChGroupInfo *)obj)->name);
+        break;
     }
 }
 
@@ -806,6 +810,8 @@ static int references_young(ChObject *obj) {
         ChCondvar *c = (ChCondvar *)obj;
         return is_young_pointer(c->name) || is_young_pointer(c->specific);
     }
+    case CH_TAG_GROUP_INFO:
+        return is_young_pointer(((ChGroupInfo *)obj)->name);
     default:
         return 0;
     }
@@ -1442,4 +1448,13 @@ ChValue ch_gc_make_file_info(ChGC *gc, const ChFileInfo *info) {
     fi->uid = info->uid;
     fi->gid = info->gid;
     return ch_make_pointer(&fi->header);
+}
+
+ChValue ch_gc_make_group_info(ChGC *gc, ChValue name, uint32_t gid) {
+    ch_gc_push(gc, &name);
+    ChGroupInfo *gi = (ChGroupInfo *)ch_gc_alloc(gc, sizeof(ChGroupInfo), CH_TAG_GROUP_INFO);
+    ch_gc_pop(gc);
+    gi->name = name;
+    gi->gid = gid;
+    return ch_make_pointer(&gi->header);
 }
