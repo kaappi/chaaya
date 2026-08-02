@@ -4,6 +4,7 @@
 #include "chaaya/fiber.h"
 #include "chaaya/ffi.h"
 #include "chaaya/library.h"
+#include "chaaya/thread.h"
 #include "chaaya/opcode.h"
 #include "chaaya/printer.h"
 #include "chaaya/environment.h"
@@ -29,6 +30,8 @@ void ch_vm_init(ChVM *vm) {
     }
     vm->result = CH_VOID;
     vm->default_random_source = CH_UNDEFINED;
+    vm->ffi_callback_deferred_value = CH_UNDEFINED;
+    vm->ffi_callback_raise_result = CH_UNDEFINED;
     vm->fiber_runtime = (ChFiberRuntime *)calloc(1, sizeof(ChFiberRuntime));
     if (vm->fiber_runtime) {
         ch_fiber_runtime_init(vm->fiber_runtime);
@@ -37,6 +40,9 @@ void ch_vm_init(ChVM *vm) {
     if (vm->libraries) {
         ch_library_registry_init(vm->libraries);
     }
+    vm->owns_globals = true;
+    vm->current_thread = CH_NIL;
+    ch_thread_runtime_init(vm);
 }
 
 void ch_vm_deinit(ChVM *vm) {
@@ -58,6 +64,7 @@ void ch_vm_deinit(ChVM *vm) {
     for (size_t i = 0; i < vm->syntax_prop_count; i++) {
         free(vm->syntax_props[i].key);
     }
+    ch_thread_runtime_deinit(vm);
     if (vm->fiber_runtime) {
         ch_fiber_runtime_deinit(vm->fiber_runtime);
         free(vm->fiber_runtime);
@@ -233,6 +240,13 @@ int ch_vm_parameter_pop(ChVM *vm, ChValue parameter) {
 }
 
 ChValue ch_vm_raise(ChVM *vm, ChValue obj, int continuable) {
+    if (vm->ffi_callback_depth > 0) {
+        if (!vm->ffi_callback_deferred) {
+            vm->ffi_callback_deferred = true;
+            vm->ffi_callback_deferred_value = obj;
+        }
+        return CH_UNDEFINED;
+    }
     if (vm->handler_count == 0) {
         char *printed = ch_value_to_string(obj, false);
         snprintf(vm->error, sizeof(vm->error), "uncaught exception: %s",
@@ -378,11 +392,23 @@ void ch_vm_mark_gc_roots(ChVM *vm) {
             ch_gc_mark_value(rt->ready[idx]);
         }
         ch_gc_mark_value(rt->current);
+        ch_gc_mark_value(vm->current_thread);
         for (size_t i = 0; i < CH_REACTOR_MAX_TIMERS; i++) {
             if (rt->reactor.timers[i].active) {
                 ch_gc_mark_value(rt->reactor.timers[i].payload);
             }
         }
+        for (size_t i = 0; i < CH_REACTOR_MAX_FDS; i++) {
+            if (rt->reactor.fds[i].active) {
+                ch_gc_mark_value(rt->reactor.fds[i].payload);
+            }
+        }
+    }
+    if (vm->ffi_callback_deferred_value != CH_UNDEFINED) {
+        ch_gc_mark_value(vm->ffi_callback_deferred_value);
+    }
+    if (vm->ffi_callback_raise_result != CH_UNDEFINED) {
+        ch_gc_mark_value(vm->ffi_callback_raise_result);
     }
 }
 
@@ -849,6 +875,9 @@ static ChVMStatus run_until(ChVM *vm, size_t target_frames) {
             uint8_t nargs = read_u8(frame);
             ChVMStatus st =
                 call_value(vm, regs[base], frame->reg_base + base, nargs, op == CH_OP_TAIL_CALL);
+            if (st == CH_VM_FIBER_PARKED) {
+                return CH_VM_FIBER_PARKED;
+            }
             if (st == CH_VM_CONTINUATION_INVOKED) {
                 /* Keep running if the restore is still above our barrier;
                  * otherwise propagate so ch_vm_apply can deliver regs[base]. */
@@ -997,6 +1026,10 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
         ChValue result = n->fn(vm, args, nargs);
         pop_gc_roots_n(vm, roots);
         vm->native_was_tail = saved_native_was_tail;
+        if (vm->fiber_parked) {
+            vm->has_pending_call = false;
+            return CH_VM_FIBER_PARKED;
+        }
         if (vm->continuation_invoked) {
             vm->continuation_invoked = false;
             vm->has_pending_call = false;
@@ -1068,7 +1101,19 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
         size_t roots = push_gc_roots(vm);
         int rc = ch_ffi_call(vm, proc, args, nargs, &result);
         pop_gc_roots_n(vm, roots);
+        if (rc == 1) {
+            vm->regs[result_slot] = vm->ffi_callback_raise_result;
+            if (tail && vm->frame_count == 0) {
+                vm->result = vm->ffi_callback_raise_result;
+            }
+            return CH_VM_OK;
+        }
         if (rc != 0) {
+            if (vm->error[0] != '\0' && vm->handler_count > 0) {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "%s", vm->error);
+                return raise_message_to_slot(vm, buf, result_slot);
+            }
             return CH_VM_RUNTIME_ERROR;
         }
         vm->regs[result_slot] = result;
@@ -1182,6 +1227,10 @@ static ChVMStatus call_value(ChVM *vm, ChValue callee, size_t arg_base, int narg
     return CH_VM_OK;
 }
 
+ChVMStatus ch_vm_run_fiber_resume(ChVM *vm, size_t target_frames) {
+    return run_until(vm, target_frames);
+}
+
 ChVMStatus ch_vm_apply(ChVM *vm, ChValue proc, ChValue *args, int nargs, ChValue *out) {
     size_t saved_frames = vm->frame_count;
     size_t base = vm->reg_top;
@@ -1196,6 +1245,10 @@ ChVMStatus ch_vm_apply(ChVM *vm, ChValue proc, ChValue *args, int nargs, ChValue
 
     ChVMStatus st = call_value(vm, proc, base, nargs, false);
     for (;;) {
+        if (st == CH_VM_FIBER_PARKED) {
+            vm->reg_top = compute_reg_top(vm);
+            return CH_VM_FIBER_PARKED;
+        }
         if (st == CH_VM_CONTINUATION_INVOKED) {
             if (vm->frame_count < saved_frames) {
                 /* Escaped past this apply. */

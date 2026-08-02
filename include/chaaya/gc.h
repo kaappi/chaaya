@@ -30,12 +30,18 @@ typedef struct ChGC {
     size_t major_collections;
     uint8_t promotion_age;
     uint8_t major_interval;
+    uint16_t id;           /* unique heap id for owner checks */
+    uint8_t owns_symbols;  /* 0 => symbol table shared with parent */
     ChValue *roots[CH_GC_ROOT_MAX];
     size_t root_count;
     /* Ephemerons pending weak-key fixpoint during collection. */
     ChValue *pending_ephemerons;
     size_t pending_ephem_count;
     size_t pending_ephem_cap;
+    /* Old containers that may point at young objects (generational). */
+    ChObject **remembered_set;
+    size_t remembered_count;
+    size_t remembered_cap;
     /* symbol intern table */
     ChSymbol **symbols;
     size_t symbol_count;
@@ -46,6 +52,8 @@ typedef struct ChGC {
 } ChGC;
 
 void ch_gc_init(ChGC *gc);
+/* Child heap for an OS thread: private nursery; shares parent's symbol table. */
+void ch_gc_init_for_thread(ChGC *gc, ChGC *parent);
 void ch_gc_deinit(ChGC *gc);
 
 void ch_gc_push(ChGC *gc, ChValue *slot);

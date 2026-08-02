@@ -19,7 +19,7 @@ Source
   → IR              (lower → analyze → optimize → reify; see [ir.md](ir.md))
   → Compiler        (reified AST → bytecode; derived forms desugared in C)
   → VM              (register bytecode)
-  → GC              (stop-the-world mark-sweep)
+  → GC              (stop-the-world generational mark-sweep)
 ```
 
 Kaappi’s pipeline is Reader → Expander → IR → Analysis → Optim → Bytecode → VM.
@@ -91,9 +91,25 @@ Stop-the-world **mark-and-sweep**:
 2. Mark reachable heap objects from those roots.
 3. Sweep unmarked objects from the intrusive list.
 
-Allocation may trigger collection when `alloc_count` crosses a threshold.
-There is **no** write barrier or generation split yet; a generational collector
-is planned when allocation pressure demands it.
+Allocation may trigger a **minor** collection when `alloc_count` crosses a
+threshold (periodic **major** collections sweep both generations). New objects
+start in the young generation and promote by survival age. `ch_gc_write_barrier`
+records old→young stores on a remembered set; minor GC marks from roots plus
+remembered-set object contents, then prunes entries that no longer reference
+young objects.
+
+**Fibers / reactor:** cooperative fibers (`src/fiber.c`) park on channels, timers,
+and fds. The reactor (`src/reactor.c`) owns a timer heap plus a kqueue (Darwin)
+or epoll (Linux) fd multiplexer; `thread-sleep!` schedules a timer and parks the
+current fiber so siblings keep running. Feature ids: `chaaya-reactor` /
+`kaappi-reactor`.
+
+**SRFI-18 / shared channels / FFI callbacks:** OS threads (`src/thread.c`) use a
+per-thread GC/VM, `ch_gc_deep_copy` at start/join, and owner checks on fibers and
+local channels. Captured channels promote to `SharedChannel` (`src/shared_channel.c`)
+with envelope deep-copy. FFI callbacks (`src/ffi_callback.c`) provide a small
+trampoline slot pool with deferred exception re-raise and NUL-safe string args.
+Feature ids: `chaaya-threads` / `kaappi-threads`.
 
 **Contributor rule:** any `ChValue` that must survive a `ch_gc_*` allocation must
 be on the root stack (or reachable from something that is) before the

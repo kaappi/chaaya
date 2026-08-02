@@ -48,12 +48,13 @@
                      (let ((s (make-string 50 #\x)))
                        (yield)
                        (channel-send ch (string-length s)))))))
-    (let ((r1 (channel-receive ch))
-          (r2 (channel-receive ch)))
+    (let ((vals (list (channel-receive ch) (channel-receive ch))))
       (fiber-join f1)
       (fiber-join f2)
-      (check "fiber vector survives GC" 42 r1)
-      (check "fiber string survives GC" 50 r2))))
+      ;; Receive order is scheduler-dependent under cooperative nested yield;
+      ;; the GC regression cares that both payloads survive.
+      (check "fiber vector survives GC" #t (if (memv 42 vals) #t #f))
+      (check "fiber string survives GC" #t (if (memv 50 vals) #t #f)))))
 
 ;; Test 3: Deeply nested closures in fiber survive remembered-set pruning
 (let ((f (spawn (lambda ()

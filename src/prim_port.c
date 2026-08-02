@@ -1,5 +1,6 @@
 #include "chaaya/prim.h"
 
+#include "chaaya/fiber.h"
 #include "chaaya/printer.h"
 #include "chaaya/reader.h"
 
@@ -7,6 +8,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <poll.h>
+#include <unistd.h>
+#endif
 
 #define CH_PORT_INPUT_CHUNK 4096
 
@@ -103,13 +108,34 @@ static int port_write_bytes(ChPort *p, const char *data, size_t len) {
     return -1;
 }
 
-static int append_file_input_bytes(ChPort *p) {
+/* Returns bytes appended (>0), 0 at EOF, -1 on error, -2 if fiber parked on fd. */
+static int append_file_input_bytes(ChVM *vm, ChPort *p, int may_park) {
     if (p->kind != CH_PORT_STDIO && p->kind != CH_PORT_FILE) {
         return 0;
     }
     if (!p->file || p->closed || !p->input) {
         return -1;
     }
+#if !defined(_WIN32)
+    int fd = fileno(p->file);
+    if (may_park && vm && vm->fiber_runtime && ch_is_fiber(vm->fiber_runtime->current) &&
+        fd >= 0) {
+        struct pollfd pfd;
+        memset(&pfd, 0, sizeof(pfd));
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        int pr = poll(&pfd, 1, 0);
+        if (pr == 0) {
+            if (ch_fiber_wait_fd(vm, fd, CH_REACTOR_READ) != 0) {
+                return -1;
+            }
+            return -2;
+        }
+    }
+#else
+    (void)vm;
+    (void)may_park;
+#endif
     size_t free_space = p->cap > p->len ? p->cap - p->len : 0;
     if (free_space == 0) {
         if (ensure_port_capacity(p, CH_PORT_INPUT_CHUNK) != 0) {
@@ -129,7 +155,7 @@ static int append_file_input_bytes(ChPort *p) {
     return (int)n;
 }
 
-static int ensure_port_input_byte(ChPort *p) {
+static int ensure_port_input_byte(ChVM *vm, ChPort *p, int may_park) {
     if (p->closed || !p->input) {
         return -1;
     }
@@ -139,7 +165,10 @@ static int ensure_port_input_byte(ChPort *p) {
     if (p->kind == CH_PORT_STDIO || p->kind == CH_PORT_FILE) {
         while (p->pos >= p->len) {
             compact_port_input_buffer(p);
-            int appended = append_file_input_bytes(p);
+            int appended = append_file_input_bytes(vm, p, may_park);
+            if (appended == -2) {
+                return -2;
+            }
             if (appended <= 0) {
                 return appended;
             }
@@ -747,16 +776,22 @@ static ChValue prim_newline(ChVM *vm, ChValue *args, int nargs) {
     return CH_VOID;
 }
 
-static int port_peek_byte(ChPort *p) {
-    int ready = ensure_port_input_byte(p);
+static int port_peek_byte(ChVM *vm, ChPort *p) {
+    int ready = ensure_port_input_byte(vm, p, 1);
+    if (ready == -2) {
+        return -2;
+    }
     if (ready <= 0) {
         return -1;
     }
     return (unsigned char)p->buf[p->pos];
 }
 
-static int port_read_byte(ChPort *p) {
-    int ready = ensure_port_input_byte(p);
+static int port_read_byte(ChVM *vm, ChPort *p) {
+    int ready = ensure_port_input_byte(vm, p, 1);
+    if (ready == -2) {
+        return -2;
+    }
     if (ready <= 0) {
         return -1;
     }
@@ -779,8 +814,12 @@ static int utf8_seq_len(unsigned char b0) {
     return -1;
 }
 
-static int port_decode_utf8_at(ChPort *p, size_t pos, uint32_t *cp_out, size_t *next_out) {
-    if (ensure_port_input_byte(p) <= 0 && pos >= p->len) {
+static int port_decode_utf8_at(ChVM *vm, ChPort *p, size_t pos, uint32_t *cp_out, size_t *next_out) {
+    int ready0 = ensure_port_input_byte(vm, p, 1);
+    if (ready0 == -2) {
+        return -2;
+    }
+    if (ready0 <= 0 && pos >= p->len) {
         return -1;
     }
     if (pos >= p->len) {
@@ -792,7 +831,10 @@ static int port_decode_utf8_at(ChPort *p, size_t pos, uint32_t *cp_out, size_t *
         return -1;
     }
     while (pos + (size_t)n > p->len) {
-        int ready = ensure_port_input_byte(p);
+        int ready = ensure_port_input_byte(vm, p, 1);
+        if (ready == -2) {
+            return -2;
+        }
         if (ready < 0) {
             return -1;
         }
@@ -827,7 +869,11 @@ static ChValue prim_read_char(ChVM *vm, ChValue *args, int nargs) {
     }
     uint32_t cp = 0;
     size_t next = 0;
-    if (port_decode_utf8_at(p, p->pos, &cp, &next) != 0) {
+    int rc = port_decode_utf8_at(vm, p, p->pos, &cp, &next);
+    if (rc == -2) {
+        return CH_UNDEFINED;
+    }
+    if (rc != 0) {
         return CH_EOF_OBJ;
     }
     p->pos = next;
@@ -841,7 +887,11 @@ static ChValue prim_peek_char(ChVM *vm, ChValue *args, int nargs) {
     }
     uint32_t cp = 0;
     size_t next = 0;
-    if (port_decode_utf8_at(p, p->pos, &cp, &next) != 0) {
+    int rc = port_decode_utf8_at(vm, p, p->pos, &cp, &next);
+    if (rc == -2) {
+        return CH_UNDEFINED;
+    }
+    if (rc != 0) {
         return CH_EOF_OBJ;
     }
     return ch_make_char(cp);
@@ -852,7 +902,7 @@ static ChValue prim_char_ready_p(ChVM *vm, ChValue *args, int nargs) {
     if (!p) {
         return CH_UNDEFINED;
     }
-    int ready = ensure_port_input_byte(p);
+    int ready = ensure_port_input_byte(vm, p, 0);
     if (ready < 0) {
         return CH_UNDEFINED;
     }
@@ -954,7 +1004,11 @@ static ChValue prim_read_line(ChVM *vm, ChValue *args, int nargs) {
     size_t len = 0;
     size_t cap = 0;
     for (;;) {
-        int c = port_read_byte(p);
+        int c = port_read_byte(vm, p);
+        if (c == -2) {
+            free(buf);
+            return CH_UNDEFINED;
+        }
         if (c < 0) {
             if (len == 0) {
                 free(buf);
@@ -966,8 +1020,13 @@ static ChValue prim_read_line(ChVM *vm, ChValue *args, int nargs) {
             break;
         }
         if (c == '\r') {
-            if (port_peek_byte(p) == '\n') {
-                (void)port_read_byte(p);
+            int peek = port_peek_byte(vm, p);
+            if (peek == -2) {
+                free(buf);
+                return CH_UNDEFINED;
+            }
+            if (peek == '\n') {
+                (void)port_read_byte(vm, p);
             }
             break;
         }
@@ -1014,7 +1073,12 @@ static ChValue prim_read_string(ChVM *vm, ChValue *args, int nargs) {
     for (int64_t i = 0; i < k; i++) {
         uint32_t cp = 0;
         size_t next = 0;
-        if (port_decode_utf8_at(p, p->pos, &cp, &next) != 0) {
+        int rc = port_decode_utf8_at(vm, p, p->pos, &cp, &next);
+        if (rc == -2) {
+            free(buf);
+            return CH_UNDEFINED;
+        }
+        if (rc != 0) {
             if (i == 0) {
                 free(buf);
                 return CH_EOF_OBJ;
@@ -1096,7 +1160,10 @@ static ChValue prim_read_u8(ChVM *vm, ChValue *args, int nargs) {
     if (!p) {
         return CH_UNDEFINED;
     }
-    int c = port_read_byte(p);
+    int c = port_read_byte(vm, p);
+    if (c == -2) {
+        return CH_UNDEFINED;
+    }
     if (c < 0) {
         return CH_EOF_OBJ;
     }
@@ -1108,7 +1175,10 @@ static ChValue prim_peek_u8(ChVM *vm, ChValue *args, int nargs) {
     if (!p) {
         return CH_UNDEFINED;
     }
-    int c = port_peek_byte(p);
+    int c = port_peek_byte(vm, p);
+    if (c == -2) {
+        return CH_UNDEFINED;
+    }
     if (c < 0) {
         return CH_EOF_OBJ;
     }
@@ -1167,7 +1237,11 @@ static ChValue prim_read_bytevector(ChVM *vm, ChValue *args, int nargs) {
     }
     size_t n = 0;
     while (n < k) {
-        int c = port_read_byte(p);
+        int c = port_read_byte(vm, p);
+        if (c == -2) {
+            free(buf);
+            return CH_UNDEFINED;
+        }
         if (c < 0) {
             break;
         }
@@ -1226,7 +1300,10 @@ static ChValue prim_read_bytevector_bang(ChVM *vm, ChValue *args, int nargs) {
     }
     size_t n = 0;
     while (n < count) {
-        int c = port_read_byte(p);
+        int c = port_read_byte(vm, p);
+        if (c == -2) {
+            return CH_UNDEFINED;
+        }
         if (c < 0) {
             break;
         }
@@ -1270,7 +1347,7 @@ static bool reader_refill_from_port(ChReader *r, void *ctx) {
     if (!p || p->closed || !p->input || (p->kind != CH_PORT_STDIO && p->kind != CH_PORT_FILE)) {
         return false;
     }
-    int appended = append_file_input_bytes(p);
+    int appended = append_file_input_bytes(NULL, p, 0);
     r->src = p->buf ? p->buf + p->pos : "";
     r->len = p->len - p->pos;
     return appended > 0;

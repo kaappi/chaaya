@@ -178,6 +178,14 @@ bool ch_is_file_info(ChValue v) {
     return CH_IS_TAG(v, CH_TAG_FILE_INFO);
 }
 
+bool ch_is_mutex(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_MUTEX);
+}
+
+bool ch_is_condvar(ChValue v) {
+    return CH_IS_TAG(v, CH_TAG_CONDVAR);
+}
+
 bool ch_is_exact_integer(ChValue v) {
     return ch_is_fixnum(v) || ch_is_bignum(v);
 }
@@ -314,6 +322,14 @@ ChEphemeron *ch_as_ephemeron(ChValue v) {
 
 ChFileInfo *ch_as_file_info(ChValue v) {
     return (ChFileInfo *)ch_to_object(v);
+}
+
+ChMutex *ch_as_mutex(ChValue v) {
+    return (ChMutex *)ch_to_object(v);
+}
+
+ChCondvar *ch_as_condvar(ChValue v) {
+    return (ChCondvar *)ch_to_object(v);
 }
 
 const char *ch_symbol_basename(ChSymbol *sym) {

@@ -85,6 +85,11 @@ smoke files (see `CMakeLists.txt` `smoke_*` entries).
 | File | Reason |
 |------|--------|
 | `jit-*.scm`, `llvm-*.scm` | JIT/LLVM backend not in Chaaya |
-| SRFI-18 thread smokes | OS threads not implemented |
+| Most SRFI-18 / cross-thread smokes | Wire one file at a time after local green |
+| Full `fiber-channel-rendezvous-thread.scm` | Prefer lite smoke until rendezvous-across-threads is hardened |
+
+**Runtime/platform smokes wired:** `fiber-gc-remembered-set`, `fiber-channel-close`,
+`fiber-sleep-does-not-stall-sibling`, `thread-sleep-876`, `thread-self-join`,
+`fiber-channel-rendezvous-thread-lite`.
 
 Add further smoke batches only after local green + `make test`.

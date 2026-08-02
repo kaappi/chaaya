@@ -20,6 +20,10 @@ static const char *const k_features[] = {
     "kaappi",
     "chaaya-fibers",
     "chaaya-ffi",
+    "chaaya-reactor",
+    "kaappi-reactor",
+    "chaaya-threads",
+    "kaappi-threads",
     "ieee-float",
     "exact-closed",
 #if defined(__APPLE__)

@@ -1,21 +1,35 @@
+#include "chaaya/ffi_callback.h"
 #include "chaaya/gc.h"
 #include "chaaya/vm.h"
 #include "chaaya/library.h"
 #include "chaaya/environment.h"
 #include "chaaya/ffi.h"
 #include "chaaya/fiber.h"
+#include "chaaya/shared_channel.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static uint16_t g_next_gc_id = 1;
 
 void ch_gc_init(ChGC *gc) {
     memset(gc, 0, sizeof(*gc));
     gc->threshold = CH_GC_DEFAULT_THRESHOLD;
     gc->promotion_age = CH_GC_DEFAULT_PROMOTION_AGE;
     gc->major_interval = CH_GC_DEFAULT_MAJOR_INTERVAL;
+    gc->id = g_next_gc_id++;
+    if (gc->id == 0) {
+        gc->id = g_next_gc_id++;
+    }
+    gc->owns_symbols = 1;
     gc->symbol_cap = 64;
     gc->symbols = (ChSymbol **)calloc(gc->symbol_cap, sizeof(ChSymbol *));
+}
+
+void ch_gc_init_for_thread(ChGC *gc, ChGC *parent) {
+    (void)parent;
+    ch_gc_init(gc);
 }
 
 static void free_object(ChObject *obj) {
@@ -107,6 +121,10 @@ static void free_object(ChObject *obj) {
         break;
     case CH_TAG_CHANNEL: {
         ChChannel *channel = (ChChannel *)obj;
+        if (channel->shared) {
+            ch_shared_channel_release((ChSharedChannel *)channel->shared);
+            channel->shared = NULL;
+        }
         free(channel->items);
         break;
     }
@@ -120,6 +138,8 @@ static void free_object(ChObject *obj) {
     case CH_TAG_RANDOM_SOURCE:
     case CH_TAG_EPHEMERON:
     case CH_TAG_FILE_INFO:
+    case CH_TAG_MUTEX:
+    case CH_TAG_CONDVAR:
         break;
     default:
         break;
@@ -138,8 +158,11 @@ static void free_object_list(ChObject *obj) {
 void ch_gc_deinit(ChGC *gc) {
     free_object_list(gc->young_objects);
     free_object_list(gc->old_objects);
-    free(gc->symbols);
+    if (gc->owns_symbols) {
+        free(gc->symbols);
+    }
     free(gc->pending_ephemerons);
+    free(gc->remembered_set);
     memset(gc, 0, sizeof(*gc));
 }
 
@@ -230,11 +253,21 @@ static void process_weak_refs(ChGC *gc) {
     gc->pending_ephem_count = 0;
 }
 
+static void mark_object_contents(ChObject *obj);
+
 static void mark_object(ChObject *obj) {
     if (!obj || obj->marked) {
         return;
     }
     obj->marked = 1;
+    mark_object_contents(obj);
+}
+
+/* Trace referents without setting obj->marked (remembered-set / minor GC). */
+static void mark_object_contents(ChObject *obj) {
+    if (!obj) {
+        return;
+    }
     switch ((ChObjectTag)obj->tag) {
     case CH_TAG_PAIR: {
         ChPair *p = (ChPair *)obj;
@@ -404,16 +437,55 @@ static void mark_object(ChObject *obj) {
         mark_value(fiber->thunk);
         mark_value(fiber->result);
         mark_value(fiber->error);
+        mark_value(fiber->waiting_on);
+        mark_value(fiber->park_payload);
+        mark_value(fiber->name);
+        mark_value(fiber->specific);
+        if (fiber->snapshot.valid) {
+            for (size_t i = 0; i < fiber->snapshot.register_count; i++) {
+                mark_value(fiber->snapshot.registers[i]);
+            }
+            for (size_t i = 0; i < fiber->snapshot.frame_count; i++) {
+                if (fiber->snapshot.frames[i].closure) {
+                    mark_object(&fiber->snapshot.frames[i].closure->header);
+                }
+            }
+            for (size_t i = 0; i < fiber->snapshot.wind_count; i++) {
+                mark_value(fiber->snapshot.winds[i].before);
+                mark_value(fiber->snapshot.winds[i].after);
+            }
+            for (size_t i = 0; i < fiber->snapshot.handler_count; i++) {
+                mark_value(fiber->snapshot.handlers[i].handler);
+            }
+            for (size_t i = 0; i < fiber->snapshot.parameter_binding_count; i++) {
+                mark_value(fiber->snapshot.parameter_bindings[i].parameter);
+                mark_value(fiber->snapshot.parameter_bindings[i].value);
+            }
+        }
         break;
     }
     case CH_TAG_CHANNEL: {
         ChChannel *channel = (ChChannel *)obj;
-        if (channel->storage_cap == 0 || !channel->items) {
+        if (channel->shared) {
+            for (size_t i = 0; i < channel->recv_waiter_count; i++) {
+                mark_value(channel->recv_waiters[i]);
+            }
+            for (size_t i = 0; i < channel->send_waiter_count; i++) {
+                mark_value(channel->send_waiters[i]);
+            }
             break;
         }
-        for (size_t i = 0; i < channel->count; i++) {
-            size_t idx = (channel->head + i) % channel->storage_cap;
-            mark_value(channel->items[idx]);
+        if (channel->items) {
+            for (size_t i = 0; i < channel->count; i++) {
+                size_t idx = (channel->head + i) % channel->storage_cap;
+                mark_value(channel->items[idx]);
+            }
+        }
+        for (size_t i = 0; i < channel->recv_waiter_count; i++) {
+            mark_value(channel->recv_waiters[i]);
+        }
+        for (size_t i = 0; i < channel->send_waiter_count; i++) {
+            mark_value(channel->send_waiters[i]);
         }
         break;
     }
@@ -432,7 +504,281 @@ static void mark_object(ChObject *obj) {
         break;
     case CH_TAG_FILE_INFO:
         break;
+    case CH_TAG_MUTEX: {
+        ChMutex *m = (ChMutex *)obj;
+        mark_value(m->owner);
+        mark_value(m->name);
+        mark_value(m->specific);
+        break;
     }
+    case CH_TAG_CONDVAR: {
+        ChCondvar *c = (ChCondvar *)obj;
+        mark_value(c->name);
+        break;
+    }
+    }
+}
+
+static int is_young_pointer(ChValue v) {
+    if (!ch_is_pointer(v)) {
+        return 0;
+    }
+    ChObject *obj = ch_to_object(v);
+    return obj && obj->generation == CH_OBJ_GEN_YOUNG;
+}
+
+static int references_young(ChObject *obj) {
+    if (!obj) {
+        return 0;
+    }
+    switch ((ChObjectTag)obj->tag) {
+    case CH_TAG_PAIR: {
+        ChPair *p = (ChPair *)obj;
+        return is_young_pointer(p->car) || is_young_pointer(p->cdr);
+    }
+    case CH_TAG_VECTOR: {
+        ChVector *vec = (ChVector *)obj;
+        for (size_t i = 0; i < vec->len; i++) {
+            if (is_young_pointer(vec->items[i])) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    case CH_TAG_FUNCTION: {
+        ChFunction *fn = (ChFunction *)obj;
+        for (size_t i = 0; i < fn->const_count; i++) {
+            if (is_young_pointer(fn->constants[i])) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    case CH_TAG_CLOSURE: {
+        ChClosure *cl = (ChClosure *)obj;
+        if (!cl->fn) {
+            return 0;
+        }
+        if (cl->fn->header.generation == CH_OBJ_GEN_YOUNG) {
+            return 1;
+        }
+        for (uint8_t i = 0; i < cl->fn->num_upvalues; i++) {
+            ChUpvalue *uv = cl->upvalues[i];
+            if (!uv) {
+                continue;
+            }
+            if (uv->is_closed) {
+                if (is_young_pointer(uv->closed_value)) {
+                    return 1;
+                }
+            } else if (uv->location && is_young_pointer(*uv->location)) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    case CH_TAG_VALUES: {
+        ChValues *vs = (ChValues *)obj;
+        for (size_t i = 0; i < vs->count; i++) {
+            if (is_young_pointer(vs->items[i])) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    case CH_TAG_RECORD_TYPE: {
+        ChRecordType *rt = (ChRecordType *)obj;
+        if (is_young_pointer(rt->name)) {
+            return 1;
+        }
+        return rt->parent && rt->parent->header.generation == CH_OBJ_GEN_YOUNG;
+    }
+    case CH_TAG_RECORD: {
+        ChRecord *r = (ChRecord *)obj;
+        if (r->rtype && r->rtype->header.generation == CH_OBJ_GEN_YOUNG) {
+            return 1;
+        }
+        for (uint16_t i = 0; i < r->num_fields; i++) {
+            if (is_young_pointer(r->fields[i])) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    case CH_TAG_PROMISE:
+        return is_young_pointer(((ChPromise *)obj)->value);
+    case CH_TAG_RATIONAL: {
+        ChRational *r = (ChRational *)obj;
+        return is_young_pointer(r->numerator) || is_young_pointer(r->denominator);
+    }
+    case CH_TAG_ENVIRONMENT: {
+        ChEnvironment *env = (ChEnvironment *)obj;
+        for (size_t i = 0; i < env->env.count; i++) {
+            if (env->env.bindings[i].name &&
+                env->env.bindings[i].name->header.generation == CH_OBJ_GEN_YOUNG) {
+                return 1;
+            }
+            if (env->env.bindings[i].defined && is_young_pointer(env->env.bindings[i].value)) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    case CH_TAG_ERROR_OBJ: {
+        ChErrorObject *err = (ChErrorObject *)obj;
+        return is_young_pointer(err->message) || is_young_pointer(err->irritants);
+    }
+    case CH_TAG_PARAMETER: {
+        ChParameter *param = (ChParameter *)obj;
+        return is_young_pointer(param->init) || is_young_pointer(param->converter) ||
+               is_young_pointer(param->value);
+    }
+    case CH_TAG_HASHTABLE: {
+        ChHashtable *ht = (ChHashtable *)obj;
+        for (size_t i = 0; i < ht->cap; i++) {
+            if (!ht->used || !ht->used[i] || ht->keys[i] == CH_UNDEFINED) {
+                continue;
+            }
+            if (is_young_pointer(ht->keys[i]) || is_young_pointer(ht->vals[i])) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    case CH_TAG_TIME:
+        return is_young_pointer(((ChTime *)obj)->type_sym);
+    case CH_TAG_FIBER: {
+        ChFiber *fiber = (ChFiber *)obj;
+        if (is_young_pointer(fiber->thunk) || is_young_pointer(fiber->result) ||
+            is_young_pointer(fiber->error) || is_young_pointer(fiber->waiting_on) ||
+            is_young_pointer(fiber->park_payload) || is_young_pointer(fiber->name) ||
+            is_young_pointer(fiber->specific)) {
+            return 1;
+        }
+        if (fiber->snapshot.valid) {
+            for (size_t i = 0; i < fiber->snapshot.register_count; i++) {
+                if (is_young_pointer(fiber->snapshot.registers[i])) {
+                    return 1;
+                }
+            }
+        }
+        return 0;
+    }
+    case CH_TAG_CHANNEL: {
+        ChChannel *channel = (ChChannel *)obj;
+        if (channel->shared) {
+            for (size_t i = 0; i < channel->recv_waiter_count; i++) {
+                if (is_young_pointer(channel->recv_waiters[i])) {
+                    return 1;
+                }
+            }
+            for (size_t i = 0; i < channel->send_waiter_count; i++) {
+                if (is_young_pointer(channel->send_waiters[i])) {
+                    return 1;
+                }
+            }
+            return 0;
+        }
+        if (channel->items) {
+            for (size_t i = 0; i < channel->count; i++) {
+                size_t idx = (channel->head + i) % channel->storage_cap;
+                if (is_young_pointer(channel->items[idx])) {
+                    return 1;
+                }
+            }
+        }
+        for (size_t i = 0; i < channel->recv_waiter_count; i++) {
+            if (is_young_pointer(channel->recv_waiters[i])) {
+                return 1;
+            }
+        }
+        for (size_t i = 0; i < channel->send_waiter_count; i++) {
+            if (is_young_pointer(channel->send_waiters[i])) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    case CH_TAG_FOREIGN_PROC: {
+        ChForeignProcedure *proc = (ChForeignProcedure *)obj;
+        return is_young_pointer(proc->library) || is_young_pointer(proc->name);
+    }
+    case CH_TAG_TRANSFORMER: {
+        ChTransformer *tr = (ChTransformer *)obj;
+        for (size_t i = 0; i < tr->literal_count; i++) {
+            if (tr->literals[i] && tr->literals[i]->header.generation == CH_OBJ_GEN_YOUNG) {
+                return 1;
+            }
+        }
+        for (size_t i = 0; i < tr->rule_count; i++) {
+            if (is_young_pointer(tr->patterns[i]) || is_young_pointer(tr->templates[i])) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    case CH_TAG_CONTINUATION: {
+        ChContinuation *c = (ChContinuation *)obj;
+        for (size_t i = 0; i < c->register_count; i++) {
+            if (is_young_pointer(c->registers[i])) {
+                return 1;
+            }
+        }
+        for (size_t i = 0; i < c->frame_count; i++) {
+            if (c->frames[i].closure &&
+                c->frames[i].closure->header.generation == CH_OBJ_GEN_YOUNG) {
+                return 1;
+            }
+        }
+        for (size_t i = 0; i < c->wind_count; i++) {
+            if (is_young_pointer(c->winds[i].before) || is_young_pointer(c->winds[i].after)) {
+                return 1;
+            }
+        }
+        for (size_t i = 0; i < c->handler_count; i++) {
+            if (is_young_pointer(c->handlers[i].handler)) {
+                return 1;
+            }
+        }
+        for (size_t i = 0; i < c->parameter_binding_count; i++) {
+            if (is_young_pointer(c->parameter_bindings[i].parameter) ||
+                is_young_pointer(c->parameter_bindings[i].value)) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    default:
+        return 0;
+    }
+}
+
+static void remembered_set_add(ChGC *gc, ChObject *container) {
+    if (!gc || !container || !ch_object_is_old(container)) {
+        return;
+    }
+    if (gc->remembered_count >= gc->remembered_cap) {
+        size_t ncap = gc->remembered_cap ? gc->remembered_cap * 2 : 64;
+        ChObject **next =
+            (ChObject **)realloc(gc->remembered_set, ncap * sizeof(ChObject *));
+        if (!next) {
+            abort();
+        }
+        gc->remembered_set = next;
+        gc->remembered_cap = ncap;
+    }
+    gc->remembered_set[gc->remembered_count++] = container;
+}
+
+static void prune_remembered_set(ChGC *gc) {
+    size_t write = 0;
+    for (size_t i = 0; i < gc->remembered_count; i++) {
+        ChObject *obj = gc->remembered_set[i];
+        if (obj && ch_object_is_old(obj) && references_young(obj)) {
+            gc->remembered_set[write++] = obj;
+        }
+    }
+    gc->remembered_count = write;
 }
 
 static void mark_value(ChValue v) {
@@ -451,6 +797,7 @@ static void mark_roots_and_symbols(ChGC *gc) {
     if (gc->vm) {
         ch_vm_mark_gc_roots(gc->vm);
         ch_library_mark_gc_roots(gc->vm);
+        ch_ffi_callback_mark_roots();
     }
     for (size_t i = 0; i < gc->compiling_fn_depth; i++) {
         if (gc->compiling_fns[i]) {
@@ -465,8 +812,7 @@ static void mark_roots_and_symbols(ChGC *gc) {
             mark_object(&gc->symbols[i]->header);
         }
     }
-    process_weak_refs(gc);
-    g_mark_gc = NULL;
+    /* Caller finishes weak fixpoint after any remembered-set tracing. */
 }
 
 static void sweep_list_major(ChGC *gc, ChObject **head, size_t *count) {
@@ -513,6 +859,10 @@ static void sweep_young_minor(ChGC *gc) {
             obj->next = gc->old_objects;
             gc->old_objects = obj;
             gc->old_count++;
+            /* Newly old container may still point at young siblings. */
+            if (references_young(obj)) {
+                remembered_set_add(gc, obj);
+            }
             continue;
         }
         link = &obj->next;
@@ -520,11 +870,15 @@ static void sweep_young_minor(ChGC *gc) {
 }
 
 void ch_gc_collect_minor(ChGC *gc) {
+    clear_marks(gc->old_objects);
     mark_roots_and_symbols(gc);
-    for (ChObject *obj = gc->old_objects; obj; obj = obj->next) {
-        mark_object(obj);
+    for (size_t i = 0; i < gc->remembered_count; i++) {
+        mark_object_contents(gc->remembered_set[i]);
     }
+    process_weak_refs(gc);
+    g_mark_gc = NULL;
     sweep_young_minor(gc);
+    prune_remembered_set(gc);
     clear_marks(gc->old_objects);
     gc->alloc_count = 0;
     gc->minor_collections++;
@@ -534,8 +888,11 @@ void ch_gc_collect_minor(ChGC *gc) {
 
 void ch_gc_collect_major(ChGC *gc) {
     mark_roots_and_symbols(gc);
+    process_weak_refs(gc);
+    g_mark_gc = NULL;
     sweep_list_major(gc, &gc->young_objects, &gc->young_count);
     sweep_list_major(gc, &gc->old_objects, &gc->old_count);
+    gc->remembered_count = 0;
     gc->alloc_count = 0;
     gc->major_collections++;
     gc->collections++;
@@ -554,7 +911,7 @@ void ch_gc_write_barrier(ChGC *gc, ChObject *owner, ChValue value) {
     if (!child || child->generation != CH_OBJ_GEN_YOUNG) {
         return;
     }
-    ch_gc_promote_to_old(gc, child);
+    remembered_set_add(gc, owner);
 }
 
 void ch_gc_promote_to_old(ChGC *gc, ChObject *obj) {
@@ -577,6 +934,9 @@ void ch_gc_promote_to_old(ChGC *gc, ChObject *obj) {
     obj->next = gc->old_objects;
     gc->old_objects = obj;
     gc->old_count++;
+    if (references_young(obj)) {
+        remembered_set_add(gc, obj);
+    }
 }
 
 void *ch_gc_alloc(ChGC *gc, size_t size, ChObjectTag tag) {
@@ -595,6 +955,7 @@ void *ch_gc_alloc(ChGC *gc, size_t size, ChObjectTag tag) {
     obj->marked = 0;
     obj->generation = CH_OBJ_GEN_YOUNG;
     obj->age = 0;
+    obj->owner = gc->id;
     obj->next = gc->young_objects;
     gc->young_objects = obj;
     gc->young_count++;

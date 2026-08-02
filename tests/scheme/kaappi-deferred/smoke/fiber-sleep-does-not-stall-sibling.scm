@@ -28,7 +28,8 @@
         (write expected)
         (newline))))
 
-(define (now) (time->seconds (current-time)))
+;; Chaaya exposes R7RS current-second; Kaappi's smoke used SRFI-19 current-time.
+(define (now) (current-second))
 
 (define fast-done-at #f)
 (define sleep-seconds 0.3)

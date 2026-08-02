@@ -276,12 +276,18 @@ int ch_register_builtin_libraries(ChVM *vm) {
     static const char *const chaaya_fibers_exports[] = {
         "spawn-fiber", "spawn", "fiber-yield", "yield", "fiber?", "fiber-join",
         "make-channel", "channel?", "channel-send!", "channel-send", "channel-recv",
-        "channel-receive"};
+        "channel-receive", "channel-close!", "channel-closed?"};
     static const char *const chaaya_ffi_exports[] = {"open-foreign-library",
                                                       "close-foreign-library!",
                                                       "foreign-library?",
                                                       "foreign-procedure",
-                                                      "foreign-procedure?"};
+                                                      "foreign-procedure?",
+                                                      "ffi-open",
+                                                      "ffi-close",
+                                                      "ffi-fn",
+                                                      "ffi-callback",
+                                                      "ffi-callback-release",
+                                                      "ffi-callback?"};
     static const char *const chaaya_primitives_exports[] = {
         "%default-random-source", "%rs-next-int", "%rs-next-real"};
     static const char *const srfi170_exports[] = {
@@ -295,7 +301,9 @@ int ch_register_builtin_libraries(ChVM *vm) {
     static const char *const srfi18_exports[] = {
         "make-thread",      "thread-start!",    "thread-join!",     "thread-sleep!",
         "thread-yield!",    "current-thread",   "thread?",          "thread-name",
-        "make-mutex",       "mutex?"};
+        "make-mutex",       "mutex?",           "mutex-lock!",      "mutex-unlock!",
+        "make-condition-variable", "condition-variable?",
+        "condition-variable-signal!", "condition-variable-broadcast!"};
     static const char *const srfi254_exports[] = {
         "make-ephemeron",   "ephemeron?",       "ephemeron-key",    "ephemeron-value",
         "ephemeron-broken?", "ephemeron-ref",   "reference-barrier"};
@@ -416,6 +424,11 @@ int ch_register_builtin_libraries(ChVM *vm) {
         return -1;
     }
     if (register_exports_from_globals(vm, "chaaya.ffi", chaaya_ffi_exports,
+                                      sizeof(chaaya_ffi_exports) / sizeof(chaaya_ffi_exports[0])) !=
+        0) {
+        return -1;
+    }
+    if (register_exports_from_globals(vm, "kaappi.ffi", chaaya_ffi_exports,
                                       sizeof(chaaya_ffi_exports) / sizeof(chaaya_ffi_exports[0])) !=
         0) {
         return -1;

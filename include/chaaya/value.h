@@ -63,6 +63,8 @@ typedef enum ChObjectTag {
     CH_TAG_RANDOM_SOURCE = 27,
     CH_TAG_EPHEMERON = 28,
     CH_TAG_FILE_INFO = 29,
+    CH_TAG_MUTEX = 30,
+    CH_TAG_CONDVAR = 31,
 } ChObjectTag;
 
 typedef struct ChObject {
@@ -70,7 +72,8 @@ typedef struct ChObject {
     uint8_t marked;
     uint8_t generation;
     uint8_t age;
-    uint16_t reserved;
+    uint16_t reserved; /* CH_OBJ_FLAG_* */
+    uint16_t owner;    /* allocating GC heap id (SRFI-18 foreign-owner checks) */
     struct ChObject *next; /* GC heap list */
 } ChObject;
 
@@ -381,6 +384,21 @@ typedef struct ChFileInfo {
     uint32_t gid;
 } ChFileInfo;
 
+typedef struct ChMutex {
+    ChObject header;
+    uint8_t locked;
+    uint8_t abandoned;
+    ChValue owner; /* fiber/thread that holds the lock, or NIL */
+    ChValue name;
+    ChValue specific;
+} ChMutex;
+
+typedef struct ChCondvar {
+    ChObject header;
+    uint64_t signal_generation;
+    ChValue name;
+} ChCondvar;
+
 /* Signed i48 fixnum range. */
 #define CH_FIXNUM_MIN (-((int64_t)1 << 47))
 #define CH_FIXNUM_MAX (((int64_t)1 << 47) - 1)
@@ -453,6 +471,8 @@ bool ch_is_foreign_procedure(ChValue v);
 bool ch_is_random_source(ChValue v);
 bool ch_is_ephemeron(ChValue v);
 bool ch_is_file_info(ChValue v);
+bool ch_is_mutex(ChValue v);
+bool ch_is_condvar(ChValue v);
 bool ch_is_exact_integer(ChValue v);
 bool ch_is_exact(ChValue v); /* integer or rational */
 bool ch_is_number(ChValue v);
@@ -487,6 +507,8 @@ ChForeignProcedure *ch_as_foreign_procedure(ChValue v);
 ChRandomSource *ch_as_random_source(ChValue v);
 ChEphemeron *ch_as_ephemeron(ChValue v);
 ChFileInfo *ch_as_file_info(ChValue v);
+ChMutex *ch_as_mutex(ChValue v);
+ChCondvar *ch_as_condvar(ChValue v);
 
 /* Collapse multiple values to the first (or void if none). */
 ChValue ch_coerce_single(ChValue v);

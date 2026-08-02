@@ -35,7 +35,11 @@ add_library(chaaya_core STATIC
   src/features.c
   src/fiber.c
   src/reactor.c
+  src/thread.c
+  src/gc_deep_copy.c
+  src/shared_channel.c
   src/ffi.c
+  src/ffi_callback.c
   src/llvm_backend.c
   src/lsp.c
   src/vm.c
@@ -92,6 +96,9 @@ endif()
 if(UNIX AND NOT APPLE)
   target_link_libraries(chaaya_core PUBLIC dl)
 endif()
+
+find_package(Threads REQUIRED)
+target_link_libraries(chaaya_core PUBLIC Threads::Threads)
 
 add_executable(chaaya src/main.c)
 target_link_libraries(chaaya PRIVATE chaaya_core)
@@ -305,6 +312,8 @@ chaaya_kaappi_deferred_test(smoke_tail_calls tests/scheme/kaappi-deferred/smoke/
 chaaya_kaappi_deferred_test(smoke_bignum_expt_gc tests/scheme/kaappi-deferred/smoke/bignum-expt-gc.scm)
 chaaya_kaappi_deferred_test(smoke_closure_upvalue_gc tests/scheme/kaappi-deferred/smoke/closure-upvalue-gc.scm)
 chaaya_kaappi_deferred_test(smoke_fiber_channel_gc tests/scheme/kaappi-deferred/smoke/fiber-channel-gc.scm)
+chaaya_kaappi_deferred_test(smoke_fiber_channel_close tests/scheme/kaappi-deferred/smoke/fiber-channel-close.scm)
+chaaya_kaappi_deferred_test(smoke_fiber_gc_remembered_set tests/scheme/kaappi-deferred/smoke/fiber-gc-remembered-set.scm)
 chaaya_kaappi_deferred_test(smoke_promise_gc tests/scheme/kaappi-deferred/smoke/promise-gc.scm)
 chaaya_kaappi_deferred_test(smoke_mutation_write_barrier tests/scheme/kaappi-deferred/smoke/mutation-write-barrier.scm)
 chaaya_kaappi_deferred_test(smoke_upvalue_write_barrier tests/scheme/kaappi-deferred/smoke/upvalue-write-barrier.scm)
@@ -322,6 +331,9 @@ chaaya_kaappi_deferred_test(smoke_define_values_gc tests/scheme/kaappi-deferred/
 chaaya_kaappi_deferred_test(smoke_dynamic_wind_double_875 tests/scheme/kaappi-deferred/smoke/dynamic-wind-double-875.scm)
 chaaya_kaappi_deferred_test(smoke_exact_inexact_842_848 tests/scheme/kaappi-deferred/smoke/exact-inexact-842-848.scm)
 chaaya_kaappi_deferred_test(smoke_fiber_round_robin tests/scheme/kaappi-deferred/smoke/fiber-round-robin.scm)
+chaaya_kaappi_deferred_test(smoke_fiber_sleep_does_not_stall_sibling tests/scheme/kaappi-deferred/smoke/fiber-sleep-does-not-stall-sibling.scm)
+chaaya_kaappi_deferred_test(smoke_thread_sleep_876 tests/scheme/kaappi-deferred/smoke/thread-sleep-876.scm)
+chaaya_kaappi_deferred_test(smoke_fiber_channel_rendezvous_thread_lite tests/scheme/kaappi-deferred/smoke/fiber-channel-rendezvous-thread-lite.scm)
 chaaya_kaappi_deferred_test(smoke_hash_table_walk_rehash tests/scheme/kaappi-deferred/smoke/hash-table-walk-rehash.scm)
 chaaya_kaappi_deferred_test(smoke_inexact_to_exact tests/scheme/kaappi-deferred/smoke/inexact-to-exact.scm)
 chaaya_kaappi_deferred_test(smoke_rational_rounding tests/scheme/kaappi-deferred/smoke/rational-rounding.scm)

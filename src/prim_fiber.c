@@ -1,6 +1,8 @@
 #include "chaaya/prim.h"
 
 #include "chaaya/fiber.h"
+#include "chaaya/rational.h"
+#include "chaaya/thread.h"
 
 #include <stdio.h>
 
@@ -35,6 +37,7 @@ static ChValue prim_make_channel(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
     size_t capacity = 0;
+    int rendezvous = 0;
     if (nargs == 1) {
         if (!ch_is_fixnum(args[0])) {
             snprintf(vm->error, sizeof(vm->error), "make-channel: expected non-negative integer");
@@ -46,8 +49,26 @@ static ChValue prim_make_channel(ChVM *vm, ChValue *args, int nargs) {
             return CH_UNDEFINED;
         }
         capacity = (size_t)n;
+        rendezvous = (n == 0);
     }
-    return ch_gc_make_channel(&vm->gc, capacity);
+    return ch_gc_make_channel(&vm->gc, capacity, rendezvous);
+}
+
+static ChValue prim_channel_close(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (ch_channel_close(vm, args[0]) != 0) {
+        return CH_UNDEFINED;
+    }
+    return CH_VOID;
+}
+
+static ChValue prim_channel_closed_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    int closed = 0;
+    if (ch_channel_closed(vm, args[0], &closed) != 0) {
+        return CH_UNDEFINED;
+    }
+    return closed ? CH_TRUE : CH_FALSE;
 }
 
 static ChValue prim_channel_send(ChVM *vm, ChValue *args, int nargs) {
@@ -88,71 +109,178 @@ static ChValue prim_fiber_join(ChVM *vm, ChValue *args, int nargs) {
     return result;
 }
 
-static ChValue thread_nyi(ChVM *vm, const char *who) {
-    snprintf(vm->error, sizeof(vm->error), "%s: SRFI-18 threads are NYI in this MVP", who);
-    return CH_UNDEFINED;
-}
-
 static ChValue prim_make_thread(ChVM *vm, ChValue *args, int nargs) {
-    (void)args;
-    (void)nargs;
-    return thread_nyi(vm, "make-thread");
+    ChValue name = CH_FALSE;
+    if (nargs >= 2) {
+        name = args[1];
+    }
+    ChValue out = CH_NIL;
+    if (ch_thread_make(vm, args[0], name, &out) != 0) {
+        return CH_UNDEFINED;
+    }
+    return out;
 }
 
 static ChValue prim_thread_start(ChVM *vm, ChValue *args, int nargs) {
-    (void)args;
     (void)nargs;
-    return thread_nyi(vm, "thread-start!");
+    if (ch_thread_start(vm, args[0]) != 0) {
+        return CH_UNDEFINED;
+    }
+    return args[0];
 }
 
 static ChValue prim_thread_join(ChVM *vm, ChValue *args, int nargs) {
-    (void)args;
     (void)nargs;
-    return thread_nyi(vm, "thread-join!");
+    ChValue result = CH_UNDEFINED;
+    if (ch_thread_join(vm, args[0], &result) != 0) {
+        return CH_UNDEFINED;
+    }
+    return result;
+}
+
+static int sleep_seconds_arg(ChValue v, double *out) {
+    if (ch_is_fixnum(v)) {
+        *out = (double)ch_to_fixnum(v);
+        return 1;
+    }
+    if (ch_is_flonum(v)) {
+        *out = ch_to_flonum(v);
+        return 1;
+    }
+    if (ch_is_bignum(v) || ch_is_rational_obj(v)) {
+        *out = ch_exact_to_f64(v);
+        return 1;
+    }
+    return 0;
 }
 
 static ChValue prim_thread_sleep(ChVM *vm, ChValue *args, int nargs) {
-    (void)args;
     (void)nargs;
-    return thread_nyi(vm, "thread-sleep!");
+    if (args[0] == CH_FALSE) {
+        snprintf(vm->error, sizeof(vm->error), "thread-sleep!: expected number");
+        return CH_UNDEFINED;
+    }
+    double seconds = 0.0;
+    if (!sleep_seconds_arg(args[0], &seconds)) {
+        snprintf(vm->error, sizeof(vm->error), "thread-sleep!: expected number");
+        return CH_UNDEFINED;
+    }
+    if (ch_fiber_sleep(vm, seconds) != 0) {
+        return CH_UNDEFINED;
+    }
+    return CH_VOID;
 }
 
 static ChValue prim_thread_yield(ChVM *vm, ChValue *args, int nargs) {
     (void)args;
     (void)nargs;
-    return thread_nyi(vm, "thread-yield!");
+    if (vm->fiber_runtime && ch_is_fiber(vm->fiber_runtime->current)) {
+        if (ch_fiber_yield(vm) != 0) {
+            return CH_UNDEFINED;
+        }
+    }
+    return CH_VOID;
 }
 
 static ChValue prim_current_thread(ChVM *vm, ChValue *args, int nargs) {
     (void)args;
     (void)nargs;
-    return thread_nyi(vm, "current-thread");
+    return ch_thread_current(vm);
 }
 
 static ChValue prim_thread_p(ChVM *vm, ChValue *args, int nargs) {
     (void)vm;
-    (void)args;
     (void)nargs;
-    return CH_FALSE;
+    return ch_is_fiber(args[0]) ? CH_TRUE : CH_FALSE;
 }
 
 static ChValue prim_thread_name(ChVM *vm, ChValue *args, int nargs) {
-    (void)args;
     (void)nargs;
-    return thread_nyi(vm, "thread-name");
+    if (ch_thread_check_owner(vm, args[0], "thread-name") != 0) {
+        return CH_UNDEFINED;
+    }
+    return ch_as_fiber(args[0])->name;
 }
 
 static ChValue prim_make_mutex(ChVM *vm, ChValue *args, int nargs) {
-    (void)args;
-    (void)nargs;
-    return thread_nyi(vm, "make-mutex");
+    ChValue name = CH_FALSE;
+    if (nargs >= 1) {
+        name = args[0];
+    }
+    return ch_gc_make_mutex(&vm->gc, name);
 }
 
 static ChValue prim_mutex_p(ChVM *vm, ChValue *args, int nargs) {
     (void)vm;
-    (void)args;
     (void)nargs;
-    return CH_FALSE;
+    return ch_is_mutex(args[0]) ? CH_TRUE : CH_FALSE;
+}
+
+static ChValue prim_mutex_lock(ChVM *vm, ChValue *args, int nargs) {
+    double timeout = -1.0;
+    if (nargs >= 2) {
+        if (args[1] == CH_FALSE) {
+            timeout = 0.0;
+        } else if (!sleep_seconds_arg(args[1], &timeout)) {
+            snprintf(vm->error, sizeof(vm->error), "mutex-lock!: expected timeout");
+            return CH_UNDEFINED;
+        }
+    }
+    int rc = ch_mutex_lock(vm, args[0], timeout);
+    if (rc < 0) {
+        return CH_UNDEFINED;
+    }
+    return rc ? CH_TRUE : CH_FALSE;
+}
+
+static ChValue prim_mutex_unlock(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs <= 1) {
+        if (ch_mutex_unlock(vm, args[0]) != 0) {
+            return CH_UNDEFINED;
+        }
+        return CH_VOID;
+    }
+    double timeout = -1.0;
+    if (nargs >= 3) {
+        if (!sleep_seconds_arg(args[2], &timeout)) {
+            snprintf(vm->error, sizeof(vm->error), "mutex-unlock!: expected timeout");
+            return CH_UNDEFINED;
+        }
+    }
+    if (ch_mutex_unlock_wait(vm, args[0], args[1], timeout) != 0) {
+        return CH_UNDEFINED;
+    }
+    return CH_VOID;
+}
+
+static ChValue prim_make_condvar(ChVM *vm, ChValue *args, int nargs) {
+    ChValue name = CH_FALSE;
+    if (nargs >= 1) {
+        name = args[0];
+    }
+    return ch_gc_make_condvar(&vm->gc, name);
+}
+
+static ChValue prim_condvar_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)vm;
+    (void)nargs;
+    return ch_is_condvar(args[0]) ? CH_TRUE : CH_FALSE;
+}
+
+static ChValue prim_condvar_signal(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (ch_condvar_signal(vm, args[0]) != 0) {
+        return CH_UNDEFINED;
+    }
+    return CH_VOID;
+}
+
+static ChValue prim_condvar_broadcast(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (ch_condvar_broadcast(vm, args[0]) != 0) {
+        return CH_UNDEFINED;
+    }
+    return CH_VOID;
 }
 
 void ch_register_fiber_primitives(ChVM *vm) {
@@ -168,8 +296,9 @@ void ch_register_fiber_primitives(ChVM *vm) {
     define_prim(vm, "channel-send", prim_channel_send, 2, 2);
     define_prim(vm, "channel-recv", prim_channel_recv, 1, 1);
     define_prim(vm, "channel-receive", prim_channel_recv, 1, 1);
+    define_prim(vm, "channel-close!", prim_channel_close, 1, 1);
+    define_prim(vm, "channel-closed?", prim_channel_closed_p, 1, 1);
 
-    /* SRFI-18 subset stubs with explicit NYI errors. */
     define_prim(vm, "make-thread", prim_make_thread, -1, 1);
     define_prim(vm, "thread-start!", prim_thread_start, -1, 1);
     define_prim(vm, "thread-join!", prim_thread_join, -1, 1);
@@ -180,4 +309,10 @@ void ch_register_fiber_primitives(ChVM *vm) {
     define_prim(vm, "thread-name", prim_thread_name, 1, 1);
     define_prim(vm, "make-mutex", prim_make_mutex, -1, 0);
     define_prim(vm, "mutex?", prim_mutex_p, 1, 1);
+    define_prim(vm, "mutex-lock!", prim_mutex_lock, -1, 1);
+    define_prim(vm, "mutex-unlock!", prim_mutex_unlock, -1, 1);
+    define_prim(vm, "make-condition-variable", prim_make_condvar, -1, 0);
+    define_prim(vm, "condition-variable?", prim_condvar_p, 1, 1);
+    define_prim(vm, "condition-variable-signal!", prim_condvar_signal, 1, 1);
+    define_prim(vm, "condition-variable-broadcast!", prim_condvar_broadcast, 1, 1);
 }

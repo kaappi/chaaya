@@ -35,6 +35,7 @@ typedef enum ChVMStatus {
     CH_VM_RUNTIME_ERROR,
     CH_VM_STACK_OVERFLOW,
     CH_VM_CONTINUATION_INVOKED,
+    CH_VM_FIBER_PARKED,
 } ChVMStatus;
 
 typedef struct ChCallFrame {
@@ -119,9 +120,21 @@ typedef struct ChVM {
 
     /* Phase 10: cooperative fibers + timer reactor. */
     struct ChFiberRuntime *fiber_runtime;
+    bool fiber_parked; /* native requested cooperative fiber park */
+
+    /* SRFI-18: current OS-thread handle (fiber with os_state) on this VM. */
+    ChValue current_thread;
+    bool owns_globals; /* false for child OS-thread VMs sharing parent globals */
+    struct ChVM *parent_vm; /* non-NULL for child thread VMs */
 
     /* SRFI 27 default random source (owned heap object). */
     ChValue default_random_source;
+
+    /* FFI callback trampoline state (Phase F). */
+    int ffi_callback_depth;
+    bool ffi_callback_deferred;
+    ChValue ffi_callback_deferred_value;
+    ChValue ffi_callback_raise_result;
 
     /* REPL debugger (Phase 8 MVP). */
     bool debug_mode;
@@ -149,6 +162,9 @@ ChVMStatus ch_vm_eval_function(ChVM *vm, ChFunction *fn, ChValue *out);
 
 /* Call a procedure without clearing the existing stack (for dynamic-wind etc.). */
 ChVMStatus ch_vm_apply(ChVM *vm, ChValue proc, ChValue *args, int nargs, ChValue *out);
+
+/* Resume bytecode after a fiber snapshot restore (run down to target_frames). */
+ChVMStatus ch_vm_run_fiber_resume(ChVM *vm, size_t target_frames);
 
 /* Parameter object dynamic binding helpers. */
 ChValue ch_vm_parameter_ref(ChVM *vm, ChValue parameter);

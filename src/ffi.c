@@ -1,6 +1,7 @@
 #include "chaaya/ffi.h"
 
 #include "chaaya/bignum.h"
+#include "chaaya/ffi_callback.h"
 #include "chaaya/rational.h"
 #include "chaaya/vm.h"
 
@@ -268,7 +269,12 @@ static int marshal_pointer_arg(ChVM *vm, ChValue value, void **out) {
         return 0;
     }
     if (ch_is_string(value)) {
-        *out = ch_as_string(value)->data;
+        ChString *str = ch_as_string(value);
+        if (memchr(str->data, '\0', str->len) != NULL) {
+            set_error(vm, "ffi: string argument contains embedded NUL byte");
+            return -1;
+        }
+        *out = str->data;
         return 0;
     }
     if (ch_is_bytevector(value)) {
@@ -1055,6 +1061,15 @@ int ch_ffi_call(ChVM *vm, ChForeignProcedure *proc, ChValue *args, int nargs, Ch
     }
     if (rc != 0) {
         set_error(vm, "foreign-procedure: unsupported signature");
+        return -1;
+    }
+
+    int deferred = ch_ffi_callback_raise_deferred(vm);
+    if (deferred == 1) {
+        *out = vm->ffi_callback_raise_result;
+        return 1;
+    }
+    if (deferred < 0) {
         return -1;
     }
 

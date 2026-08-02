@@ -1,7 +1,10 @@
 #include "chaaya/prim.h"
 
+#include "chaaya/bignum.h"
 #include "chaaya/ffi.h"
+#include "chaaya/ffi_callback.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -146,6 +149,102 @@ static ChValue prim_ffi_fn(ChVM *vm, ChValue *args, int nargs) {
     return result;
 }
 
+static int exact_to_u64(ChValue value, uint64_t *out) {
+    if (ch_is_fixnum(value)) {
+        int64_t n = ch_to_fixnum(value);
+        if (n < 0) {
+            return 0;
+        }
+        *out = (uint64_t)n;
+        return 1;
+    }
+    if (ch_is_bignum(value)) {
+        ChBignum *bn = ch_as_bignum(value);
+        if (!bn->positive || bn->len != 1) {
+            return 0;
+        }
+        *out = bn->limbs[0];
+        return 1;
+    }
+    return 0;
+}
+
+static void *value_to_fn_ptr(ChVM *vm, ChValue value) {
+    (void)vm;
+    if (value == CH_FALSE) {
+        return NULL;
+    }
+    uint64_t addr = 0;
+    if (!exact_to_u64(value, &addr)) {
+        return NULL;
+    }
+    return (void *)(uintptr_t)addr;
+}
+
+static ChValue fn_ptr_to_value(ChVM *vm, void *ptr) {
+    if (!ptr) {
+        return CH_FALSE;
+    }
+    uintptr_t addr = (uintptr_t)ptr;
+    if (addr <= (uintptr_t)INT64_MAX) {
+        return ch_make_integer(&vm->gc, (int64_t)addr);
+    }
+    uint64_t limbs[1] = {(uint64_t)addr};
+    return ch_gc_make_bignum_from_limbs(&vm->gc, limbs, 1, 1);
+}
+
+static ChValue prim_ffi_callback(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_procedure(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "ffi-callback: expected procedure");
+        return CH_UNDEFINED;
+    }
+
+    ChFFIType arg_types[CH_FFI_MAX_ARGS];
+    uint8_t arity = 0;
+    if (parse_arg_types(vm, args[1], arg_types, &arity) != 0) {
+        retarget_error_prefix(vm, "foreign-procedure:", "ffi-callback:");
+        return CH_UNDEFINED;
+    }
+
+    ChFFIType result_type = CH_FFI_TYPE_VOID;
+    if (!ch_ffi_parse_type_symbol(args[2], &result_type)) {
+        snprintf(vm->error, sizeof(vm->error), "ffi-callback: unsupported return type");
+        return CH_UNDEFINED;
+    }
+
+    ChFFICallbackSig sig;
+    if (!ch_ffi_callback_match_sig(arg_types, arity, result_type, &sig)) {
+        snprintf(vm->error, sizeof(vm->error), "ffi-callback: unsupported callback signature");
+        return CH_UNDEFINED;
+    }
+
+    char err[256] = {0};
+    void *fn = ch_ffi_callback_make_sig(vm, args[0], sig, err, sizeof(err));
+    if (!fn) {
+        snprintf(vm->error, sizeof(vm->error), "%s", err[0] ? err : "ffi-callback: allocation failed");
+        return CH_UNDEFINED;
+    }
+    return fn_ptr_to_value(vm, fn);
+}
+
+static ChValue prim_ffi_callback_release(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    void *fn = value_to_fn_ptr(vm, args[0]);
+    if (!fn || !ch_ffi_callback_p(fn)) {
+        snprintf(vm->error, sizeof(vm->error), "ffi-callback-release: expected ffi-callback");
+        return CH_UNDEFINED;
+    }
+    ch_ffi_callback_release(fn);
+    return CH_VOID;
+}
+
+static ChValue prim_ffi_callback_p(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    void *fn = value_to_fn_ptr(vm, args[0]);
+    return (fn && ch_ffi_callback_p(fn)) ? CH_TRUE : CH_FALSE;
+}
+
 void ch_register_ffi_primitives(ChVM *vm) {
     define_prim(vm, "open-foreign-library", prim_open_foreign_library, 1, 1);
     define_prim(vm, "close-foreign-library!", prim_close_foreign_library, 1, 1);
@@ -157,4 +256,7 @@ void ch_register_ffi_primitives(ChVM *vm) {
     define_prim(vm, "ffi-open", prim_ffi_open, 1, 1);
     define_prim(vm, "ffi-close", prim_close_foreign_library, 1, 1);
     define_prim(vm, "ffi-fn", prim_ffi_fn, 4, 4);
+    define_prim(vm, "ffi-callback", prim_ffi_callback, 3, 3);
+    define_prim(vm, "ffi-callback-release", prim_ffi_callback_release, 1, 1);
+    define_prim(vm, "ffi-callback?", prim_ffi_callback_p, 1, 1);
 }
