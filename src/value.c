@@ -416,6 +416,10 @@ bool ch_eqv(ChValue a, ChValue b) {
     if (ch_is_complex_obj(a) && ch_is_complex_obj(b)) {
         ChComplex *ca = ch_as_complex(a);
         ChComplex *cb = ch_as_complex(b);
+        /* R7RS 6.1: one exact and one inexact number are never eqv?. */
+        if (ca->exact_real != cb->exact_real || ca->exact_imag != cb->exact_imag) {
+            return false;
+        }
         return inexact_bits_equal(ca->real, cb->real) && inexact_bits_equal(ca->imag, cb->imag);
     }
     if (ch_is_char(a) && ch_is_char(b)) {

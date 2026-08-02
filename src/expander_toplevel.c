@@ -622,7 +622,7 @@ static ChExpandStatus expand_define_record_type_r6rs(ChVM *vm, ChValue args, ChV
     }
 
     char iname[256];
-    if (snprintf(iname, sizeof(iname), "__record_type_%s", type_name) >= (int)sizeof(iname)) {
+    if (snprintf(iname, sizeof(iname), " __record_type_%s", type_name) >= (int)sizeof(iname)) {
         snprintf(err, err_len, "define-record-type: type name too long");
         return CH_EXPAND_ERROR;
     }
@@ -631,7 +631,7 @@ static ChExpandStatus expand_define_record_type_r6rs(ChVM *vm, ChValue args, ChV
     ChValue parent_rt_name = CH_FALSE;
     if (parent_sym) {
         char pname[256];
-        if (snprintf(pname, sizeof(pname), "__record_type_%s", parent_sym->name) >=
+        if (snprintf(pname, sizeof(pname), " __record_type_%s", parent_sym->name) >=
             (int)sizeof(pname)) {
             snprintf(err, err_len, "define-record-type: parent name too long");
             return CH_EXPAND_ERROR;
@@ -805,7 +805,7 @@ static ChExpandStatus expand_define_record_type(ChVM *vm, ChValue args, ChValue 
     }
 
     char iname[256];
-    if (snprintf(iname, sizeof(iname), "__record_type_%s", type_sym->name) >= (int)sizeof(iname)) {
+    if (snprintf(iname, sizeof(iname), " __record_type_%s", type_sym->name) >= (int)sizeof(iname)) {
         snprintf(err, err_len, "define-record-type: type name too long");
         return CH_EXPAND_ERROR;
     }
@@ -961,6 +961,15 @@ static ChExpandStatus expand_list(ChVM *vm, ChValue list, ChValue *out, char *er
     return CH_EXPAND_OK;
 }
 
+ChExpandStatus expand_form_no_macros(ChVM *vm, ChValue expr, ChValue *out, char *err,
+                                     size_t err_len, int depth) {
+    bool prev = vm->suppress_macro_expand;
+    vm->suppress_macro_expand = true;
+    ChExpandStatus st = expand_form(vm, expr, out, err, err_len, depth);
+    vm->suppress_macro_expand = prev;
+    return st;
+}
+
 ChExpandStatus expand_form(ChVM *vm, ChValue expr, ChValue *out, char *err, size_t err_len,
                                   int depth) {
     if (depth > CH_EXPAND_DEPTH_MAX) {
@@ -1023,7 +1032,8 @@ ChExpandStatus expand_form(ChVM *vm, ChValue expr, ChValue *out, char *err, size
                 ch_gc_pop(&vm->gc);
                 return CH_EXPAND_ERROR;
             }
-            ChExpandStatus st = expand_form(vm, expanded, out, err, err_len, depth + 1);
+            ChExpandStatus st =
+                expand_form_no_macros(vm, expanded, out, err, err_len, depth + 1);
             ch_gc_pop(&vm->gc);
             return st;
         }
@@ -1033,6 +1043,18 @@ ChExpandStatus expand_form(ChVM *vm, ChValue expr, ChValue *out, char *err, size
             ChValue rest = ch_cdr(expr);
             if (!ch_is_pair(rest) || !ch_is_symbol(ch_car(rest)) || !ch_is_pair(ch_cdr(rest))) {
                 snprintf(err, err_len, "define-syntax: bad syntax");
+                return CH_EXPAND_ERROR;
+            }
+            /* An environment created by (environment ...), (null-environment ...),
+             * or (scheme-report-environment ...) is immutable (R7RS 6.14): eval'ing
+             * a top-level define-syntax into it must error, not register the macro
+             * in the VM's global table (which would leak it to every other user of
+             * that name). Mirrors compile_define/compile_set's eval_env_immutable
+             * check; active_eval_env is only set for the eval-environment argument,
+             * never for ordinary library/body compilation, so local define-syntax
+             * inside lambda/let bodies is unaffected. */
+            if (vm->active_eval_env) {
+                snprintf(err, err_len, "define-syntax: environment is not mutable");
                 return CH_EXPAND_ERROR;
             }
             ChSymbol *name = ch_as_symbol(ch_car(rest));
@@ -1056,7 +1078,8 @@ ChExpandStatus expand_form(ChVM *vm, ChValue expr, ChValue *out, char *err, size
             *out = CH_VOID;
             return CH_EXPAND_OK;
         }
-        ChTransformer *tr = ch_vm_lookup_macro(vm, ch_as_symbol(head));
+        ChTransformer *tr =
+            vm->suppress_macro_expand ? NULL : ch_vm_lookup_macro(vm, ch_as_symbol(head));
         if (tr) {
             /* Macros with literals need use-site lexical binding info
              * (R7RS §4.3.2). Top-level expand has no local contour — leave

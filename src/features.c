@@ -19,8 +19,10 @@ static const char *const k_features[] = {
     /* Kaappi-compatible cond-expand id for shared deferred/portable suites. */
     "kaappi",
     "chaaya-fibers",
+    "kaappi-fibers",
 #if !defined(__wasi__)
     "chaaya-ffi",
+    "kaappi-ffi",
 #endif
     "chaaya-reactor",
     "kaappi-reactor",
@@ -30,6 +32,7 @@ static const char *const k_features[] = {
 #endif
     "ieee-float",
     "exact-closed",
+    "exact-complex",
 #if defined(__wasi__)
     "wasm32",
     "wasi",

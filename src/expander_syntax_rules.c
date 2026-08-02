@@ -2,6 +2,7 @@
 
 #include "expander_internal.h"
 
+#include "chaaya/gc.h"
 #include "chaaya/library.h"
 
 #include <stdint.h>
@@ -10,6 +11,14 @@
 #include <string.h>
 
 static thread_local const ChUseSiteBindingCheck *active_use_check = NULL;
+
+/* Pattern bindings live in a stack ChExpandCtx and are not otherwise scanned.
+ * Keep each assigned value alive until the rule attempt finishes. */
+static void protect_bind_value(ChExpandCtx *ctx, ChValue v) {
+    if (ch_is_pointer(v)) {
+        (void)ch_gc_add_extra_root(&ctx->vm->gc, v);
+    }
+}
 
 static uint32_t global_binding_slot(ChVM *vm, ChSymbol *sym) {
     const char *base = ch_symbol_basename(sym);
@@ -139,16 +148,18 @@ static int list_length(ChValue v) {
 }
 
 static ChValue list_reverse(ChGC *gc, ChValue lst) {
+    ChValue lst_root = lst;
     ChValue rev = CH_NIL;
+    ch_gc_push(gc, &lst_root);
     ch_gc_push(gc, &rev);
-    while (ch_is_pair(lst)) {
-        ChValue item = ch_car(lst);
+    while (ch_is_pair(lst_root)) {
+        ChValue item = ch_car(lst_root);
         ch_gc_push(gc, &item);
         rev = ch_gc_cons(gc, item, rev);
         ch_gc_pop(gc);
-        lst = ch_cdr(lst);
+        lst_root = ch_cdr(lst_root);
     }
-    ch_gc_pop(gc);
+    ch_gc_pop_n(gc, 2);
     return rev;
 }
 
@@ -167,6 +178,7 @@ static int bind_var(ChExpandCtx *ctx, ChSymbol *var, ChValue val, int under_elli
             ch_gc_push(&ctx->vm->gc, &b->value);
             ch_gc_push(&ctx->vm->gc, &item);
             b->value = ch_gc_cons(&ctx->vm->gc, item, b->value);
+            protect_bind_value(ctx, b->value);
             ch_gc_pop_n(&ctx->vm->gc, 2);
             return 1;
         }
@@ -177,6 +189,7 @@ static int bind_var(ChExpandCtx *ctx, ChSymbol *var, ChValue val, int under_elli
         ctx->binds[ctx->nbinds].var = var;
         ctx->binds[ctx->nbinds].value = ch_gc_cons(&ctx->vm->gc, val, CH_NIL);
         ctx->binds[ctx->nbinds].ellipsis = 1;
+        protect_bind_value(ctx, ctx->binds[ctx->nbinds].value);
         ctx->nbinds++;
         ch_gc_pop(&ctx->vm->gc);
         return 1;
@@ -190,6 +203,7 @@ static int bind_var(ChExpandCtx *ctx, ChSymbol *var, ChValue val, int under_elli
     ctx->binds[ctx->nbinds].var = var;
     ctx->binds[ctx->nbinds].value = val;
     ctx->binds[ctx->nbinds].ellipsis = 0;
+    protect_bind_value(ctx, val);
     ctx->nbinds++;
     return 1;
 }
@@ -294,6 +308,7 @@ static int match_ellipsis(ChExpandCtx *ctx, ChValue pcar, ChValue after, ChValue
                 ch_gc_push(&ctx->vm->gc, &ctx->binds[bi].value);
                 ch_gc_push(&ctx->vm->gc, &piece);
                 ctx->binds[bi].value = ch_gc_cons(&ctx->vm->gc, piece, ctx->binds[bi].value);
+                protect_bind_value(ctx, ctx->binds[bi].value);
                 ch_gc_pop_n(&ctx->vm->gc, 2);
                 break;
             }
@@ -306,6 +321,7 @@ static int match_ellipsis(ChExpandCtx *ctx, ChValue pcar, ChValue after, ChValue
     for (int bi = base; bi < ctx->nbinds; bi++) {
         if (ctx->binds[bi].ellipsis) {
             ctx->binds[bi].value = list_reverse(&ctx->vm->gc, ctx->binds[bi].value);
+            protect_bind_value(ctx, ctx->binds[bi].value);
         }
     }
     return match_list(ctx, after, u, 0);
@@ -330,6 +346,7 @@ static int match_list(ChExpandCtx *ctx, ChValue pat, ChValue use, int under_elli
         for (int bi = start_binds; bi < ctx->nbinds; bi++) {
             if (ctx->binds[bi].ellipsis) {
                 ctx->binds[bi].value = list_reverse(&ctx->vm->gc, ctx->binds[bi].value);
+                protect_bind_value(ctx, ctx->binds[bi].value);
             }
         }
         return ch_is_nil(u);
@@ -378,6 +395,7 @@ static int match_list(ChExpandCtx *ctx, ChValue pat, ChValue use, int under_elli
             for (int bi = start_binds; bi < ctx->nbinds; bi++) {
                 if (ctx->binds[bi].ellipsis) {
                     ctx->binds[bi].value = list_reverse(&ctx->vm->gc, ctx->binds[bi].value);
+                    protect_bind_value(ctx, ctx->binds[bi].value);
                 }
             }
             return match_list(ctx, pcdr, u, under_ellipsis);
@@ -453,6 +471,25 @@ static void reverse_all_ellipsis(ChExpandCtx *ctx) {
     (void)ctx;
 }
 
+static ChSymbol *hyg_rename(ChExpandCtx *ctx, ChSymbol *from) {
+    const char *base = ch_symbol_basename(from);
+    for (int i = 0; i < ctx->nrenames; i++) {
+        if (strcmp(ch_symbol_basename(ctx->renames[i].from), base) == 0) {
+            return ctx->renames[i].to;
+        }
+    }
+    if (ctx->nrenames >= CH_HYG_MAX) {
+        return from;
+    }
+    char buf[256];
+    snprintf(buf, sizeof(buf), "__hyg_%u_%s", ctx->vm->hyg_counter++, base);
+    ChValue sym = ch_gc_intern_symbol_cstr(&ctx->vm->gc, buf);
+    ctx->renames[ctx->nrenames].from = from;
+    ctx->renames[ctx->nrenames].to = ch_as_symbol(sym);
+    ctx->nrenames++;
+    return ctx->renames[ctx->nrenames - 1].to;
+}
+
 static int lib_env_binding(ChVM *vm, ChSymbol *sym, ChValue *out) {
     if (!vm->active_lib_env) {
         return 0;
@@ -473,25 +510,6 @@ static int lib_env_binding(ChVM *vm, ChSymbol *sym, ChValue *out) {
         }
     }
     return 0;
-}
-
-static ChSymbol *hyg_rename(ChExpandCtx *ctx, ChSymbol *from) {
-    const char *base = ch_symbol_basename(from);
-    for (int i = 0; i < ctx->nrenames; i++) {
-        if (strcmp(ch_symbol_basename(ctx->renames[i].from), base) == 0) {
-            return ctx->renames[i].to;
-        }
-    }
-    if (ctx->nrenames >= CH_HYG_MAX) {
-        return from;
-    }
-    char buf[256];
-    snprintf(buf, sizeof(buf), "__hyg_%u_%s", ctx->vm->hyg_counter++, base);
-    ChValue sym = ch_gc_intern_symbol_cstr(&ctx->vm->gc, buf);
-    ctx->renames[ctx->nrenames].from = from;
-    ctx->renames[ctx->nrenames].to = ch_as_symbol(sym);
-    ctx->nrenames++;
-    return ctx->renames[ctx->nrenames - 1].to;
 }
 
 static ChValue bind_lib_ref(ChExpandCtx *ctx, ChSymbol *sym) {
@@ -578,6 +596,10 @@ static ChValue instantiate_with_index(ChExpandCtx *ctx, ChValue tmpl, int index)
         nsaved = CH_BIND_MAX;
     }
     memcpy(saved, ctx->binds, (size_t)nsaved * sizeof(ChBinding));
+    /* Keep saved binding values alive across instantiate (binds[] is not a GC root). */
+    for (int i = 0; i < nsaved; i++) {
+        protect_bind_value(ctx, saved[i].value);
+    }
     for (int i = 0; i < ctx->nbinds; i++) {
         if (!ctx->binds[i].ellipsis) {
             continue;
@@ -590,6 +612,7 @@ static ChValue instantiate_with_index(ChExpandCtx *ctx, ChValue tmpl, int index)
             ctx->binds[i].value = group;
             ctx->binds[i].ellipsis = 0;
         }
+        protect_bind_value(ctx, ctx->binds[i].value);
     }
     ChValue out = instantiate(ctx, tmpl);
     memcpy(ctx->binds, saved, (size_t)nsaved * sizeof(ChBinding));
@@ -719,8 +742,11 @@ static ChValue instantiate_list(ChExpandCtx *ctx, ChValue tmpl) {
         }
         ChValue pieces[CH_ELLIPSIS_MAX];
         int np = 0;
+        size_t pieces_root = ctx->vm->gc.root_count;
         for (int i = 0; i < nrep && np < CH_ELLIPSIS_MAX; i++) {
-            pieces[np++] = instantiate_with_index(ctx, tcar, i);
+            pieces[np] = instantiate_with_index(ctx, tcar, i);
+            ch_gc_push(&ctx->vm->gc, &pieces[np]);
+            np++;
         }
         ChValue rest = instantiate_list(ctx, after);
         ch_gc_push(&ctx->vm->gc, &rest);
@@ -737,7 +763,7 @@ static ChValue instantiate_list(ChExpandCtx *ctx, ChValue tmpl) {
             }
             ch_gc_pop(&ctx->vm->gc);
         }
-        ch_gc_pop(&ctx->vm->gc);
+        ch_gc_pop_to(&ctx->vm->gc, pieces_root);
         return result;
     }
 
@@ -776,6 +802,12 @@ static ChValue instantiate(ChExpandCtx *ctx, ChValue tmpl) {
             return tmpl;
         }
         if (ctx->escape && is_ellipsis_id(ctx, s)) {
+            return tmpl;
+        }
+        /* Free identifiers that already resolve to a top-level binding keep
+         * their name (so templates can refer to user helpers like `pass`).
+         * Unbound free identifiers still get hygienic renames. */
+        if (global_binding_slot(ctx->vm, s) != CH_LITERAL_UNBOUND) {
             return tmpl;
         }
         ChSymbol *ren = hyg_rename(ctx, s);
@@ -921,7 +953,9 @@ ChExpandStatus ch_expand_macro(ChVM *vm, ChTransformer *tr, ChValue use, ChValue
         if (!ch_is_pair(pat) || !ch_is_pair(use_root)) {
             continue;
         }
+        size_t extra_base = vm->gc.extra_root_count;
         if (!match_list(&ctx, ch_cdr(pat), ch_cdr(use_root), 0)) {
+            vm->gc.extra_root_count = extra_base;
             continue;
         }
         (void)reverse_all_ellipsis;
@@ -930,6 +964,7 @@ ChExpandStatus ch_expand_macro(ChVM *vm, ChTransformer *tr, ChValue use, ChValue
         if (vm->gc.root_count > roots_before) {
             ch_gc_pop_n(&vm->gc, vm->gc.root_count - roots_before);
         }
+        vm->gc.extra_root_count = extra_base;
         ch_gc_push(&vm->gc, out);
         vm->active_lib_env = saved_env;
         ch_gc_pop_n(&vm->gc, 2);

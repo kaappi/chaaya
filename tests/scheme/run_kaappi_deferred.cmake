@@ -13,7 +13,7 @@ execute_process(
   COMMAND ${CMAKE_COMMAND} -E env
     "CHAAYA_HOME=${test_home}"
     "CHAAYA_NO_CACHE=1"
-    "${CHAAYA}" "--lib-path" "${LIB_PATH}" "${input_name}"
+    "${CHAAYA}" "--lib-path" "${LIB_PATH}" "--lib-path" "${input_dir}" "${input_name}"
   WORKING_DIRECTORY "${input_dir}"
   RESULT_VARIABLE rc
   OUTPUT_VARIABLE out

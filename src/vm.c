@@ -187,11 +187,16 @@ static ChVMStatus raise_unbound(ChVM *vm, const char *name, uint8_t dst, ChValue
         snprintf(vm->error, sizeof(vm->error), "%s", buf);
         return CH_VM_RUNTIME_ERROR;
     }
+    vm->error[0] = '\0';
     ChValue msg = ch_gc_make_string_cstr(&vm->gc, buf);
     ch_gc_push(&vm->gc, &msg);
     ChValue err = ch_gc_make_error_object(&vm->gc, msg, CH_NIL, 0);
     ch_gc_pop(&vm->gc);
     ChValue result = ch_vm_raise(vm, err, 0);
+    /* Guard escapes with call/cc — must not resume after the unbound load. */
+    if (vm->continuation_invoked) {
+        return CH_VM_CONTINUATION_INVOKED;
+    }
     if (vm->error[0] != '\0') {
         return CH_VM_RUNTIME_ERROR;
     }
@@ -1363,8 +1368,13 @@ ChVMStatus ch_vm_eval_function(ChVM *vm, ChFunction *fn, ChValue *out) {
     }
     st = run_until(vm, saved_frames);
     if (st == CH_VM_CONTINUATION_INVOKED) {
-        if (vm->frame_count <= saved_frames) {
-            /* Continuation delivered a value at/below our barrier. */
+        if (vm->frame_count < saved_frames) {
+            /* Escaped past this eval (e.g. guard call/cc). Do not restore. */
+            ch_gc_pop_n(&vm->gc, 2);
+            return CH_VM_CONTINUATION_INVOKED;
+        }
+        if (vm->frame_count == saved_frames) {
+            /* Continuation delivered a value at our barrier. */
             *out = vm->result;
             st = CH_VM_OK;
         } else {

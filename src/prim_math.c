@@ -25,6 +25,46 @@ static int is_zero_int(ChValue v) {
     return ch_is_exact_integer(v) && ch_bignum_compare(v, ch_make_fixnum(0)) == 0;
 }
 
+static int is_integer_valued(ChValue v, double *out) {
+    if (ch_is_exact_integer(v)) {
+        if (out) {
+            *out = ch_is_fixnum(v) ? (double)ch_to_fixnum(v) : ch_bignum_to_f64(v);
+        }
+        return 1;
+    }
+    if (ch_is_flonum(v)) {
+        double f = ch_to_flonum(v);
+        if (!isfinite(f) || f != trunc(f)) {
+            return 0;
+        }
+        if (out) {
+            *out = f;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static int as_number_to_f64(ChValue v, double *out) {
+    if (ch_is_flonum(v)) {
+        *out = ch_to_flonum(v);
+        return 1;
+    }
+    if (ch_is_fixnum(v)) {
+        *out = (double)ch_to_fixnum(v);
+        return 1;
+    }
+    if (ch_is_bignum(v)) {
+        *out = ch_bignum_to_f64(v);
+        return 1;
+    }
+    if (ch_is_rational_obj(v)) {
+        *out = ch_exact_to_f64(v);
+        return 1;
+    }
+    return 0;
+}
+
 static int as_real(ChValue v, double *out) {
     double re, im;
     if (!ch_complex_parts(v, &re, &im) || im != 0.0) {
@@ -286,8 +326,12 @@ static ChValue prim_exact(ChVM *vm, ChValue *args, int nargs) {
         return r;
     }
     if (ch_is_complex_obj(args[0])) {
-        snprintf(vm->error, sizeof(vm->error), "exact: inexact complex not supported");
-        return CH_UNDEFINED;
+        ChComplex *c = ch_as_complex(args[0]);
+        if (!isfinite(c->real) || !isfinite(c->imag)) {
+            snprintf(vm->error, sizeof(vm->error), "exact: expected finite number");
+            return CH_UNDEFINED;
+        }
+        return ch_make_complex_ex(&vm->gc, c->real, c->imag, true, true);
     }
     snprintf(vm->error, sizeof(vm->error), "exact: not a number");
     return CH_UNDEFINED;
@@ -295,13 +339,23 @@ static ChValue prim_exact(ChVM *vm, ChValue *args, int nargs) {
 
 static ChValue prim_inexact(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    if (ch_is_flonum(args[0]) || ch_is_complex_obj(args[0])) {
+    if (ch_is_flonum(args[0])) {
         return args[0];
+    }
+    if (ch_is_complex_obj(args[0])) {
+        ChComplex *c = ch_as_complex(args[0]);
+        if (!c->exact_real && !c->exact_imag) {
+            return args[0];
+        }
+        return ch_make_complex_ex(&vm->gc, c->real, c->imag, false, false);
     }
     double re, im;
     if (!ch_complex_parts(args[0], &re, &im)) {
         snprintf(vm->error, sizeof(vm->error), "inexact: not a number");
         return CH_UNDEFINED;
+    }
+    if (im == 0.0 && !signbit(im)) {
+        return ch_make_flonum(re);
     }
     return ch_make_complex(&vm->gc, re, im);
 }
@@ -334,24 +388,32 @@ static ChValue prim_negative_p(ChVM *vm, ChValue *args, int nargs) {
 
 static ChValue prim_odd_p(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    if (!ch_is_exact_integer(args[0])) {
-        snprintf(vm->error, sizeof(vm->error), "odd?: expected exact integer");
+    double n = 0.0;
+    if (!is_integer_valued(args[0], &n)) {
+        snprintf(vm->error, sizeof(vm->error), "odd?: expected integer");
         return CH_UNDEFINED;
     }
-    ChValue two = ch_make_fixnum(2);
-    ChValue r = ch_bignum_remainder(&vm->gc, args[0], two);
-    return !is_zero_int(r) ? CH_TRUE : CH_FALSE;
+    if (ch_is_exact_integer(args[0])) {
+        ChValue two = ch_make_fixnum(2);
+        ChValue r = ch_bignum_remainder(&vm->gc, args[0], two);
+        return !is_zero_int(r) ? CH_TRUE : CH_FALSE;
+    }
+    return fmod(n, 2.0) != 0.0 ? CH_TRUE : CH_FALSE;
 }
 
 static ChValue prim_even_p(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    if (!ch_is_exact_integer(args[0])) {
-        snprintf(vm->error, sizeof(vm->error), "even?: expected exact integer");
+    double n = 0.0;
+    if (!is_integer_valued(args[0], &n)) {
+        snprintf(vm->error, sizeof(vm->error), "even?: expected integer");
         return CH_UNDEFINED;
     }
-    ChValue two = ch_make_fixnum(2);
-    ChValue r = ch_bignum_remainder(&vm->gc, args[0], two);
-    return is_zero_int(r) ? CH_TRUE : CH_FALSE;
+    if (ch_is_exact_integer(args[0])) {
+        ChValue two = ch_make_fixnum(2);
+        ChValue r = ch_bignum_remainder(&vm->gc, args[0], two);
+        return is_zero_int(r) ? CH_TRUE : CH_FALSE;
+    }
+    return fmod(n, 2.0) == 0.0 ? CH_TRUE : CH_FALSE;
 }
 
 static ChValue prim_max(ChVM *vm, ChValue *args, int nargs) {
@@ -442,6 +504,22 @@ static ChValue prim_min(ChVM *vm, ChValue *args, int nargs) {
 
 static ChValue prim_modulo(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
+    if (ch_is_flonum(args[0]) || ch_is_flonum(args[1])) {
+        double a, b;
+        if (!as_number_to_f64(args[0], &a) || !as_number_to_f64(args[1], &b)) {
+            snprintf(vm->error, sizeof(vm->error), "modulo: not a number");
+            return CH_UNDEFINED;
+        }
+        if (b == 0.0) {
+            snprintf(vm->error, sizeof(vm->error), "modulo: division by zero");
+            return CH_UNDEFINED;
+        }
+        double r = fmod(a, b);
+        if (r != 0.0 && ((r < 0.0) != (b < 0.0))) {
+            r += b;
+        }
+        return ch_make_flonum(r);
+    }
     if (!ch_is_exact_integer(args[0]) || !ch_is_exact_integer(args[1])) {
         snprintf(vm->error, sizeof(vm->error), "modulo: expected exact integers");
         return CH_UNDEFINED;
@@ -478,6 +556,34 @@ static ChValue prim_modulo(ChVM *vm, ChValue *args, int nargs) {
 static ChValue prim_gcd(ChVM *vm, ChValue *args, int nargs) {
     if (nargs == 0) {
         return ch_make_fixnum(0);
+    }
+    bool any_flonum = false;
+    for (int i = 0; i < nargs; i++) {
+        if (ch_is_flonum(args[i])) {
+            any_flonum = true;
+            break;
+        }
+        if (!ch_is_number(args[i])) {
+            snprintf(vm->error, sizeof(vm->error), "gcd: not a number");
+            return CH_UNDEFINED;
+        }
+    }
+    if (any_flonum) {
+        double acc;
+        if (!as_number_to_f64(args[0], &acc)) {
+            snprintf(vm->error, sizeof(vm->error), "gcd: not a number");
+            return CH_UNDEFINED;
+        }
+        acc = fabs(acc);
+        for (int i = 1; i < nargs; i++) {
+            double b;
+            if (!as_number_to_f64(args[i], &b)) {
+                snprintf(vm->error, sizeof(vm->error), "gcd: not a number");
+                return CH_UNDEFINED;
+            }
+            acc = gcd_double(acc, fabs(b));
+        }
+        return ch_make_flonum(acc);
     }
     ChValue acc = args[0];
     if (!ch_is_exact_integer(acc)) {
@@ -677,42 +783,153 @@ static ChValue prim_expt(ChVM *vm, ChValue *args, int nargs) {
 
 /* ---- inexact math ---- */
 
-static ChValue unary_real_math(ChVM *vm, ChValue *args, const char *who, double (*fn)(double)) {
-    double x;
-    if (!require_real(vm, args[0], who, &x)) {
-        return CH_UNDEFINED;
-    }
-    return ch_make_flonum(fn(x));
-}
-
 static ChValue prim_sin(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    return unary_real_math(vm, args, "sin", sin);
+    if (ch_is_complex_obj(args[0])) {
+        ChComplex *c = ch_as_complex(args[0]);
+        double re = sin(c->real) * cosh(c->imag);
+        double im = cos(c->real) * sinh(c->imag);
+        return ch_make_complex(&vm->gc, re, im);
+    }
+    double x;
+    if (!require_real(vm, args[0], "sin", &x)) {
+        return CH_UNDEFINED;
+    }
+    return ch_make_flonum(sin(x));
 }
 static ChValue prim_cos(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    return unary_real_math(vm, args, "cos", cos);
+    if (ch_is_complex_obj(args[0])) {
+        ChComplex *c = ch_as_complex(args[0]);
+        double re = cos(c->real) * cosh(c->imag);
+        double im = -sin(c->real) * sinh(c->imag);
+        return ch_make_complex(&vm->gc, re, im);
+    }
+    double x;
+    if (!require_real(vm, args[0], "cos", &x)) {
+        return CH_UNDEFINED;
+    }
+    return ch_make_flonum(cos(x));
 }
 static ChValue prim_tan(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    return unary_real_math(vm, args, "tan", tan);
+    if (ch_is_complex_obj(args[0])) {
+        ChValue s = prim_sin(vm, args, 1);
+        if (s == CH_UNDEFINED) {
+            return CH_UNDEFINED;
+        }
+        ChValue c = prim_cos(vm, args, 1);
+        if (c == CH_UNDEFINED) {
+            return CH_UNDEFINED;
+        }
+        return ch_complex_div(&vm->gc, s, c);
+    }
+    double x;
+    if (!require_real(vm, args[0], "tan", &x)) {
+        return CH_UNDEFINED;
+    }
+    return ch_make_flonum(tan(x));
 }
+
+static ChValue complex_asin(ChGC *gc, double re, double im) {
+    double one_minus_z2_re = 1.0 - (re * re - im * im);
+    double one_minus_z2_im = -(2.0 * re * im);
+    double sqrt_mag = sqrt(hypot(one_minus_z2_re, one_minus_z2_im));
+    double sqrt_arg = atan2(one_minus_z2_im, one_minus_z2_re) / 2.0;
+    double sqrt_re = sqrt_mag * cos(sqrt_arg);
+    double sqrt_im = sqrt_mag * sin(sqrt_arg);
+    double log_arg_re = -im + sqrt_re;
+    double log_arg_im = re + sqrt_im;
+    double log_re = log(hypot(log_arg_re, log_arg_im));
+    double log_im = atan2(log_arg_im, log_arg_re);
+    double result_re = log_im;
+    double result_im = -log_re;
+    if (fabs(result_im) < 1e-15) {
+        return ch_make_flonum(result_re);
+    }
+    return ch_make_complex_raw(gc, result_re, result_im);
+}
+
 static ChValue prim_asin(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    return unary_real_math(vm, args, "asin", asin);
+    if (ch_is_complex_obj(args[0])) {
+        ChComplex *c = ch_as_complex(args[0]);
+        return complex_asin(&vm->gc, c->real, c->imag);
+    }
+    double x;
+    if (!require_real(vm, args[0], "asin", &x)) {
+        return CH_UNDEFINED;
+    }
+    if (x < -1.0 || x > 1.0) {
+        return complex_asin(&vm->gc, x, 0.0);
+    }
+    return ch_make_flonum(asin(x));
 }
 static ChValue prim_acos(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    return unary_real_math(vm, args, "acos", acos);
+    if (ch_is_complex_obj(args[0])) {
+        ChValue asin_val = prim_asin(vm, args, 1);
+        if (asin_val == CH_UNDEFINED) {
+            return CH_UNDEFINED;
+        }
+        double pi_half = M_PI / 2.0;
+        if (ch_is_flonum(asin_val)) {
+            return ch_make_flonum(pi_half - ch_to_flonum(asin_val));
+        }
+        ChComplex *ac = ch_as_complex(asin_val);
+        double re = pi_half - ac->real;
+        double im = -ac->imag;
+        if (fabs(im) < 1e-15) {
+            return ch_make_flonum(re);
+        }
+        return ch_make_complex_raw(&vm->gc, re, im);
+    }
+    double x;
+    if (!require_real(vm, args[0], "acos", &x)) {
+        return CH_UNDEFINED;
+    }
+    if (x < -1.0 || x > 1.0) {
+        ChValue asin_val = complex_asin(&vm->gc, x, 0.0);
+        double pi_half = M_PI / 2.0;
+        if (ch_is_flonum(asin_val)) {
+            return ch_make_flonum(pi_half - ch_to_flonum(asin_val));
+        }
+        ChComplex *ac = ch_as_complex(asin_val);
+        double re = pi_half - ac->real;
+        double im = -ac->imag;
+        if (fabs(im) < 1e-15) {
+            return ch_make_flonum(re);
+        }
+        return ch_make_complex_raw(&vm->gc, re, im);
+    }
+    return ch_make_flonum(acos(x));
 }
 static ChValue prim_exp(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
-    return unary_real_math(vm, args, "exp", exp);
+    if (ch_is_complex_obj(args[0])) {
+        ChComplex *c = ch_as_complex(args[0]);
+        double exp_r = exp(c->real);
+        double re = exp_r * cos(c->imag);
+        double im = exp_r * sin(c->imag);
+        if (fabs(im) < 1e-15) {
+            return ch_make_flonum(re);
+        }
+        return ch_make_complex_raw(&vm->gc, re, im);
+    }
+    double x;
+    if (!require_real(vm, args[0], "exp", &x)) {
+        return CH_UNDEFINED;
+    }
+    return ch_make_flonum(exp(x));
 }
 
 static ChValue prim_atan(ChVM *vm, ChValue *args, int nargs) {
     if (nargs == 1) {
-        return unary_real_math(vm, args, "atan", atan);
+        double x;
+        if (!require_real(vm, args[0], "atan", &x)) {
+            return CH_UNDEFINED;
+        }
+        return ch_make_flonum(atan(x));
     }
     double y, x;
     if (!require_real(vm, args[0], "atan", &y) || !require_real(vm, args[1], "atan", &x)) {
@@ -721,17 +938,45 @@ static ChValue prim_atan(ChVM *vm, ChValue *args, int nargs) {
     return ch_make_flonum(atan2(y, x));
 }
 
+static ChValue complex_log(ChGC *gc, double re, double im) {
+    double mag = hypot(re, im);
+    double result_re = log(mag);
+    double result_im = atan2(im, re);
+    if (fabs(result_im) < 1e-15) {
+        return ch_make_flonum(result_re);
+    }
+    return ch_make_complex_raw(gc, result_re, result_im);
+}
+
 static ChValue prim_log(ChVM *vm, ChValue *args, int nargs) {
+    if (ch_is_complex_obj(args[0])) {
+        ChComplex *c = ch_as_complex(args[0]);
+        ChValue r = complex_log(&vm->gc, c->real, c->imag);
+        if (nargs == 1) {
+            return r;
+        }
+        double b;
+        if (!require_real(vm, args[1], "log", &b)) {
+            return CH_UNDEFINED;
+        }
+        return ch_complex_div(&vm->gc, r, ch_make_flonum(log(b)));
+    }
     double x;
     if (!require_real(vm, args[0], "log", &x)) {
         return CH_UNDEFINED;
     }
     if (nargs == 1) {
+        if (x < 0.0) {
+            return complex_log(&vm->gc, x, 0.0);
+        }
         return ch_make_flonum(log(x));
     }
     double b;
     if (!require_real(vm, args[1], "log", &b)) {
         return CH_UNDEFINED;
+    }
+    if (x < 0.0) {
+        return ch_complex_div(&vm->gc, complex_log(&vm->gc, x, 0.0), ch_make_flonum(log(b)));
     }
     return ch_make_flonum(log(x) / log(b));
 }
@@ -1172,6 +1417,40 @@ static ChValue prim_truncate_remainder(ChVM *vm, ChValue *args, int nargs) {
 
 /* ---- string conversion ---- */
 
+static ChValue exact_int_to_radix_string(ChVM *vm, ChValue v, int radix) {
+    if (is_zero_int(v)) {
+        return ch_gc_make_string_cstr(&vm->gc, "0");
+    }
+    ChValue n = ch_bignum_abs(&vm->gc, v);
+    ch_gc_push(&vm->gc, &n);
+    char buf[512];
+    size_t pos = sizeof(buf);
+    buf[--pos] = '\0';
+    ChValue base = ch_make_fixnum(radix);
+    while (!is_zero_int(n)) {
+        ChValue dig = ch_bignum_remainder(&vm->gc, n, base);
+        int d = (int)ch_to_fixnum(dig);
+        char ch = (d < 10) ? (char)('0' + d) : (char)('a' + d - 10);
+        if (pos == 0) {
+            ch_gc_pop(&vm->gc);
+            snprintf(vm->error, sizeof(vm->error), "number->string: overflow");
+            return CH_UNDEFINED;
+        }
+        buf[--pos] = ch;
+        n = ch_bignum_quotient(&vm->gc, n, base);
+    }
+    if (ch_bignum_compare(v, ch_make_fixnum(0)) < 0) {
+        if (pos == 0) {
+            ch_gc_pop(&vm->gc);
+            snprintf(vm->error, sizeof(vm->error), "number->string: overflow");
+            return CH_UNDEFINED;
+        }
+        buf[--pos] = '-';
+    }
+    ch_gc_pop(&vm->gc);
+    return ch_gc_make_string_cstr(&vm->gc, buf + pos);
+}
+
 static ChValue prim_number_to_string(ChVM *vm, ChValue *args, int nargs) {
     if (!ch_is_number(args[0])) {
         snprintf(vm->error, sizeof(vm->error), "number->string: not a number");
@@ -1190,42 +1469,37 @@ static ChValue prim_number_to_string(ChVM *vm, ChValue *args, int nargs) {
         }
     }
     if (radix != 10) {
+        if (ch_is_rational_obj(args[0])) {
+            ChValue num, den;
+            ch_exact_parts(args[0], &num, &den);
+            ChValue ns = exact_int_to_radix_string(vm, num, radix);
+            if (ns == CH_UNDEFINED) {
+                return CH_UNDEFINED;
+            }
+            ChValue ds = exact_int_to_radix_string(vm, den, radix);
+            if (ds == CH_UNDEFINED) {
+                return CH_UNDEFINED;
+            }
+            ChString *nstr = ch_as_string(ns);
+            ChString *dstr = ch_as_string(ds);
+            size_t len = nstr->len + 1 + dstr->len;
+            char *buf = (char *)malloc(len + 1);
+            if (!buf) {
+                abort();
+            }
+            memcpy(buf, nstr->data, nstr->len);
+            buf[nstr->len] = '/';
+            memcpy(buf + nstr->len + 1, dstr->data, dstr->len);
+            buf[len] = '\0';
+            ChValue out = ch_gc_make_string_cstr(&vm->gc, buf);
+            free(buf);
+            return out;
+        }
         if (!ch_is_exact_integer(args[0])) {
             snprintf(vm->error, sizeof(vm->error), "number->string: non-decimal radix needs integer");
             return CH_UNDEFINED;
         }
-        /* Simple digit conversion for exact integers. */
-        if (is_zero_int(args[0])) {
-            return ch_gc_make_string_cstr(&vm->gc, "0");
-        }
-        ChValue n = ch_bignum_abs(&vm->gc, args[0]);
-        ch_gc_push(&vm->gc, &n);
-        char buf[512];
-        size_t pos = sizeof(buf);
-        buf[--pos] = '\0';
-        ChValue base = ch_make_fixnum(radix);
-        while (!is_zero_int(n)) {
-            ChValue dig = ch_bignum_remainder(&vm->gc, n, base);
-            int d = (int)ch_to_fixnum(dig);
-            char ch = (d < 10) ? (char)('0' + d) : (char)('a' + d - 10);
-            if (pos == 0) {
-                ch_gc_pop(&vm->gc);
-                snprintf(vm->error, sizeof(vm->error), "number->string: overflow");
-                return CH_UNDEFINED;
-            }
-            buf[--pos] = ch;
-            n = ch_bignum_quotient(&vm->gc, n, base);
-        }
-        if (ch_bignum_compare(args[0], ch_make_fixnum(0)) < 0) {
-            if (pos == 0) {
-                ch_gc_pop(&vm->gc);
-                snprintf(vm->error, sizeof(vm->error), "number->string: overflow");
-                return CH_UNDEFINED;
-            }
-            buf[--pos] = '-';
-        }
-        ch_gc_pop(&vm->gc);
-        return ch_gc_make_string_cstr(&vm->gc, buf + pos);
+        return exact_int_to_radix_string(vm, args[0], radix);
     }
     char *s = ch_value_to_string(args[0], false);
     ChValue out = ch_gc_make_string_cstr(&vm->gc, s);
@@ -1259,23 +1533,40 @@ static ChValue parse_integer_radix(ChGC *gc, const char *text, size_t len, int r
     if (i >= len) {
         return CH_UNDEFINED;
     }
+    static const uint8_t max_chunk_digits[37] = {
+        0,  0,  63, 40, 31, 27, 24, 22, 21, 20, 19, 18, 17, 17, 16, 16, 15, 15, 15, 14,
+        14, 14, 14, 13, 13, 13, 13, 13, 13, 12, 12, 12, 12, 12, 12, 12, 12,
+    };
+    size_t chunk = (radix >= 2 && radix <= 36) ? max_chunk_digits[radix] : 18;
+    if (chunk == 0) {
+        chunk = 18;
+    }
     ChValue acc = ch_make_fixnum(0);
     ch_gc_push(gc, &acc);
-    ChValue base = ch_make_fixnum(radix);
-    int any = 0;
-    for (; i < len; i++) {
-        int d = digit_value(text[i], radix);
-        if (d < 0) {
-            ch_gc_pop(gc);
-            return CH_UNDEFINED;
+    size_t pos = i;
+    while (pos < len) {
+        size_t n = len - pos;
+        if (n > chunk) {
+            n = chunk;
         }
-        any = 1;
-        acc = ch_bignum_mul(gc, acc, base);
-        acc = ch_bignum_add(gc, acc, ch_make_fixnum(d));
-    }
-    if (!any) {
+        uint64_t part = 0;
+        for (size_t j = 0; j < n; j++) {
+            int d = digit_value(text[pos + j], radix);
+            if (d < 0) {
+                ch_gc_pop(gc);
+                return CH_UNDEFINED;
+            }
+            part = part * (uint64_t)radix + (uint64_t)d;
+        }
+        pos += n;
+        ChValue mul = ch_make_fixnum(1);
+        ch_gc_push(gc, &mul);
+        for (size_t k = 0; k < n; k++) {
+            mul = ch_bignum_mul(gc, mul, ch_make_fixnum(radix));
+        }
+        acc = ch_bignum_mul(gc, acc, mul);
         ch_gc_pop(gc);
-        return CH_UNDEFINED;
+        acc = ch_bignum_add(gc, acc, ch_value_from_u64(gc, part));
     }
     if (!positive) {
         acc = ch_bignum_negate(gc, acc);
@@ -1296,7 +1587,7 @@ static ChValue prim_string_to_number(ChVM *vm, ChValue *args, int nargs) {
             return CH_FALSE;
         }
         radix = (int)ch_to_fixnum(args[1]);
-        if (radix != 2 && radix != 8 && radix != 10 && radix != 16) {
+        if (radix < 2 || radix > 36) {
             return CH_FALSE;
         }
     }
@@ -1304,6 +1595,22 @@ static ChValue prim_string_to_number(ChVM *vm, ChValue *args, int nargs) {
         return CH_FALSE;
     }
     if (radix == 10) {
+        /* #e on inf/nan: string->number => #f (#419); the reader still
+         * accepts the same text as an inexact flonum. */
+        if (s->len >= 8 && (s->data[0] == '#' && (s->data[1] == 'e' || s->data[1] == 'E'))) {
+            const char *body = s->data + 2;
+            size_t blen = s->len - 2;
+            if ((blen == 6 &&
+                 ((body[0] == '+' || body[0] == '-') &&
+                  ((body[1] == 'i' || body[1] == 'I') && (body[2] == 'n' || body[2] == 'N') &&
+                   (body[3] == 'f' || body[3] == 'F') && body[4] == '.' && body[5] == '0'))) ||
+                (blen == 6 &&
+                 ((body[0] == '+' || body[0] == '-') &&
+                  ((body[1] == 'n' || body[1] == 'N') && (body[2] == 'a' || body[2] == 'A') &&
+                   (body[3] == 'n' || body[3] == 'N') && body[4] == '.' && body[5] == '0')))) {
+                return CH_FALSE;
+            }
+        }
         ChValue v;
         if (!ch_parse_number(&vm->gc, s->data, s->len, &v)) {
             return CH_FALSE;

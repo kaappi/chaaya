@@ -10,6 +10,8 @@ extern "C" {
 
 /* Construct an exact integer: fixnum if in i48 range, else bignum. */
 ChValue ch_make_integer(ChGC *gc, int64_t n);
+/* Non-negative magnitude that may exceed the fixnum range (radix chunk parse). */
+ChValue ch_value_from_u64(ChGC *gc, uint64_t mag);
 ChValue ch_gc_make_bignum_from_i64(ChGC *gc, int64_t n);
 ChValue ch_gc_make_bignum_from_limbs(ChGC *gc, const uint64_t *limbs, size_t len, int positive);
 

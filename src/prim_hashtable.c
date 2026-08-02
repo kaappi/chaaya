@@ -34,42 +34,57 @@ static ChValue fail_hashtable_status(ChVM *vm, const char *who, ChHashtableStatu
     return CH_UNDEFINED;
 }
 
-static int parse_comparator_mode(ChValue comparator, ChHashtableMode *out_mode) {
-    if (!ch_is_native(comparator)) {
-        return 0;
+static int native_named(ChValue v, const char *name) {
+    return ch_is_native(v) && strcmp(ch_as_native(v)->name, name) == 0;
+}
+
+static void configure_hashtable(ChHashtable *ht, ChValue *args, int nargs) {
+    ht->equiv_fn = CH_NIL;
+    ht->hash_fn = CH_NIL;
+    ht->mode = CH_HASHTABLE_EQUAL;
+    if (nargs == 0) {
+        return;
     }
-    const char *name = ch_as_native(comparator)->name;
-    if (strcmp(name, "eq?") == 0) {
-        *out_mode = CH_HASHTABLE_EQ;
-        return 1;
+    if (native_named(args[0], "eq?")) {
+        ht->mode = CH_HASHTABLE_EQ;
+        return;
     }
-    if (strcmp(name, "eqv?") == 0) {
-        *out_mode = CH_HASHTABLE_EQV;
-        return 1;
+    if (native_named(args[0], "eqv?")) {
+        ht->mode = CH_HASHTABLE_EQV;
+        return;
     }
-    if (strcmp(name, "equal?") == 0) {
-        *out_mode = CH_HASHTABLE_EQUAL;
-        return 1;
+    if (native_named(args[0], "equal?")) {
+        ht->mode = CH_HASHTABLE_EQUAL;
+        return;
     }
-    return 0;
+    if (!ch_is_procedure(args[0])) {
+        return;
+    }
+    ht->equiv_fn = args[0];
+    ht->mode = CH_HASHTABLE_EQUAL;
+    if (nargs > 1 && ch_is_procedure(args[1])) {
+        ht->hash_fn = args[1];
+    }
 }
 
 static ChValue prim_make_hash_table(ChVM *vm, ChValue *args, int nargs) {
-    if (nargs > 1) {
-        snprintf(vm->error, sizeof(vm->error),
-                 "make-hash-table: expected 0 or 1 arguments");
+    if (nargs > 2) {
+        snprintf(vm->error, sizeof(vm->error), "make-hash-table: too many arguments");
         return CH_UNDEFINED;
     }
-
-    ChHashtableMode mode = CH_HASHTABLE_EQUAL;
-    if (nargs == 1 && !parse_comparator_mode(args[0], &mode)) {
+    if (nargs == 1 && !ch_is_procedure(args[0]) && !native_named(args[0], "eq?") &&
+        !native_named(args[0], "eqv?") && !native_named(args[0], "equal?")) {
         snprintf(vm->error, sizeof(vm->error),
-                 "make-hash-table: comparator must be eq?, eqv?, or equal?");
+                 "make-hash-table: expected eq?, eqv?, equal?, or procedure");
+        return CH_UNDEFINED;
+    }
+    if (nargs == 2 && !ch_is_procedure(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "make-hash-table: expected procedure comparator");
         return CH_UNDEFINED;
     }
 
     ChValue ht_v = ch_gc_make_hashtable(&vm->gc, 8);
-    ch_as_hashtable(ht_v)->mode = mode;
+    configure_hashtable(ch_as_hashtable(ht_v), args, nargs);
     return ht_v;
 }
 
@@ -92,7 +107,7 @@ static ChValue prim_hash_table_ref(ChVM *vm, ChValue *args, int nargs) {
     }
 
     ChValue value = CH_UNDEFINED;
-    ChHashtableStatus st = ch_hashtable_get(ht, args[1], &value);
+    ChHashtableStatus st = ch_hashtable_get(vm, ht, args[1], &value);
     if (st == CH_HASHTABLE_OK) {
         return value;
     }
@@ -127,7 +142,7 @@ static ChValue prim_hash_table_set(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
 
-    ChHashtableStatus st = ch_hashtable_set(ht, args[1], args[2]);
+    ChHashtableStatus st = ch_hashtable_set(vm, ht, args[1], args[2]);
     if (st != CH_HASHTABLE_OK) {
         return fail_hashtable_status(vm, "hash-table-set!", st);
     }
@@ -143,7 +158,7 @@ static ChValue prim_hash_table_delete(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
 
-    ChHashtableStatus st = ch_hashtable_delete(ht, args[1]);
+    ChHashtableStatus st = ch_hashtable_delete(vm, ht, args[1]);
     if (st == CH_HASHTABLE_BAD_KEY) {
         return fail_hashtable_status(vm, "hash-table-delete!", st);
     }
@@ -249,21 +264,29 @@ static ChValue prim_hash_table_walk(ChVM *vm, ChValue *args, int nargs) {
 
     ChVector *ks = ch_as_vector(keys_vec);
     ChVector *vs = ch_as_vector(vals_vec);
+    size_t extra_base = vm->gc.extra_root_count;
+    for (size_t i = 0; i < len; i++) {
+        ch_gc_add_extra_root(&vm->gc, ks->items[i]);
+        ch_gc_add_extra_root(&vm->gc, vs->items[i]);
+    }
     for (size_t i = 0; i < len; i++) {
         ChValue call_args[2] = {ks->items[i], vs->items[i]};
         ChValue ignored = CH_VOID;
         ChVMStatus st = ch_vm_apply(vm, args[1], call_args, 2, &ignored);
         if (st == CH_VM_CONTINUATION_INVOKED) {
+            vm->gc.extra_root_count = extra_base;
             ch_gc_pop_n(&vm->gc, 2);
             vm->continuation_invoked = true;
             return CH_UNDEFINED;
         }
         if (st != CH_VM_OK) {
+            vm->gc.extra_root_count = extra_base;
             ch_gc_pop_n(&vm->gc, 2);
             return CH_UNDEFINED;
         }
     }
 
+    vm->gc.extra_root_count = extra_base;
     ch_gc_pop_n(&vm->gc, 2);
     return CH_VOID;
 }
@@ -289,22 +312,30 @@ static ChValue prim_hash_table_fold(ChVM *vm, ChValue *args, int nargs) {
 
     ChVector *ks = ch_as_vector(keys_vec);
     ChVector *vs = ch_as_vector(vals_vec);
+    size_t extra_base = vm->gc.extra_root_count;
+    for (size_t i = 0; i < len; i++) {
+        ch_gc_add_extra_root(&vm->gc, ks->items[i]);
+        ch_gc_add_extra_root(&vm->gc, vs->items[i]);
+    }
     for (size_t i = 0; i < len; i++) {
         ChValue call_args[3] = {ks->items[i], vs->items[i], acc};
         ChValue next = CH_VOID;
         ChVMStatus st = ch_vm_apply(vm, args[1], call_args, 3, &next);
         if (st == CH_VM_CONTINUATION_INVOKED) {
+            vm->gc.extra_root_count = extra_base;
             ch_gc_pop_n(&vm->gc, 3);
             vm->continuation_invoked = true;
             return CH_UNDEFINED;
         }
         if (st != CH_VM_OK) {
+            vm->gc.extra_root_count = extra_base;
             ch_gc_pop_n(&vm->gc, 3);
             return CH_UNDEFINED;
         }
         acc = ch_coerce_single(next);
     }
 
+    vm->gc.extra_root_count = extra_base;
     ch_gc_pop_n(&vm->gc, 2);
     ch_gc_pop(&vm->gc);
     return acc;
@@ -317,7 +348,7 @@ static ChValue prim_hash_table_exists_p(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
     ChValue val = CH_UNDEFINED;
-    ChHashtableStatus st = ch_hashtable_get(ht, args[1], &val);
+    ChHashtableStatus st = ch_hashtable_get(vm, ht, args[1], &val);
     if (st == CH_HASHTABLE_OK) {
         return CH_TRUE;
     }
@@ -337,11 +368,33 @@ static ChValue prim_hash_table_update_bang(ChVM *vm, ChValue *args, int nargs) {
         snprintf(vm->error, sizeof(vm->error), "hash-table-update!: expected at least 3 arguments");
         return CH_UNDEFINED;
     }
-    ChValue ref_args[2] = {args[0], args[1]};
-    ChValue old = prim_hash_table_ref(vm, ref_args, 2);
-    if (old == CH_UNDEFINED) {
+    ChHashtable *ht = require_hashtable(vm, "hash-table-update!", args[0]);
+    if (!ht) {
         return CH_UNDEFINED;
     }
+
+    ChValue old = CH_UNDEFINED;
+    ChHashtableStatus st = ch_hashtable_get(vm, ht, args[1], &old);
+    if (st == CH_HASHTABLE_NOT_FOUND) {
+        if (nargs > 3) {
+            ChValue init = CH_UNDEFINED;
+            if (ch_is_procedure(args[3])) {
+                if (ch_vm_apply(vm, args[3], NULL, 0, &init) != CH_VM_OK) {
+                    return CH_UNDEFINED;
+                }
+            } else {
+                init = args[3];
+            }
+            old = ch_coerce_single(init);
+        } else {
+            snprintf(vm->error, sizeof(vm->error),
+                     "hash-table-update!: key to be present or thunk");
+            return CH_UNDEFINED;
+        }
+    } else if (st != CH_HASHTABLE_OK) {
+        return fail_hashtable_status(vm, "hash-table-update!", st);
+    }
+
     ChValue proc_result = CH_UNDEFINED;
     if (ch_vm_apply(vm, args[2], &old, 1, &proc_result) != CH_VM_OK) {
         return CH_UNDEFINED;
@@ -398,10 +451,12 @@ static ChValue prim_hash_table_to_alist(ChVM *vm, ChValue *args, int nargs) {
 }
 
 static ChValue prim_alist_to_hash_table(ChVM *vm, ChValue *args, int nargs) {
-    ChValue ht = prim_make_hash_table(vm, args, nargs > 1 ? 1 : 0);
-    if (ht == CH_UNDEFINED) {
+    if (nargs < 1) {
+        snprintf(vm->error, sizeof(vm->error), "alist->hash-table: expected at least 1 argument");
         return CH_UNDEFINED;
     }
+    ChValue ht = ch_gc_make_hashtable(&vm->gc, 8);
+    configure_hashtable(ch_as_hashtable(ht), args + 1, nargs - 1);
     if (!ch_is_pair(args[0])) {
         return ht;
     }
@@ -411,7 +466,12 @@ static ChValue prim_alist_to_hash_table(ChVM *vm, ChValue *args, int nargs) {
             snprintf(vm->error, sizeof(vm->error), "alist->hash-table: bad alist");
             return CH_UNDEFINED;
         }
-        ChValue set_args[3] = {ht, ch_car(entry), ch_cdr(entry)};
+        ChValue key = ch_car(entry);
+        ChValue val = CH_UNDEFINED;
+        if (ch_hashtable_get(vm, ch_as_hashtable(ht), key, &val) == CH_HASHTABLE_OK) {
+            continue;
+        }
+        ChValue set_args[3] = {ht, key, ch_cdr(entry)};
         if (prim_hash_table_set(vm, set_args, 3) == CH_UNDEFINED) {
             return CH_UNDEFINED;
         }
@@ -558,6 +618,76 @@ static ChValue prim_hash_by_identity(ChVM *vm, ChValue *args, int nargs) {
     return ch_make_fixnum((int64_t)h);
 }
 
+static ChValue lookup_global_cstr(ChVM *vm, const char *name) {
+    for (size_t i = 0; i < vm->global_count; i++) {
+        if (vm->globals[i].defined &&
+            strcmp(ch_symbol_basename(vm->globals[i].name), name) == 0) {
+            return vm->globals[i].value;
+        }
+    }
+    return CH_UNDEFINED;
+}
+
+static ChValue accessor_for_mode(ChVM *vm, ChHashtableMode mode) {
+    const char *name = "equal?";
+    if (mode == CH_HASHTABLE_EQ) {
+        name = "eq?";
+    } else if (mode == CH_HASHTABLE_EQV) {
+        name = "eqv?";
+    }
+    return lookup_global_cstr(vm, name);
+}
+
+static ChValue prim_hash_table_equivalence_function(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChHashtable *ht = require_hashtable(vm, "hash-table-equivalence-function", args[0]);
+    if (!ht) {
+        return CH_UNDEFINED;
+    }
+    if (ch_is_procedure(ht->equiv_fn)) {
+        return ht->equiv_fn;
+    }
+    return accessor_for_mode(vm, ht->mode);
+}
+
+static ChValue prim_hash_table_hash_function(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChHashtable *ht = require_hashtable(vm, "hash-table-hash-function", args[0]);
+    if (!ht) {
+        return CH_UNDEFINED;
+    }
+    if (ch_is_procedure(ht->hash_fn)) {
+        return ht->hash_fn;
+    }
+    if (ht->mode == CH_HASHTABLE_EQ) {
+        return lookup_global_cstr(vm, "hash-by-identity");
+    }
+    return lookup_global_cstr(vm, "hash");
+}
+
+static ChValue prim_hash_table_copy(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChHashtable *src = require_hashtable(vm, "hash-table-copy", args[0]);
+    if (!src) {
+        return CH_UNDEFINED;
+    }
+    ChValue copy = ch_gc_make_hashtable(&vm->gc, src->cap ? src->cap : 8);
+    ChHashtable *dst = ch_as_hashtable(copy);
+    dst->mode = src->mode;
+    dst->equiv_fn = src->equiv_fn;
+    dst->hash_fn = src->hash_fn;
+    for (size_t i = 0; i < src->cap; i++) {
+        if (!src->used[i] || src->keys[i] == CH_UNDEFINED) {
+            continue;
+        }
+        ChHashtableStatus st = ch_hashtable_set(vm, dst, src->keys[i], src->vals[i]);
+        if (st != CH_HASHTABLE_OK) {
+            return fail_hashtable_status(vm, "hash-table-copy", st);
+        }
+    }
+    return copy;
+}
+
 static ChValue prim_hash_table_merge_bang(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
     ChHashtable *ht1 = require_hashtable(vm, "hash-table-merge!", args[0]);
@@ -573,7 +703,7 @@ static ChValue prim_hash_table_merge_bang(ChVM *vm, ChValue *args, int nargs) {
         if (!ht2->used[i] || ht2->keys[i] == CH_UNDEFINED) {
             continue;
         }
-        ChHashtableStatus st = ch_hashtable_set(ht1, ht2->keys[i], ht2->vals[i]);
+        ChHashtableStatus st = ch_hashtable_set(vm, ht1, ht2->keys[i], ht2->vals[i]);
         if (st != CH_HASHTABLE_OK) {
             return fail_hashtable_status(vm, "hash-table-merge!", st);
         }
@@ -600,6 +730,9 @@ void ch_register_hashtable_primitives(ChVM *vm) {
     define_prim(vm, "hash-table-update!/default", prim_hash_table_update_default_bang, 4, 4);
     define_prim(vm, "hash-table->alist", prim_hash_table_to_alist, 1, 1);
     define_prim(vm, "alist->hash-table", prim_alist_to_hash_table, -1, 1);
+    define_prim(vm, "hash-table-copy", prim_hash_table_copy, 1, 1);
+    define_prim(vm, "hash-table-equivalence-function", prim_hash_table_equivalence_function, 1, 1);
+    define_prim(vm, "hash-table-hash-function", prim_hash_table_hash_function, 1, 1);
     define_prim(vm, "hash-table-merge!", prim_hash_table_merge_bang, 2, 2);
     define_prim(vm, "hash", prim_hash, -1, 1);
     define_prim(vm, "string-hash", prim_string_hash, -1, 1);

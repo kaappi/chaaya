@@ -201,6 +201,38 @@ static ChValue prim_vector_count(ChVM *vm, ChValue *args, int nargs) {
     return ch_make_fixnum(count);
 }
 
+static ChValue prim_vector_cumulate(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 3) {
+        snprintf(vm->error, sizeof(vm->error), "vector-cumulate: expected at least 3 arguments");
+        return CH_UNDEFINED;
+    }
+    ChVector *v = require_vector(vm, args[2], "vector-cumulate");
+    if (!v || !ch_is_procedure(args[0])) {
+        if (v) {
+            snprintf(vm->error, sizeof(vm->error), "vector-cumulate: expected procedure");
+        }
+        return CH_UNDEFINED;
+    }
+    ChValue out = ch_gc_make_vector(&vm->gc, v->len, CH_FALSE);
+    ch_gc_push(&vm->gc, &out);
+    ChVector *vec = ch_as_vector(out);
+    ChValue acc = args[1];
+    ch_gc_push(&vm->gc, &acc);
+    for (size_t i = 0; i < v->len; i++) {
+        ChValue call_args[2] = {acc, v->items[i]};
+        ChValue next = CH_UNDEFINED;
+        ChVMStatus st = ch_vm_apply(vm, args[0], call_args, 2, &next);
+        if (st != CH_VM_OK) {
+            ch_gc_pop_n(&vm->gc, 2);
+            return CH_UNDEFINED;
+        }
+        acc = ch_coerce_single(next);
+        vec->items[i] = acc;
+    }
+    ch_gc_pop_n(&vm->gc, 2);
+    return out;
+}
+
 static ChValue prim_vector_fold(ChVM *vm, ChValue *args, int nargs) {
     if (nargs < 3) {
         snprintf(vm->error, sizeof(vm->error), "vector-fold: expected at least 3 arguments");
@@ -221,6 +253,40 @@ static ChValue prim_vector_fold(ChVM *vm, ChValue *args, int nargs) {
     ChValue acc = args[1];
     ch_gc_push(&vm->gc, &acc);
     for (size_t i = start; i < end; i++) {
+        ChValue call_args[2] = {v->items[i], acc};
+        ChValue next = CH_UNDEFINED;
+        ChVMStatus st = ch_vm_apply(vm, args[0], call_args, 2, &next);
+        if (st != CH_VM_OK) {
+            ch_gc_pop(&vm->gc);
+            return CH_UNDEFINED;
+        }
+        acc = ch_coerce_single(next);
+    }
+    ch_gc_pop(&vm->gc);
+    return acc;
+}
+
+static ChValue prim_vector_fold_right(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 3) {
+        snprintf(vm->error, sizeof(vm->error), "vector-fold-right: expected at least 3 arguments");
+        return CH_UNDEFINED;
+    }
+    ChVector *v = require_vector(vm, args[2], "vector-fold-right");
+    if (!v || !ch_is_procedure(args[0])) {
+        if (v) {
+            snprintf(vm->error, sizeof(vm->error), "vector-fold-right: expected procedure");
+        }
+        return CH_UNDEFINED;
+    }
+    size_t start = 0;
+    size_t end = v->len;
+    if (parse_optional_range(vm, args, nargs, 3, v->len, "vector-fold-right", &start, &end) != 0) {
+        return CH_UNDEFINED;
+    }
+    ChValue acc = args[1];
+    ch_gc_push(&vm->gc, &acc);
+    for (size_t ii = end; ii > start; ii--) {
+        size_t i = ii - 1;
         ChValue call_args[2] = {v->items[i], acc};
         ChValue next = CH_UNDEFINED;
         ChVMStatus st = ch_vm_apply(vm, args[0], call_args, 2, &next);
@@ -260,51 +326,275 @@ static ChValue prim_vector_reverse_bang(ChVM *vm, ChValue *args, int nargs) {
     return CH_VOID;
 }
 
-static ChValue prim_vector_unfold(ChVM *vm, ChValue *args, int nargs) {
-    if (nargs < 4) {
-        snprintf(vm->error, sizeof(vm->error), "vector-unfold: expected at least 4 arguments");
+static ChValue apply_unfold_step(ChVM *vm, ChValue proc, ChValue *call_args, int ncall,
+                                  ChValue *elem_out, ChValue *seeds, int nseeds) {
+    ChValue result = CH_UNDEFINED;
+    ChVMStatus st = ch_vm_apply(vm, proc, call_args, ncall, &result);
+    if (st != CH_VM_OK) {
         return CH_UNDEFINED;
     }
-    int64_t len = 0;
-    if (!ch_is_fixnum(args[0]) || ch_to_fixnum(args[0]) < 0) {
+    if (ch_is_values(result)) {
+        ChValues *vs = ch_as_values(result);
+        if (vs->count == 0) {
+            snprintf(vm->error, sizeof(vm->error), "vector-unfold: empty values from step procedure");
+            return CH_UNDEFINED;
+        }
+        *elem_out = vs->items[0];
+        for (int j = 0; j < nseeds; j++) {
+            if ((size_t)(j + 1) < vs->count) {
+                seeds[j] = vs->items[j + 1];
+            }
+        }
+        return result;
+    }
+    *elem_out = result;
+    return result;
+}
+
+static ChValue prim_vector_unfold(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 2) {
+        snprintf(vm->error, sizeof(vm->error), "vector-unfold: expected at least 2 arguments");
+        return CH_UNDEFINED;
+    }
+    if (!ch_is_fixnum(args[1]) || ch_to_fixnum(args[1]) < 0) {
         snprintf(vm->error, sizeof(vm->error), "vector-unfold: expected non-negative length");
         return CH_UNDEFINED;
     }
-    len = ch_to_fixnum(args[0]);
-    ChValue out = ch_gc_make_vector(&vm->gc, (size_t)len, CH_FALSE);
+    if (!ch_is_procedure(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "vector-unfold: expected procedure");
+        return CH_UNDEFINED;
+    }
+    size_t len = (size_t)ch_to_fixnum(args[1]);
+    int nseeds = nargs - 2;
+    ChValue out = ch_gc_make_vector(&vm->gc, len, CH_FALSE);
     ch_gc_push(&vm->gc, &out);
     ChVector *vec = ch_as_vector(out);
-    ChValue seed = args[3];
-    ch_gc_push(&vm->gc, &seed);
-    for (int64_t i = 0; i < len; i++) {
-        ChValue stop = CH_FALSE;
-        ChVMStatus st = ch_vm_apply(vm, args[1], &seed, 1, &stop);
-        if (st != CH_VM_OK) {
-            ch_gc_pop_n(&vm->gc, 2);
-            return CH_UNDEFINED;
-        }
-        if (stop != CH_FALSE && !ch_is_false(stop)) {
-            ch_gc_pop_n(&vm->gc, 2);
-            snprintf(vm->error, sizeof(vm->error), "vector-unfold: stopped early");
-            return CH_UNDEFINED;
+    ChValue seeds[64];
+    if (nseeds > 64) {
+        ch_gc_pop(&vm->gc);
+        snprintf(vm->error, sizeof(vm->error), "vector-unfold: too many seeds");
+        return CH_UNDEFINED;
+    }
+    for (int i = 0; i < nseeds; i++) {
+        seeds[i] = args[2 + i];
+        ch_gc_push(&vm->gc, &seeds[i]);
+    }
+    ChValue call_args[65];
+    for (size_t i = 0; i < len; i++) {
+        call_args[0] = ch_make_fixnum((int64_t)i);
+        for (int j = 0; j < nseeds; j++) {
+            call_args[1 + j] = seeds[j];
         }
         ChValue elem = CH_UNDEFINED;
-        st = ch_vm_apply(vm, args[2], &seed, 1, &elem);
-        if (st != CH_VM_OK) {
-            ch_gc_pop_n(&vm->gc, 2);
+        if (apply_unfold_step(vm, args[0], call_args, 1 + nseeds, &elem, seeds, nseeds) ==
+            CH_UNDEFINED) {
+            ch_gc_pop_n(&vm->gc, 1 + (size_t)nseeds);
             return CH_UNDEFINED;
         }
-        vec->items[(size_t)i] = elem;
-        ChValue next = CH_UNDEFINED;
-        st = ch_vm_apply(vm, args[4], &seed, 1, &next);
-        if (st != CH_VM_OK) {
-            ch_gc_pop_n(&vm->gc, 2);
-            return CH_UNDEFINED;
+        vec->items[i] = elem;
+        ch_gc_push(&vm->gc, &elem);
+        for (int j = 0; j < nseeds; j++) {
+            ch_gc_push(&vm->gc, &seeds[j]);
         }
-        seed = next;
     }
-    ch_gc_pop_n(&vm->gc, 2);
+    ch_gc_pop_n(&vm->gc, 1 + (size_t)nseeds);
     return out;
+}
+
+static ChValue prim_vector_partition(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 2) {
+        snprintf(vm->error, sizeof(vm->error), "vector-partition: expected at least 2 arguments");
+        return CH_UNDEFINED;
+    }
+    ChVector *v = require_vector(vm, args[1], "vector-partition");
+    if (!v || !ch_is_procedure(args[0])) {
+        if (v) {
+            snprintf(vm->error, sizeof(vm->error), "vector-partition: expected procedure");
+        }
+        return CH_UNDEFINED;
+    }
+    ChValue yes_buf = ch_gc_make_vector(&vm->gc, v->len, CH_FALSE);
+    ChValue no_buf = ch_gc_make_vector(&vm->gc, v->len, CH_FALSE);
+    ch_gc_push(&vm->gc, &yes_buf);
+    ch_gc_push(&vm->gc, &no_buf);
+    ChVector *yes = ch_as_vector(yes_buf);
+    ChVector *no = ch_as_vector(no_buf);
+    size_t yes_n = 0;
+    size_t no_n = 0;
+    for (size_t i = 0; i < v->len; i++) {
+        ChValue elem = v->items[i];
+        bool match = false;
+        if (!call_pred(vm, args[0], elem, &match)) {
+            ch_gc_pop_n(&vm->gc, 2);
+            return CH_UNDEFINED;
+        }
+        if (match) {
+            yes->items[yes_n++] = elem;
+        } else {
+            no->items[no_n++] = elem;
+        }
+    }
+    ChValue out = ch_gc_make_vector(&vm->gc, v->len, CH_FALSE);
+    ch_gc_push(&vm->gc, &out);
+    ChVector *result = ch_as_vector(out);
+    for (size_t i = 0; i < yes_n; i++) {
+        result->items[i] = yes->items[i];
+    }
+    for (size_t i = 0; i < no_n; i++) {
+        result->items[yes_n + i] = no->items[i];
+    }
+    ChValue count = ch_make_fixnum((int64_t)yes_n);
+    ChValue vals[2] = {out, count};
+    ch_gc_pop_n(&vm->gc, 3);
+    return ch_gc_make_values(&vm->gc, vals, 2);
+}
+
+static ChValue prim_vector_unfold_right(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 2) {
+        snprintf(vm->error, sizeof(vm->error), "vector-unfold-right: expected at least 2 arguments");
+        return CH_UNDEFINED;
+    }
+    if (!ch_is_fixnum(args[1]) || ch_to_fixnum(args[1]) < 0) {
+        snprintf(vm->error, sizeof(vm->error), "vector-unfold-right: expected non-negative length");
+        return CH_UNDEFINED;
+    }
+    if (!ch_is_procedure(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "vector-unfold-right: expected procedure");
+        return CH_UNDEFINED;
+    }
+    size_t len = (size_t)ch_to_fixnum(args[1]);
+    int nseeds = nargs - 2;
+    ChValue out = ch_gc_make_vector(&vm->gc, len, CH_FALSE);
+    ch_gc_push(&vm->gc, &out);
+    ChVector *vec = ch_as_vector(out);
+    ChValue seeds[64];
+    if (nseeds > 64) {
+        ch_gc_pop(&vm->gc);
+        snprintf(vm->error, sizeof(vm->error), "vector-unfold-right: too many seeds");
+        return CH_UNDEFINED;
+    }
+    for (int i = 0; i < nseeds; i++) {
+        seeds[i] = args[2 + i];
+        ch_gc_push(&vm->gc, &seeds[i]);
+    }
+    ChValue call_args[65];
+    for (size_t ii = len; ii > 0; ii--) {
+        size_t i = ii - 1;
+        call_args[0] = ch_make_fixnum((int64_t)i);
+        for (int j = 0; j < nseeds; j++) {
+            call_args[1 + j] = seeds[j];
+        }
+        ChValue elem = CH_UNDEFINED;
+        if (apply_unfold_step(vm, args[0], call_args, 1 + nseeds, &elem, seeds, nseeds) ==
+            CH_UNDEFINED) {
+            ch_gc_pop_n(&vm->gc, 1 + (size_t)nseeds);
+            return CH_UNDEFINED;
+        }
+        vec->items[i] = elem;
+        ch_gc_push(&vm->gc, &elem);
+        for (int j = 0; j < nseeds; j++) {
+            ch_gc_push(&vm->gc, &seeds[j]);
+        }
+    }
+    ch_gc_pop_n(&vm->gc, 1 + (size_t)nseeds);
+    return out;
+}
+
+static ChValue prim_vector_swap_bang(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChVector *v = require_vector(vm, args[0], "vector-swap!");
+    if (!v) {
+        return CH_UNDEFINED;
+    }
+    if (ch_object_is_immutable(&v->header)) {
+        snprintf(vm->error, sizeof(vm->error), "vector-swap!: immutable vector");
+        return CH_UNDEFINED;
+    }
+    if (!ch_is_fixnum(args[1]) || !ch_is_fixnum(args[2])) {
+        snprintf(vm->error, sizeof(vm->error), "vector-swap!: expected integer indices");
+        return CH_UNDEFINED;
+    }
+    int64_t i = ch_to_fixnum(args[1]);
+    int64_t j = ch_to_fixnum(args[2]);
+    if (i < 0 || j < 0 || (size_t)i >= v->len || (size_t)j >= v->len) {
+        snprintf(vm->error, sizeof(vm->error), "vector-swap!: index out of range");
+        return CH_UNDEFINED;
+    }
+    ChValue tmp = v->items[i];
+    v->items[i] = v->items[j];
+    v->items[j] = tmp;
+    return CH_VOID;
+}
+
+static ChValue prim_vector_reverse_copy(ChVM *vm, ChValue *args, int nargs) {
+    ChVector *v = require_vector(vm, args[0], "vector-reverse-copy");
+    if (!v) {
+        return CH_UNDEFINED;
+    }
+    size_t start = 0;
+    size_t end = v->len;
+    if (parse_optional_range(vm, args, nargs, 1, v->len, "vector-reverse-copy", &start, &end) !=
+        0) {
+        return CH_UNDEFINED;
+    }
+    size_t n = end - start;
+    ChValue out = ch_gc_make_vector(&vm->gc, n, CH_FALSE);
+    ch_gc_push(&vm->gc, &out);
+    ChVector *dst = ch_as_vector(out);
+    for (size_t i = 0; i < n; i++) {
+        dst->items[i] = v->items[end - 1 - i];
+    }
+    ch_gc_pop(&vm->gc);
+    return out;
+}
+
+/* (vector-map! f vec1 vec2 ...) mutates vec1 in place with f applied
+   element-wise, stopping at the shortest vector (SRFI-133). */
+static ChValue prim_vector_map_bang(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 2) {
+        snprintf(vm->error, sizeof(vm->error), "vector-map!: expected at least 2 arguments");
+        return CH_UNDEFINED;
+    }
+    if (!ch_is_procedure(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "vector-map!: expected procedure");
+        return CH_UNDEFINED;
+    }
+    ChVector *v0 = require_vector(vm, args[1], "vector-map!");
+    if (!v0) {
+        return CH_UNDEFINED;
+    }
+    if (ch_object_is_immutable(&v0->header)) {
+        snprintf(vm->error, sizeof(vm->error), "vector-map!: immutable vector");
+        return CH_UNDEFINED;
+    }
+    size_t n = v0->len;
+    int vec_count = nargs - 1;
+    if (vec_count > 16) {
+        snprintf(vm->error, sizeof(vm->error), "vector-map!: too many vectors");
+        return CH_UNDEFINED;
+    }
+    for (int i = 1; i < vec_count; i++) {
+        ChVector *vi = require_vector(vm, args[1 + i], "vector-map!");
+        if (!vi) {
+            return CH_UNDEFINED;
+        }
+        if (vi->len < n) {
+            n = vi->len;
+        }
+    }
+    for (size_t i = 0; i < n; i++) {
+        ChValue call_args[16];
+        for (int j = 0; j < vec_count; j++) {
+            call_args[j] = ch_as_vector(args[1 + j])->items[i];
+        }
+        ChValue result = CH_UNDEFINED;
+        ChVMStatus st = ch_vm_apply(vm, args[0], call_args, vec_count, &result);
+        if (st != CH_VM_OK) {
+            return CH_UNDEFINED;
+        }
+        v0->items[i] = ch_coerce_single(result);
+    }
+    return CH_VOID;
 }
 
 void ch_register_srfi133_primitives(ChVM *vm) {
@@ -315,6 +605,13 @@ void ch_register_srfi133_primitives(ChVM *vm) {
     define_prim(vm, "vector-skip-right", prim_vector_skip_right, -1, 2);
     define_prim(vm, "vector-count", prim_vector_count, -1, 2);
     define_prim(vm, "vector-fold", prim_vector_fold, -1, 3);
+    define_prim(vm, "vector-fold-right", prim_vector_fold_right, -1, 3);
+    define_prim(vm, "vector-cumulate", prim_vector_cumulate, -1, 3);
     define_prim(vm, "vector-reverse!", prim_vector_reverse_bang, -1, 1);
-    define_prim(vm, "vector-unfold", prim_vector_unfold, -1, 4);
+    define_prim(vm, "vector-swap!", prim_vector_swap_bang, 3, 3);
+    define_prim(vm, "vector-reverse-copy", prim_vector_reverse_copy, -1, 1);
+    define_prim(vm, "vector-unfold", prim_vector_unfold, -1, 2);
+    define_prim(vm, "vector-unfold-right", prim_vector_unfold_right, -1, 2);
+    define_prim(vm, "vector-partition", prim_vector_partition, 2, 2);
+    define_prim(vm, "vector-map!", prim_vector_map_bang, -1, 2);
 }

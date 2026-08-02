@@ -93,7 +93,12 @@ int ch_register_builtin_libraries(ChVM *vm) {
                                                "read-u8",        "peek-u8",         "read-bytevector",
                                                "read-bytevector!", "u8-ready?",     "eof-object",
                                                "eof-object?"};
-    static const char *const cxr_exports[] = {"caar", "cadr", "cdar", "cddr"};
+    static const char *const cxr_exports[] = {
+        "caar",   "cadr",   "cdar",   "cddr",   "caaar",  "caadr",  "cadar",  "caddr",
+        "cdaar",  "cdadr",  "cddar",  "cdddr",  "caaaar", "caaadr", "caadar", "caaddr",
+        "cadaar", "cadadr", "caddar", "cadddr", "cdaaar", "cdaadr", "cdadar", "cdaddr",
+        "cddaar", "cddadr", "cdddar", "cddddr",
+    };
     static const char *const char_exports[] = {
         "char?",           "char=?",          "char<?",          "char<=?",
         "char>?",          "char>=?",         "char-ci=?",
@@ -150,7 +155,7 @@ int ch_register_builtin_libraries(ChVM *vm) {
         "directory-files",         "file-info",           "file-info?",
         "file-info-directory?",    "file-info-regular?",  "file-info-symlink?",
         "file-info:size",          "file-info:mtime",     "file-info:mode",
-        "file-info-type",          "temp-file-prefix",    "create-temp-file",
+        "file-info:blocks",        "file-info-type",      "temp-file-prefix",    "create-temp-file",
         "create-directory",        "delete-directory",    "rename-file",
         "real-path",               "current-directory",   "set-current-directory!",
         "file-exists?",            "delete-file"};
@@ -190,7 +195,10 @@ int ch_register_builtin_libraries(ChVM *vm) {
         "string-null?", "string-concatenate", "string-prefix?", "string-suffix?",
         "string-contains", "string-unfold", "string-unfold-right", "string-index-right",
         "string-skip", "string-skip-right", "string-index", "string-take", "string-drop",
+        "string-take-right", "string-drop-right", "string-pad", "string-pad-right",
+        "string-replace", "string-titlecase", "string-join", "string-split", "string-tabulate",
         "string-trim", "string-trim-right", "string-trim-both",
+        "string-every", "string-any", "string-count", "string-filter", "string-delete",
         "string-length", "string-append", "string-ref", "string-set!", "string-copy",
         "string=?", "string<?", "string<=?", "string>?", "string>=?", "substring",
     };
@@ -207,7 +215,7 @@ int ch_register_builtin_libraries(ChVM *vm) {
         "vector-empty?", "vector-count", "vector-any", "vector-every", "vector-index",
         "vector-index-right", "vector-skip", "vector-skip-right", "vector-swap!",
         "vector-reverse!", "vector-reverse-copy", "vector-unfold", "vector-unfold-right",
-        "vector-fold", "vector-fold-right", "vector-map!", "vector-partition",
+        "vector-fold", "vector-fold-right", "vector-cumulate", "vector-map!", "vector-partition",
         "vector-concatenate", "vector=", "vector-length", "vector-ref", "vector-set!",
         "vector-copy", "vector-append", "vector-map", "vector-for-each", "make-vector",
         "vector->list", "list->vector",

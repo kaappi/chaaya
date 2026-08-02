@@ -547,7 +547,9 @@ static bool bad_numeric_token(const char *text, size_t len) {
         return false; /* prefixed numbers handled via boolean suffix / split lexing */
     }
     if (text[0] == '+' || text[0] == '-') {
-        return len > 1 && (isdigit((unsigned char)text[1]) || text[1] == '.');
+        return len > 1 &&
+               (isdigit((unsigned char)text[1]) ||
+                (text[1] == '.' && len > 2 && isdigit((unsigned char)text[2])));
     }
     if (isdigit((unsigned char)text[0])) {
         return true;
@@ -682,8 +684,11 @@ static ChReadStatus read_atom(ChReader *r, ChValue *out) {
     } else if (isdigit(c0) || (c0 == '.' && isdigit((unsigned char)c1))) {
         maybe_number = true;
     } else if (c0 == '+' || c0 == '-') {
-        maybe_number = isdigit((unsigned char)c1) || c1 == '.' || c1 == 'i' || c1 == 'I' ||
-                          c1 == 'n' || c1 == 'N';
+        /* Sign + dot is only numeric if a digit follows the dot (e.g. "+.5");
+         * otherwise it's a peculiar identifier like "+.z" (R7RS 7.1.1). */
+        maybe_number = isdigit((unsigned char)c1) ||
+                       (c1 == '.' && isdigit((unsigned char)peek_n(r, 2))) || c1 == 'i' ||
+                       c1 == 'I' || c1 == 'n' || c1 == 'N';
     }
     if (maybe_number) {
         size_t end = scan_number_token_end(r, start);
@@ -1162,6 +1167,11 @@ static ChReadStatus read_abbrev(ChReader *r, const char *name, ChValue *out) {
     ChValue inner = CH_NIL;
     ch_gc_push(r->gc, &inner);
     ChReadStatus st = read_datum(r, &inner);
+    if (st == CH_READ_EOF) {
+        ch_gc_pop(r->gc);
+        snprintf(r->error, sizeof(r->error), "%s: expected datum", name);
+        return CH_READ_ERROR;
+    }
     if (st != CH_READ_OK) {
         ch_gc_pop(r->gc);
         return st;

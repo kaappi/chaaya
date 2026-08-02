@@ -49,6 +49,8 @@ void capture_transformer_templates(ChVM *vm, ChTransformer *tr);
 /* Recursive toplevel expander (define-syntax, let-syntax, macros, …). */
 ChExpandStatus expand_form(ChVM *vm, ChValue expr, ChValue *out, char *err, size_t err_len,
                            int depth);
+ChExpandStatus expand_form_no_macros(ChVM *vm, ChValue expr, ChValue *out, char *err,
+                                     size_t err_len, int depth);
 
 #ifdef __cplusplus
 }

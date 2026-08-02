@@ -481,16 +481,19 @@ static ChValue prim_mutex_p(ChVM *vm, ChValue *args, int nargs) {
 }
 
 static ChValue prim_mutex_lock(ChVM *vm, ChValue *args, int nargs) {
+    /* SRFI 18: (mutex-lock! mutex [timeout [thread]]). Unlike the #f-means-
+     * "poll, don't block" convention used by channel-send/receive and
+     * thread-join!, mutex-lock!'s timeout defaults to (and #f explicitly
+     * means) block indefinitely — leave timeout at -1.0 for both. */
     double timeout = -1.0;
-    if (nargs >= 2) {
-        if (args[1] == CH_FALSE) {
-            timeout = 0.0;
-        } else if (!sleep_seconds_arg(args[1], &timeout)) {
+    if (nargs >= 2 && args[1] != CH_FALSE) {
+        if (!sleep_seconds_arg(args[1], &timeout)) {
             snprintf(vm->error, sizeof(vm->error), "mutex-lock!: expected timeout");
             return CH_UNDEFINED;
         }
     }
-    int rc = ch_mutex_lock(vm, args[0], timeout);
+    ChValue owner_override = nargs >= 3 ? args[2] : CH_UNDEFINED;
+    int rc = ch_mutex_lock(vm, args[0], timeout, owner_override);
     if (rc == -2) {
         ChValue msg = ch_gc_make_string_cstr(&vm->gc, vm->error[0] ? vm->error
                                                                     : "mutex-lock!: abandoned mutex");

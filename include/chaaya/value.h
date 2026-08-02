@@ -338,6 +338,8 @@ typedef struct ChHashtable {
     size_t count;
     size_t cap;
     ChHashtableMode mode;
+    ChValue equiv_fn; /* CH_NIL or custom eq procedure */
+    ChValue hash_fn;  /* CH_NIL or custom hash procedure */
     ChValue *keys;
     ChValue *vals;
     bool *used;

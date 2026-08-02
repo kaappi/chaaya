@@ -118,7 +118,11 @@ static ChValue prim_exact_integer_p(ChVM *vm, ChValue *args, int nargs) {
 static ChValue prim_inexact_p(ChVM *vm, ChValue *args, int nargs) {
     (void)vm;
     (void)nargs;
-    return (ch_is_flonum(args[0]) || ch_is_complex_obj(args[0])) ? CH_TRUE : CH_FALSE;
+    /* R7RS: inexact? is the complement of exact? among numbers. */
+    if (!ch_is_number(args[0])) {
+        return CH_FALSE;
+    }
+    return ch_is_exact(args[0]) ? CH_FALSE : CH_TRUE;
 }
 
 static ChValue prim_complex_p(ChVM *vm, ChValue *args, int nargs) {
@@ -356,6 +360,14 @@ static ChValue prim_sub(ChVM *vm, ChValue *args, int nargs) {
     if (any_complex(args, nargs)) {
         if (nargs == 1) {
             ChValue r = ch_complex_negate(&vm->gc, args[0]);
+            if (r == CH_UNDEFINED) {
+                snprintf(vm->error, sizeof(vm->error), "-: not a number");
+            }
+            return r;
+        }
+        /* (- 0 z) is exact negation when the minuend is exact zero. */
+        if (nargs == 2 && ch_is_fixnum(args[0]) && ch_to_fixnum(args[0]) == 0) {
+            ChValue r = ch_complex_negate(&vm->gc, args[1]);
             if (r == CH_UNDEFINED) {
                 snprintf(vm->error, sizeof(vm->error), "-: not a number");
             }
@@ -663,6 +675,34 @@ static ChValue prim_ge(ChVM *vm, ChValue *args, int nargs) {
 
 static ChValue prim_quotient(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
+    if ((ch_is_bignum(args[0]) || ch_is_bignum(args[1])) && !ch_is_flonum(args[0]) &&
+        !ch_is_flonum(args[1])) {
+        if (!ch_is_number(args[0]) || !ch_is_number(args[1])) {
+            snprintf(vm->error, sizeof(vm->error), "quotient: not a number");
+            return CH_UNDEFINED;
+        }
+        if (!ch_is_exact_integer(args[0]) || !ch_is_exact_integer(args[1])) {
+            snprintf(vm->error, sizeof(vm->error), "quotient: expected exact integers");
+            return CH_UNDEFINED;
+        }
+        ChValue r = ch_bignum_quotient(&vm->gc, args[0], args[1]);
+        if (r == CH_UNDEFINED) {
+            snprintf(vm->error, sizeof(vm->error), "quotient: division by zero");
+        }
+        return r;
+    }
+    if (ch_is_flonum(args[0]) || ch_is_flonum(args[1])) {
+        double a, b;
+        if (!as_number(args[0], &a) || !as_number(args[1], &b)) {
+            snprintf(vm->error, sizeof(vm->error), "quotient: not a number");
+            return CH_UNDEFINED;
+        }
+        if (b == 0.0) {
+            snprintf(vm->error, sizeof(vm->error), "quotient: division by zero");
+            return CH_UNDEFINED;
+        }
+        return ch_make_flonum(trunc(a / b));
+    }
     if (!ch_is_exact_integer(args[0]) || !ch_is_exact_integer(args[1])) {
         snprintf(vm->error, sizeof(vm->error), "quotient: expected exact integers");
         return CH_UNDEFINED;

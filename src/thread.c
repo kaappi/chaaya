@@ -527,7 +527,7 @@ ChValue ch_gc_make_condvar(ChGC *gc, ChValue name) {
  * lock was abandoned by a since-terminated owner — vm->error carries a
  * message an abandoned-mutex-exception? predicate can match; the mutex is
  * left unlocked so a subsequent call can actually acquire it). */
-int ch_mutex_lock(ChVM *vm, ChValue mutex, double timeout_seconds) {
+int ch_mutex_lock(ChVM *vm, ChValue mutex, double timeout_seconds, ChValue owner_override) {
     if (!ch_is_mutex(mutex)) {
         set_error(vm, "mutex-lock!: expected mutex");
         return -1;
@@ -542,6 +542,9 @@ int ch_mutex_lock(ChVM *vm, ChValue mutex, double timeout_seconds) {
                             ? UINT64_MAX
                             : start + (uint64_t)(timeout_seconds * 1000.0 + 0.5);
     ChValue self = ch_thread_current(vm);
+    ChValue want_owner = owner_override == CH_UNDEFINED
+                              ? self
+                              : (owner_override == CH_FALSE ? CH_NIL : owner_override);
     for (;;) {
         if (m->locked && ch_is_fiber(m->owner)) {
             ChFiber *owner_f = ch_as_fiber(m->owner);
@@ -559,8 +562,8 @@ int ch_mutex_lock(ChVM *vm, ChValue mutex, double timeout_seconds) {
         }
         if (!m->locked) {
             m->locked = 1;
-            m->owner = self;
-            ch_gc_write_barrier(&vm->gc, &m->header, self);
+            m->owner = want_owner;
+            ch_gc_write_barrier(&vm->gc, &m->header, want_owner);
             return 1;
         }
         if (timeout_seconds == 0.0) {
@@ -645,7 +648,7 @@ int ch_mutex_unlock_wait(ChVM *vm, ChValue mutex, ChValue condvar, double timeou
             (void)ch_fiber_drive(vm);
         }
     }
-    if (ch_mutex_lock(vm, mutex, -1.0) != 1) {
+    if (ch_mutex_lock(vm, mutex, -1.0, CH_UNDEFINED) != 1) {
         return -1;
     }
     return 0;

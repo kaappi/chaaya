@@ -191,6 +191,15 @@ static ChValue prim_file_info_mode(ChVM *vm, ChValue *args, int nargs) {
     return ch_make_fixnum((int64_t)(fi->mode & 07777));
 }
 
+static ChValue prim_file_info_blocks(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChFileInfo *fi = require_file_info(vm, args[0], "file-info:blocks");
+    if (!fi) {
+        return CH_UNDEFINED;
+    }
+    return ch_make_fixnum(fi->blocks);
+}
+
 static ChValue prim_create_directory(ChVM *vm, ChValue *args, int nargs) {
     const char *path = require_path(vm, args[0], "create-directory");
     if (!path) {
@@ -371,6 +380,7 @@ void ch_register_filesystem_primitives(ChVM *vm) {
     define_prim(vm, "file-info:size", prim_file_info_size, 1, 1);
     define_prim(vm, "file-info:mtime", prim_file_info_mtime, 1, 1);
     define_prim(vm, "file-info:mode", prim_file_info_mode, 1, 1);
+    define_prim(vm, "file-info:blocks", prim_file_info_blocks, 1, 1);
     define_prim(vm, "create-directory", prim_create_directory, -1, 1);
     define_prim(vm, "delete-directory", prim_delete_directory, 1, 1);
     define_prim(vm, "rename-file", prim_rename_file, 2, 2);

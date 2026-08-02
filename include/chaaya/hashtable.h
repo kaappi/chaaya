@@ -7,6 +7,8 @@
 extern "C" {
 #endif
 
+struct ChVM;
+
 typedef enum ChHashtableStatus {
     CH_HASHTABLE_OK = 0,
     CH_HASHTABLE_NOT_FOUND = 1,
@@ -16,9 +18,10 @@ typedef enum ChHashtableStatus {
 
 bool ch_hashtable_key_supported(ChValue key);
 
-ChHashtableStatus ch_hashtable_get(const ChHashtable *ht, ChValue key, ChValue *out_value);
-ChHashtableStatus ch_hashtable_set(ChHashtable *ht, ChValue key, ChValue value);
-ChHashtableStatus ch_hashtable_delete(ChHashtable *ht, ChValue key);
+ChHashtableStatus ch_hashtable_get(struct ChVM *vm, const ChHashtable *ht, ChValue key,
+                                   ChValue *out_value);
+ChHashtableStatus ch_hashtable_set(struct ChVM *vm, ChHashtable *ht, ChValue key, ChValue value);
+ChHashtableStatus ch_hashtable_delete(struct ChVM *vm, ChHashtable *ht, ChValue key);
 
 #ifdef __cplusplus
 }

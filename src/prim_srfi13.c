@@ -1,6 +1,8 @@
 #include "chaaya/prim.h"
 #include "chaaya/unicode.h"
 
+#include "prim_utf8.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -228,8 +230,15 @@ static ChValue prim_string_contains(ChVM *vm, ChValue *args, int nargs) {
     if (parse_optional_range(vm, args, nargs, 2, cp_len, "string-contains", &start, &end) != 0) {
         return CH_UNDEFINED;
     }
-    if (pat->len == 0) {
-        return ch_make_fixnum((int64_t)start);
+    size_t pat_cp_len = 0;
+    if (utf8_count_codepoints(vm, pat, "string-contains", &pat_cp_len) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t pat_start = 0;
+    size_t pat_end = pat_cp_len;
+    if (parse_optional_range(vm, args, nargs, 4, pat_cp_len, "string-contains", &pat_start,
+                             &pat_end) != 0) {
+        return CH_UNDEFINED;
     }
     size_t start_byte = 0;
     size_t end_byte = 0;
@@ -237,12 +246,23 @@ static ChValue prim_string_contains(ChVM *vm, ChValue *args, int nargs) {
         utf8_offset_for_index(vm, s, end, "string-contains", &end_byte) != 0) {
         return CH_UNDEFINED;
     }
-    if (pat->len > (end_byte - start_byte)) {
+    size_t pat_start_byte = 0;
+    size_t pat_end_byte = 0;
+    if (utf8_offset_for_index(vm, pat, pat_start, "string-contains", &pat_start_byte) != 0 ||
+        utf8_offset_for_index(vm, pat, pat_end, "string-contains", &pat_end_byte) != 0) {
+        return CH_UNDEFINED;
+    }
+    const char *pat_slice = pat->data + pat_start_byte;
+    size_t pat_slice_len = pat_end_byte - pat_start_byte;
+    if (pat_slice_len == 0) {
+        return ch_make_fixnum((int64_t)start);
+    }
+    if (pat_slice_len > (end_byte - start_byte)) {
         return CH_FALSE;
     }
     size_t cp_idx = start;
-    for (size_t pos = start_byte; pos + pat->len <= end_byte;) {
-        if (memcmp(s->data + pos, pat->data, pat->len) == 0) {
+    for (size_t pos = start_byte; pos + pat_slice_len <= end_byte;) {
+        if (memcmp(s->data + pos, pat_slice, pat_slice_len) == 0) {
             return ch_make_fixnum((int64_t)cp_idx);
         }
         uint32_t cp = 0;
@@ -805,6 +825,750 @@ static ChValue prim_string_null_p(ChVM *vm, ChValue *args, int nargs) {
     return ch_as_string(args[0])->len == 0 ? CH_TRUE : CH_FALSE;
 }
 
+static ChValue prim_string_take_right(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_string(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "string-take-right: expected string");
+        return CH_UNDEFINED;
+    }
+    size_t n = 0;
+    if (parse_nonnegative_index(vm, args[1], &n, "string-take-right") != 0) {
+        return CH_UNDEFINED;
+    }
+    ChString *s = ch_as_string(args[0]);
+    size_t cp_len = 0;
+    if (utf8_count_codepoints(vm, s, "string-take-right", &cp_len) != 0) {
+        return CH_UNDEFINED;
+    }
+    if (n > cp_len) {
+        snprintf(vm->error, sizeof(vm->error), "string-take-right: index out of range");
+        return CH_UNDEFINED;
+    }
+    if (n == cp_len) {
+        return ch_gc_make_string(&vm->gc, s->data, s->len);
+    }
+    size_t start_byte = 0;
+    if (utf8_offset_for_index(vm, s, cp_len - n, "string-take-right", &start_byte) != 0) {
+        return CH_UNDEFINED;
+    }
+    return ch_gc_make_string(&vm->gc, s->data + start_byte, s->len - start_byte);
+}
+
+static ChValue prim_string_drop_right(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_string(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "string-drop-right: expected string");
+        return CH_UNDEFINED;
+    }
+    size_t n = 0;
+    if (parse_nonnegative_index(vm, args[1], &n, "string-drop-right") != 0) {
+        return CH_UNDEFINED;
+    }
+    ChString *s = ch_as_string(args[0]);
+    size_t cp_len = 0;
+    if (utf8_count_codepoints(vm, s, "string-drop-right", &cp_len) != 0) {
+        return CH_UNDEFINED;
+    }
+    if (n > cp_len) {
+        snprintf(vm->error, sizeof(vm->error), "string-drop-right: index out of range");
+        return CH_UNDEFINED;
+    }
+    if (n == cp_len) {
+        return ch_gc_make_string(&vm->gc, "", 0);
+    }
+    size_t end_byte = 0;
+    if (utf8_offset_for_index(vm, s, cp_len - n, "string-drop-right", &end_byte) != 0) {
+        return CH_UNDEFINED;
+    }
+    return ch_gc_make_string(&vm->gc, s->data, end_byte);
+}
+
+static int pad_char_bytes(ChVM *vm, ChValue padv, const char *who, char out[4], size_t *len_out) {
+    if (!ch_is_char(padv)) {
+        snprintf(vm->error, sizeof(vm->error), "%s: pad character must be char", who);
+        return -1;
+    }
+    if (!utf8_encode_codepoint(ch_to_char(padv), out, len_out)) {
+        snprintf(vm->error, sizeof(vm->error), "%s: invalid pad character", who);
+        return -1;
+    }
+    return 0;
+}
+
+static ChValue string_pad_impl(ChVM *vm, ChValue *args, int nargs, const char *who, bool right) {
+    if (nargs < 2 || !ch_is_string(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "%s: expected string and length", who);
+        return CH_UNDEFINED;
+    }
+    size_t target_len = 0;
+    if (parse_nonnegative_index(vm, args[1], &target_len, who) != 0) {
+        return CH_UNDEFINED;
+    }
+    char pad_bytes[4] = {' '};
+    size_t pad_len = 1;
+    if (nargs > 2) {
+        if (pad_char_bytes(vm, args[2], who, pad_bytes, &pad_len) != 0) {
+            return CH_UNDEFINED;
+        }
+    }
+    ChString *s = ch_as_string(args[0]);
+    size_t cp_len = 0;
+    if (utf8_count_codepoints(vm, s, who, &cp_len) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t start = 0;
+    size_t end = cp_len;
+    if (parse_optional_range(vm, args, nargs, 3, cp_len, who, &start, &end) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t start_byte = 0;
+    size_t end_byte = 0;
+    if (utf8_offset_for_index(vm, s, start, who, &start_byte) != 0 ||
+        utf8_offset_for_index(vm, s, end, who, &end_byte) != 0) {
+        return CH_UNDEFINED;
+    }
+    const char *data = s->data + start_byte;
+    size_t data_len = end_byte - start_byte;
+    size_t current_len = end - start;
+    if (current_len >= target_len) {
+        if (right) {
+            size_t trunc_end = 0;
+            if (utf8_offset_for_index(vm, s, start + target_len, who, &trunc_end) != 0) {
+                return CH_UNDEFINED;
+            }
+            return ch_gc_make_string(&vm->gc, s->data + start_byte, trunc_end - start_byte);
+        }
+        size_t trunc_start = 0;
+        if (utf8_offset_for_index(vm, s, end - target_len, who, &trunc_start) != 0) {
+            return CH_UNDEFINED;
+        }
+        return ch_gc_make_string(&vm->gc, s->data + trunc_start, end_byte - trunc_start);
+    }
+    size_t pad_count = target_len - current_len;
+    size_t out_len = data_len + pad_count * pad_len;
+    char *buf = (char *)malloc(out_len + 1);
+    if (!buf) {
+        abort();
+    }
+    size_t pos = 0;
+    if (!right) {
+        for (size_t i = 0; i < pad_count; i++) {
+            memcpy(buf + pos, pad_bytes, pad_len);
+            pos += pad_len;
+        }
+    }
+    memcpy(buf + pos, data, data_len);
+    pos += data_len;
+    if (right) {
+        for (size_t i = 0; i < pad_count; i++) {
+            memcpy(buf + pos, pad_bytes, pad_len);
+            pos += pad_len;
+        }
+    }
+    ChValue out = ch_gc_make_string(&vm->gc, buf, out_len);
+    free(buf);
+    return out;
+}
+
+static ChValue prim_string_pad(ChVM *vm, ChValue *args, int nargs) {
+    return string_pad_impl(vm, args, nargs, "string-pad", false);
+}
+
+static ChValue prim_string_pad_right(ChVM *vm, ChValue *args, int nargs) {
+    return string_pad_impl(vm, args, nargs, "string-pad-right", true);
+}
+
+static ChValue prim_string_replace(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 4 || !ch_is_string(args[0]) || !ch_is_string(args[1])) {
+        snprintf(vm->error, sizeof(vm->error), "string-replace: bad arguments");
+        return CH_UNDEFINED;
+    }
+    ChString *s1 = ch_as_string(args[0]);
+    ChString *s2 = ch_as_string(args[1]);
+    size_t start = 0;
+    size_t end = 0;
+    if (parse_nonnegative_index(vm, args[2], &start, "string-replace") != 0 ||
+        parse_nonnegative_index(vm, args[3], &end, "string-replace") != 0) {
+        return CH_UNDEFINED;
+    }
+    if (start > end) {
+        snprintf(vm->error, sizeof(vm->error), "string-replace: range out of bounds");
+        return CH_UNDEFINED;
+    }
+    size_t cp_len = 0;
+    if (utf8_count_codepoints(vm, s1, "string-replace", &cp_len) != 0) {
+        return CH_UNDEFINED;
+    }
+    if (end > cp_len) {
+        snprintf(vm->error, sizeof(vm->error), "string-replace: range out of bounds");
+        return CH_UNDEFINED;
+    }
+    size_t start_byte = 0;
+    size_t end_byte = 0;
+    if (utf8_offset_for_index(vm, s1, start, "string-replace", &start_byte) != 0 ||
+        utf8_offset_for_index(vm, s1, end, "string-replace", &end_byte) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t s2_cp_len = 0;
+    if (utf8_count_codepoints(vm, s2, "string-replace", &s2_cp_len) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t s2_start = 0;
+    size_t s2_end = s2_cp_len;
+    if (parse_optional_range(vm, args, nargs, 4, s2_cp_len, "string-replace", &s2_start,
+                             &s2_end) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t s2_start_byte = 0;
+    size_t s2_end_byte = 0;
+    if (utf8_offset_for_index(vm, s2, s2_start, "string-replace", &s2_start_byte) != 0 ||
+        utf8_offset_for_index(vm, s2, s2_end, "string-replace", &s2_end_byte) != 0) {
+        return CH_UNDEFINED;
+    }
+    const char *ins = s2->data + s2_start_byte;
+    size_t ins_len = s2_end_byte - s2_start_byte;
+    size_t out_len = start_byte + ins_len + (s1->len - end_byte);
+    char *buf = (char *)malloc(out_len + 1);
+    if (!buf) {
+        abort();
+    }
+    memcpy(buf, s1->data, start_byte);
+    memcpy(buf + start_byte, ins, ins_len);
+    memcpy(buf + start_byte + ins_len, s1->data + end_byte, s1->len - end_byte);
+    ChValue out = ch_gc_make_string(&vm->gc, buf, out_len);
+    free(buf);
+    return out;
+}
+
+static bool titlecase_word_boundary(uint32_t cp) {
+    return !ch_unicode_is_cased(cp);
+}
+
+static int append_codepoint(char **buf, size_t *len, size_t *cap, uint32_t cp) {
+    char enc[4];
+    size_t elen = 0;
+    if (!utf8_encode_codepoint(cp, enc, &elen)) {
+        return -1;
+    }
+    return append_bytes(buf, len, cap, enc, elen) ? 0 : -1;
+}
+
+static ChValue titlecase_range(ChVM *vm, const char *data, size_t len) {
+    char *buf = NULL;
+    size_t blen = 0;
+    size_t cap = 0;
+    bool word_start = true;
+    size_t pos = 0;
+    while (pos < len) {
+        uint32_t cp = 0;
+        size_t next = 0;
+        if (!utf8_decode_next(data, len, pos, &cp, &next)) {
+            if (!append_bytes(&buf, &blen, &cap, data + pos, 1)) {
+                free(buf);
+                abort();
+            }
+            pos++;
+            word_start = true;
+            continue;
+        }
+        if (titlecase_word_boundary(cp)) {
+            if (!append_bytes(&buf, &blen, &cap, data + pos, next - pos)) {
+                free(buf);
+                abort();
+            }
+            word_start = true;
+        } else if (word_start) {
+            if (append_codepoint(&buf, &blen, &cap, ch_unicode_upcase(cp)) != 0) {
+                free(buf);
+                abort();
+            }
+            word_start = false;
+        } else {
+            if (append_codepoint(&buf, &blen, &cap, ch_unicode_downcase(cp)) != 0) {
+                free(buf);
+                abort();
+            }
+        }
+        pos = next;
+    }
+    ChValue out = ch_gc_make_string(&vm->gc, buf ? buf : "", blen);
+    free(buf);
+    return out;
+}
+
+static ChValue prim_string_titlecase(ChVM *vm, ChValue *args, int nargs) {
+    if (!ch_is_string(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "string-titlecase: expected string");
+        return CH_UNDEFINED;
+    }
+    ChString *s = ch_as_string(args[0]);
+    size_t cp_len = 0;
+    if (utf8_count_codepoints(vm, s, "string-titlecase", &cp_len) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t start = 0;
+    size_t end = cp_len;
+    if (parse_optional_range(vm, args, nargs, 1, cp_len, "string-titlecase", &start, &end) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t start_byte = 0;
+    size_t end_byte = 0;
+    if (utf8_offset_for_index(vm, s, start, "string-titlecase", &start_byte) != 0 ||
+        utf8_offset_for_index(vm, s, end, "string-titlecase", &end_byte) != 0) {
+        return CH_UNDEFINED;
+    }
+    return titlecase_range(vm, s->data + start_byte, end_byte - start_byte);
+}
+
+typedef enum {
+    JOIN_INFIX,
+    JOIN_STRICT_INFIX,
+    JOIN_PREFIX,
+    JOIN_SUFFIX,
+} JoinGrammar;
+
+static int parse_join_grammar(ChVM *vm, ChValue v, JoinGrammar *out) {
+    if (!ch_is_symbol(v)) {
+        snprintf(vm->error, sizeof(vm->error),
+                 "string-join: grammar must be infix, strict-infix, prefix, or suffix");
+        return -1;
+    }
+    const char *name = ch_as_symbol(v)->name;
+    if (strcmp(name, "infix") == 0) {
+        *out = JOIN_INFIX;
+        return 0;
+    }
+    if (strcmp(name, "strict-infix") == 0) {
+        *out = JOIN_STRICT_INFIX;
+        return 0;
+    }
+    if (strcmp(name, "prefix") == 0) {
+        *out = JOIN_PREFIX;
+        return 0;
+    }
+    if (strcmp(name, "suffix") == 0) {
+        *out = JOIN_SUFFIX;
+        return 0;
+    }
+    snprintf(vm->error, sizeof(vm->error),
+             "string-join: grammar must be infix, strict-infix, prefix, or suffix");
+    return -1;
+}
+
+static ChValue prim_string_join(ChVM *vm, ChValue *args, int nargs) {
+    if (!ch_is_pair(args[0]) && !ch_is_nil(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "string-join: expected list");
+        return CH_UNDEFINED;
+    }
+    const char *delim = " ";
+    size_t delim_len = 1;
+    if (nargs > 1) {
+        if (!ch_is_string(args[1])) {
+            snprintf(vm->error, sizeof(vm->error), "string-join: delimiter must be string");
+            return CH_UNDEFINED;
+        }
+        ChString *ds = ch_as_string(args[1]);
+        delim = ds->data;
+        delim_len = ds->len;
+    }
+    JoinGrammar grammar = JOIN_INFIX;
+    if (nargs > 2) {
+        if (parse_join_grammar(vm, args[2], &grammar) != 0) {
+            return CH_UNDEFINED;
+        }
+    }
+
+    size_t count = 0;
+    size_t total = 0;
+    for (ChValue p = args[0]; ch_is_pair(p); p = ch_cdr(p)) {
+        ChValue v = ch_car(p);
+        if (!ch_is_string(v)) {
+            snprintf(vm->error, sizeof(vm->error), "string-join: not a string");
+            return CH_UNDEFINED;
+        }
+        total += ch_as_string(v)->len;
+        count++;
+    }
+    if (!ch_is_nil(args[0]) && !ch_is_pair(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "string-join: expected list");
+        return CH_UNDEFINED;
+    }
+    if (count == 0) {
+        if (grammar == JOIN_STRICT_INFIX) {
+            snprintf(vm->error, sizeof(vm->error),
+                     "string-join: strict-infix grammar requires a non-empty list");
+            return CH_UNDEFINED;
+        }
+        return ch_gc_make_string(&vm->gc, "", 0);
+    }
+
+    switch (grammar) {
+    case JOIN_INFIX:
+    case JOIN_STRICT_INFIX:
+        total += (count - 1) * delim_len;
+        break;
+    case JOIN_PREFIX:
+    case JOIN_SUFFIX:
+        total += count * delim_len;
+        break;
+    }
+
+    char *buf = (char *)malloc(total + 1);
+    if (!buf) {
+        abort();
+    }
+    size_t pos = 0;
+    bool first = true;
+    for (ChValue p = args[0]; ch_is_pair(p); p = ch_cdr(p)) {
+        ChString *s = ch_as_string(ch_car(p));
+        if (grammar == JOIN_PREFIX && delim_len > 0) {
+            memcpy(buf + pos, delim, delim_len);
+            pos += delim_len;
+        } else if ((grammar == JOIN_INFIX || grammar == JOIN_STRICT_INFIX) && !first &&
+                   delim_len > 0) {
+            memcpy(buf + pos, delim, delim_len);
+            pos += delim_len;
+        }
+        first = false;
+        memcpy(buf + pos, s->data, s->len);
+        pos += s->len;
+        if (grammar == JOIN_SUFFIX && delim_len > 0) {
+            memcpy(buf + pos, delim, delim_len);
+            pos += delim_len;
+        }
+    }
+    ChValue out = ch_gc_make_string(&vm->gc, buf, total);
+    free(buf);
+    return out;
+}
+
+static ChValue prim_string_split(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_string(args[0]) || !ch_is_string(args[1])) {
+        snprintf(vm->error, sizeof(vm->error), "string-split: bad arguments");
+        return CH_UNDEFINED;
+    }
+    ChString *s = ch_as_string(args[0]);
+    ChString *delim = ch_as_string(args[1]);
+
+    ChValue result = CH_NIL;
+    ch_gc_push(&vm->gc, &result);
+
+    if (delim->len == 0) {
+        size_t pos = s->len;
+        while (pos > 0) {
+            size_t start = find_prev_cp_start(s->data, pos);
+            ChValue part = ch_gc_make_string(&vm->gc, s->data + start, pos - start);
+            ch_gc_push(&vm->gc, &part);
+            result = ch_gc_cons(&vm->gc, part, result);
+            ch_gc_pop(&vm->gc);
+            pos = start;
+        }
+        ch_gc_pop(&vm->gc);
+        return result;
+    }
+
+    size_t splits[512][2];
+    size_t nsplits = 0;
+    size_t scan = 0;
+    while (scan <= s->len) {
+        if (nsplits >= 512) {
+            ch_gc_pop(&vm->gc);
+            snprintf(vm->error, sizeof(vm->error), "string-split: too many parts");
+            return CH_UNDEFINED;
+        }
+        const char *found = NULL;
+        if (scan < s->len) {
+            for (size_t i = scan; i + delim->len <= s->len; i++) {
+                if (memcmp(s->data + i, delim->data, delim->len) == 0) {
+                    found = s->data + i;
+                    break;
+                }
+            }
+        }
+        if (found) {
+            size_t fpos = (size_t)(found - s->data);
+            splits[nsplits][0] = scan;
+            splits[nsplits][1] = fpos;
+            nsplits++;
+            scan = fpos + delim->len;
+        } else {
+            splits[nsplits][0] = scan;
+            splits[nsplits][1] = s->len;
+            nsplits++;
+            break;
+        }
+    }
+
+    for (size_t i = nsplits; i > 0; i--) {
+        ChValue part =
+            ch_gc_make_string(&vm->gc, s->data + splits[i - 1][0], splits[i - 1][1] - splits[i - 1][0]);
+        ch_gc_push(&vm->gc, &part);
+        result = ch_gc_cons(&vm->gc, part, result);
+        ch_gc_pop(&vm->gc);
+    }
+    ch_gc_pop(&vm->gc);
+    return result;
+}
+
+static ChValue prim_string_tabulate(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    if (!ch_is_procedure(args[0])) {
+        snprintf(vm->error, sizeof(vm->error), "string-tabulate: expected procedure");
+        return CH_UNDEFINED;
+    }
+    if (!ch_is_fixnum(args[1]) || ch_to_fixnum(args[1]) < 0) {
+        snprintf(vm->error, sizeof(vm->error), "string-tabulate: expected non-negative integer");
+        return CH_UNDEFINED;
+    }
+    size_t len = (size_t)ch_to_fixnum(args[1]);
+    /* Build via a growable UTF-8 buffer of chars produced by the proc. */
+    size_t cap = len * 4 + 1;
+    char *buf = (char *)malloc(cap);
+    if (!buf) {
+        snprintf(vm->error, sizeof(vm->error), "string-tabulate: out of memory");
+        return CH_UNDEFINED;
+    }
+    size_t pos = 0;
+    for (size_t i = 0; i < len; i++) {
+        ChValue idx = ch_make_fixnum((int64_t)i);
+        ChValue chv = CH_UNDEFINED;
+        ChVMStatus st = ch_vm_apply(vm, args[0], &idx, 1, &chv);
+        if (st != CH_VM_OK) {
+            free(buf);
+            return CH_UNDEFINED;
+        }
+        chv = ch_coerce_single(chv);
+        if (!ch_is_char(chv)) {
+            free(buf);
+            snprintf(vm->error, sizeof(vm->error), "string-tabulate: expected char");
+            return CH_UNDEFINED;
+        }
+        char tmp[4];
+        size_t n = 0;
+        if (!ch_utf8_encode_codepoint(ch_to_char(chv), tmp, &n)) {
+            free(buf);
+            snprintf(vm->error, sizeof(vm->error), "string-tabulate: invalid character");
+            return CH_UNDEFINED;
+        }
+        if (pos + n >= cap) {
+            cap = (cap + n) * 2;
+            char *nb = (char *)realloc(buf, cap);
+            if (!nb) {
+                free(buf);
+                snprintf(vm->error, sizeof(vm->error), "string-tabulate: out of memory");
+                return CH_UNDEFINED;
+            }
+            buf = nb;
+        }
+        memcpy(buf + pos, tmp, n);
+        pos += n;
+    }
+    ChValue out = ch_gc_make_string(&vm->gc, buf, pos);
+    free(buf);
+    return out;
+}
+
+/* string-every char/char-set/pred s [start end] -- only procedure predicates
+   are supported, matching string-index/string-skip's existing simplification
+   in this file (no char-set type yet). Returns the last non-#f predicate
+   result, or #t for an empty range. */
+static ChValue prim_string_every(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 2 || !ch_is_procedure(args[0]) || !ch_is_string(args[1])) {
+        snprintf(vm->error, sizeof(vm->error), "string-every: bad arguments");
+        return CH_UNDEFINED;
+    }
+    ChString *s = ch_as_string(args[1]);
+    size_t cp_len = 0;
+    if (utf8_count_codepoints(vm, s, "string-every", &cp_len) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t start = 0;
+    size_t end = cp_len;
+    if (parse_optional_range(vm, args, nargs, 2, cp_len, "string-every", &start, &end) != 0) {
+        return CH_UNDEFINED;
+    }
+    ChValue last = CH_TRUE;
+    size_t cp_idx = 0;
+    size_t pos = 0;
+    while (pos < s->len && cp_idx < end) {
+        uint32_t cp = 0;
+        size_t next = 0;
+        if (!utf8_decode_next(s->data, s->len, pos, &cp, &next)) {
+            snprintf(vm->error, sizeof(vm->error), "string-every: invalid UTF-8");
+            return CH_UNDEFINED;
+        }
+        if (cp_idx >= start) {
+            ChValue arg = ch_make_char(cp);
+            ChValue result = CH_UNDEFINED;
+            ChVMStatus st = ch_vm_apply(vm, args[0], &arg, 1, &result);
+            if (st == CH_VM_CONTINUATION_INVOKED) {
+                vm->continuation_invoked = true;
+                return CH_UNDEFINED;
+            }
+            if (st != CH_VM_OK) {
+                return CH_UNDEFINED;
+            }
+            if (result == CH_FALSE || ch_is_false(result)) {
+                return CH_FALSE;
+            }
+            last = result;
+        }
+        pos = next;
+        cp_idx++;
+    }
+    return last;
+}
+
+/* string-any char/char-set/pred s [start end] -- procedure predicates only,
+   same simplification as string-every above. */
+static ChValue prim_string_any(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 2 || !ch_is_procedure(args[0]) || !ch_is_string(args[1])) {
+        snprintf(vm->error, sizeof(vm->error), "string-any: bad arguments");
+        return CH_UNDEFINED;
+    }
+    ChString *s = ch_as_string(args[1]);
+    size_t cp_len = 0;
+    if (utf8_count_codepoints(vm, s, "string-any", &cp_len) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t start = 0;
+    size_t end = cp_len;
+    if (parse_optional_range(vm, args, nargs, 2, cp_len, "string-any", &start, &end) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t cp_idx = 0;
+    size_t pos = 0;
+    while (pos < s->len && cp_idx < end) {
+        uint32_t cp = 0;
+        size_t next = 0;
+        if (!utf8_decode_next(s->data, s->len, pos, &cp, &next)) {
+            snprintf(vm->error, sizeof(vm->error), "string-any: invalid UTF-8");
+            return CH_UNDEFINED;
+        }
+        if (cp_idx >= start) {
+            ChValue arg = ch_make_char(cp);
+            ChValue result = CH_UNDEFINED;
+            ChVMStatus st = ch_vm_apply(vm, args[0], &arg, 1, &result);
+            if (st == CH_VM_CONTINUATION_INVOKED) {
+                vm->continuation_invoked = true;
+                return CH_UNDEFINED;
+            }
+            if (st != CH_VM_OK) {
+                return CH_UNDEFINED;
+            }
+            if (result != CH_FALSE && !ch_is_false(result)) {
+                return result;
+            }
+        }
+        pos = next;
+        cp_idx++;
+    }
+    return CH_FALSE;
+}
+
+/* string-count s char/char-set/pred [start end] -- note the string comes
+   first here, unlike string-every/any/filter/delete (per SRFI-13). */
+static ChValue prim_string_count(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 2 || !ch_is_string(args[0]) || !ch_is_procedure(args[1])) {
+        snprintf(vm->error, sizeof(vm->error), "string-count: bad arguments");
+        return CH_UNDEFINED;
+    }
+    ChString *s = ch_as_string(args[0]);
+    size_t cp_len = 0;
+    if (utf8_count_codepoints(vm, s, "string-count", &cp_len) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t start = 0;
+    size_t end = cp_len;
+    if (parse_optional_range(vm, args, nargs, 2, cp_len, "string-count", &start, &end) != 0) {
+        return CH_UNDEFINED;
+    }
+    int64_t count = 0;
+    size_t cp_idx = 0;
+    size_t pos = 0;
+    while (pos < s->len && cp_idx < end) {
+        uint32_t cp = 0;
+        size_t next = 0;
+        if (!utf8_decode_next(s->data, s->len, pos, &cp, &next)) {
+            snprintf(vm->error, sizeof(vm->error), "string-count: invalid UTF-8");
+            return CH_UNDEFINED;
+        }
+        if (cp_idx >= start) {
+            bool match = false;
+            if (call_pred_char(vm, args[1], cp, &match, "string-count") != 0) {
+                return CH_UNDEFINED;
+            }
+            if (match) {
+                count++;
+            }
+        }
+        pos = next;
+        cp_idx++;
+    }
+    return ch_make_fixnum(count);
+}
+
+/* string-filter/string-delete share this walk: keep (or drop) codepoints
+   for which `pred` is true. */
+static ChValue string_filter_impl(ChVM *vm, ChValue *args, int nargs, const char *who,
+                                  bool keep_on_match) {
+    if (nargs < 2 || !ch_is_procedure(args[0]) || !ch_is_string(args[1])) {
+        snprintf(vm->error, sizeof(vm->error), "%s: bad arguments", who);
+        return CH_UNDEFINED;
+    }
+    ChString *s = ch_as_string(args[1]);
+    size_t cp_len = 0;
+    if (utf8_count_codepoints(vm, s, who, &cp_len) != 0) {
+        return CH_UNDEFINED;
+    }
+    size_t start = 0;
+    size_t end = cp_len;
+    if (parse_optional_range(vm, args, nargs, 2, cp_len, who, &start, &end) != 0) {
+        return CH_UNDEFINED;
+    }
+    char *buf = NULL;
+    size_t len = 0;
+    size_t cap = 0;
+    size_t cp_idx = 0;
+    size_t pos = 0;
+    while (pos < s->len && cp_idx < end) {
+        uint32_t cp = 0;
+        size_t next = 0;
+        if (!utf8_decode_next(s->data, s->len, pos, &cp, &next)) {
+            free(buf);
+            snprintf(vm->error, sizeof(vm->error), "%s: invalid UTF-8", who);
+            return CH_UNDEFINED;
+        }
+        if (cp_idx >= start) {
+            bool match = false;
+            if (call_pred_char(vm, args[0], cp, &match, who) != 0) {
+                free(buf);
+                return CH_UNDEFINED;
+            }
+            if (match == keep_on_match) {
+                if (!append_bytes(&buf, &len, &cap, s->data + pos, next - pos)) {
+                    free(buf);
+                    abort();
+                }
+            }
+        }
+        pos = next;
+        cp_idx++;
+    }
+    ChValue out = ch_gc_make_string(&vm->gc, buf ? buf : "", len);
+    free(buf);
+    return out;
+}
+
+static ChValue prim_string_filter(ChVM *vm, ChValue *args, int nargs) {
+    return string_filter_impl(vm, args, nargs, "string-filter", true);
+}
+
+static ChValue prim_string_delete(ChVM *vm, ChValue *args, int nargs) {
+    return string_filter_impl(vm, args, nargs, "string-delete", false);
+}
+
 void ch_register_srfi13_primitives(ChVM *vm) {
     define_prim(vm, "string-null?", prim_string_null_p, 1, 1);
     define_prim(vm, "string-contains", prim_string_contains, -1, 2);
@@ -822,4 +1586,18 @@ void ch_register_srfi13_primitives(ChVM *vm) {
     define_prim(vm, "string-trim", prim_string_trim, -1, 1);
     define_prim(vm, "string-trim-right", prim_string_trim_right, -1, 1);
     define_prim(vm, "string-trim-both", prim_string_trim_both, -1, 1);
+    define_prim(vm, "string-take-right", prim_string_take_right, 2, 2);
+    define_prim(vm, "string-drop-right", prim_string_drop_right, 2, 2);
+    define_prim(vm, "string-pad", prim_string_pad, -1, 2);
+    define_prim(vm, "string-pad-right", prim_string_pad_right, -1, 2);
+    define_prim(vm, "string-replace", prim_string_replace, -1, 4);
+    define_prim(vm, "string-titlecase", prim_string_titlecase, -1, 1);
+    define_prim(vm, "string-join", prim_string_join, -1, 1);
+    define_prim(vm, "string-split", prim_string_split, 2, 2);
+    define_prim(vm, "string-tabulate", prim_string_tabulate, 2, 2);
+    define_prim(vm, "string-every", prim_string_every, -1, 2);
+    define_prim(vm, "string-any", prim_string_any, -1, 2);
+    define_prim(vm, "string-count", prim_string_count, -1, 2);
+    define_prim(vm, "string-filter", prim_string_filter, -1, 2);
+    define_prim(vm, "string-delete", prim_string_delete, -1, 2);
 }

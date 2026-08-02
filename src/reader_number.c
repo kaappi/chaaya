@@ -102,6 +102,8 @@ static bool try_parse_complex(ChGC *gc, const char *text, size_t len, ChValue *o
         }
     }
     if (imag == 0.0 && imag_literal_is_inexact(text, split, body)) {
+        /* Keep inexact ±0.0i as a complex object so (real? z) is false for
+         * +0.0i (R7RS 6.2.6) while -0.0i is still distinguishable (#637). */
         *out = ch_make_complex_raw(gc, real, imag);
     } else {
         *out = ch_make_complex_ex(gc, real, imag, exact_re, exact_im);
@@ -283,14 +285,37 @@ static bool parse_uint_base(ChGC *gc, const char *text, size_t len, int base, Ch
         *out = v;
         return true;
     }
-    /* Accumulate via repeated *base + digit (ok for suite-sized literals). */
+    /* Chunked parse: radix^chunk <= u64 max (Kaappi #631). */
+    static const uint8_t max_chunk_digits[37] = {
+        0,  0,  63, 40, 31, 27, 24, 22, 21, 20, 19, 18, 17, 17, 16, 16, 15, 15, 15, 14,
+        14, 14, 14, 13, 13, 13, 13, 13, 13, 12, 12, 12, 12, 12, 12, 12, 12,
+    };
+    size_t chunk = (base >= 2 && base <= 36) ? max_chunk_digits[base] : 18;
+    if (chunk == 0) {
+        chunk = 18;
+    }
     ChValue acc = ch_make_fixnum(0);
-    ChValue b = ch_make_fixnum(base);
     ch_gc_push(gc, &acc);
-    for (size_t i = 0; i < slen; i++) {
-        int d = digit_in_base((unsigned char)digits[i], base);
-        acc = ch_bignum_mul(gc, acc, b);
-        acc = ch_bignum_add(gc, acc, ch_make_fixnum(d));
+    size_t pos = 0;
+    while (pos < slen) {
+        size_t n = slen - pos;
+        if (n > chunk) {
+            n = chunk;
+        }
+        uint64_t part = 0;
+        for (size_t j = 0; j < n; j++) {
+            int d = digit_in_base((unsigned char)digits[pos + j], base);
+            part = part * (uint64_t)base + (uint64_t)d;
+        }
+        pos += n;
+        ChValue mul = ch_make_fixnum(1);
+        ch_gc_push(gc, &mul);
+        for (size_t k = 0; k < n; k++) {
+            mul = ch_bignum_mul(gc, mul, ch_make_fixnum(base));
+        }
+        acc = ch_bignum_mul(gc, acc, mul);
+        ch_gc_pop(gc);
+        acc = ch_bignum_add(gc, acc, ch_value_from_u64(gc, part));
     }
     ch_gc_pop(gc);
     *out = acc;
@@ -536,12 +561,21 @@ bool try_parse_number(ChGC *gc, const char *text, size_t len, ChValue *out) {
     } else if (force_exact && ch_is_flonum(*out)) {
         double dv = ch_to_flonum(*out);
         if (!isfinite(dv)) {
-            return true; /* leave nan/inf as-is under #e (implementation-defined) */
+            /* Reader leaves nan/inf as-is under #e (compliance delimiter
+             * suite). string->number rejects these separately (#419). */
+            return true;
         }
         ChValue ex = ch_exact_from_flonum(gc, dv);
         if (ex != CH_UNDEFINED) {
             *out = ex;
         }
+    } else if (force_exact && ch_is_complex_obj(*out)) {
+        /* #e1.5+2.5i → exact rectangular (flags), same doubles. */
+        ChComplex *c = ch_as_complex(*out);
+        *out = ch_make_complex_ex(gc, c->real, c->imag, true, true);
+    } else if (force_inexact && ch_is_complex_obj(*out)) {
+        ChComplex *c = ch_as_complex(*out);
+        *out = ch_make_complex_raw(gc, c->real, c->imag);
     }
     return true;
 }

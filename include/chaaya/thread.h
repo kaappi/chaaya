@@ -32,7 +32,11 @@ int ch_thread_check_owner(ChVM *vm, ChValue thread, const char *who);
 
 ChValue ch_gc_make_mutex(ChGC *gc, ChValue name);
 ChValue ch_gc_make_condvar(ChGC *gc, ChValue name);
-int ch_mutex_lock(ChVM *vm, ChValue mutex, double timeout_seconds);
+/* owner_override selects who mutex-lock! records as the new owner on success:
+ * CH_UNDEFINED means "the caller's own thread" (the common/default case),
+ * CH_FALSE means "no owner" (SRFI 18's explicit-#f-thread convention, used to
+ * build higher-level sync objects), and any other value is used verbatim. */
+int ch_mutex_lock(ChVM *vm, ChValue mutex, double timeout_seconds, ChValue owner_override);
 int ch_mutex_unlock(ChVM *vm, ChValue mutex);
 int ch_condvar_signal(ChVM *vm, ChValue condvar);
 int ch_condvar_broadcast(ChVM *vm, ChValue condvar);

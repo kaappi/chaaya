@@ -311,8 +311,8 @@ ChCompileStatus compile_cond(ChCompiler *c, ChFuncCompiler *fc, ChValue args, ui
     return compile_expr(c, fc, form, dst, tail);
 }
 
-static ChCompileStatus build_case_chain(ChCompiler *c, ChValue key_sym, ChValue clauses,
-                                        ChValue *out_form) {
+static ChCompileStatus build_case_chain(ChCompiler *c, ChFuncCompiler *fc, ChValue key_sym,
+                                        ChValue clauses, ChValue *out_form) {
     if (ch_is_nil(clauses)) {
         *out_form = CH_VOID;
         return CH_COMPILE_OK;
@@ -333,7 +333,9 @@ static ChCompileStatus build_case_chain(ChCompiler *c, ChValue key_sym, ChValue 
         if (!ch_is_nil(rest)) {
             return fail(c, "case: else not last");
         }
-        if (ch_is_pair(body) && is_symbol_named(ch_car(body), "=>")) {
+        if (ch_is_pair(body) && is_symbol_named(ch_car(body), "=>") &&
+            resolve_local(fc, ch_as_symbol(ch_car(body))) < 0 &&
+            resolve_upvalue(fc, ch_as_symbol(ch_car(body))) < 0) {
             if (!ch_is_pair(ch_cdr(body)) || !ch_is_nil(ch_cdr(ch_cdr(body)))) {
                 return fail(c, "case: bad => clause");
             }
@@ -361,12 +363,14 @@ static ChCompileStatus build_case_chain(ChCompiler *c, ChValue key_sym, ChValue 
     ch_gc_push(&c->vm->gc, &consequent);
     ch_gc_push(&c->vm->gc, &if_form);
 
-    if (build_case_chain(c, key_sym, rest, &alternate) != CH_COMPILE_OK) {
+    if (build_case_chain(c, fc, key_sym, rest, &alternate) != CH_COMPILE_OK) {
         ch_gc_pop_n(&c->vm->gc, 4);
         return CH_COMPILE_ERROR;
     }
 
-    if (ch_is_pair(body) && is_symbol_named(ch_car(body), "=>")) {
+    if (ch_is_pair(body) && is_symbol_named(ch_car(body), "=>") &&
+        resolve_local(fc, ch_as_symbol(ch_car(body))) < 0 &&
+        resolve_upvalue(fc, ch_as_symbol(ch_car(body))) < 0) {
         if (!ch_is_pair(ch_cdr(body)) || !ch_is_nil(ch_cdr(ch_cdr(body)))) {
             ch_gc_pop_n(&c->vm->gc, 4);
             return fail(c, "case: bad => clause");
@@ -413,7 +417,7 @@ ChCompileStatus compile_case(ChCompiler *c, ChFuncCompiler *fc, ChValue args, ui
     ch_gc_push(&c->vm->gc, &chain);
     ch_gc_push(&c->vm->gc, &form);
 
-    if (build_case_chain(c, key_sym, clauses, &chain) != CH_COMPILE_OK) {
+    if (build_case_chain(c, fc, key_sym, clauses, &chain) != CH_COMPILE_OK) {
         ch_gc_pop_n(&c->vm->gc, 2);
         return CH_COMPILE_ERROR;
     }

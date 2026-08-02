@@ -51,6 +51,81 @@ static int vm_call1(ChVM *vm, ChValue proc, ChValue arg, ChValue *out) {
     return st == CH_VM_OK ? 0 : -1;
 }
 
+static int vm_call2(ChVM *vm, ChValue proc, ChValue a, ChValue b, ChValue *out) {
+    ChValue call_args[2] = {a, b};
+    ChVMStatus st = ch_vm_apply(vm, proc, call_args, 2, out);
+    if (st == CH_VM_CONTINUATION_INVOKED) {
+        vm->continuation_invoked = true;
+        return -1;
+    }
+    return st == CH_VM_OK ? 0 : -1;
+}
+
+/* True if elem is a member of lis under equality predicate `=` (SRFI-1). */
+static int member_by_pred(ChVM *vm, ChValue pred, ChValue elem, ChValue lis, int *found) {
+    ChValue cur = lis;
+    while (ch_is_pair(cur)) {
+        ChValue ok = CH_FALSE;
+        if (vm_call2(vm, pred, elem, ch_car(cur), &ok) != 0) {
+            return -1;
+        }
+        if (is_truthy(ok)) {
+            *found = 1;
+            return 0;
+        }
+        cur = ch_cdr(cur);
+    }
+    if (!ch_is_nil(cur)) {
+        snprintf(vm->error, sizeof(vm->error), "lset=: not a proper list");
+        return -1;
+    }
+    *found = 0;
+    return 0;
+}
+
+/* (lset= = list1 list2 ...) — all lists contain the same elements (order-insensitive). */
+static ChValue prim_lset_eq(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 1) {
+        snprintf(vm->error, sizeof(vm->error), "lset=: expected at least 1 argument");
+        return CH_UNDEFINED;
+    }
+    if (nargs <= 2) {
+        return CH_TRUE;
+    }
+    ChValue pred = args[0];
+    for (int i = 1; i < nargs - 1; i++) {
+        ChValue a = args[i];
+        ChValue b = args[i + 1];
+        for (ChValue cur = a; !ch_is_nil(cur); cur = ch_cdr(cur)) {
+            if (!ch_is_pair(cur)) {
+                snprintf(vm->error, sizeof(vm->error), "lset=: not a proper list");
+                return CH_UNDEFINED;
+            }
+            int found = 0;
+            if (member_by_pred(vm, pred, ch_car(cur), b, &found) != 0) {
+                return CH_UNDEFINED;
+            }
+            if (!found) {
+                return CH_FALSE;
+            }
+        }
+        for (ChValue cur = b; !ch_is_nil(cur); cur = ch_cdr(cur)) {
+            if (!ch_is_pair(cur)) {
+                snprintf(vm->error, sizeof(vm->error), "lset=: not a proper list");
+                return CH_UNDEFINED;
+            }
+            int found = 0;
+            if (member_by_pred(vm, pred, ch_car(cur), a, &found) != 0) {
+                return CH_UNDEFINED;
+            }
+            if (!found) {
+                return CH_FALSE;
+            }
+        }
+    }
+    return CH_TRUE;
+}
+
 static ChValue prim_iota(ChVM *vm, ChValue *args, int nargs) {
     int64_t count = 0;
     int64_t start = 0;
@@ -276,6 +351,57 @@ static ChValue prim_drop(ChVM *vm, ChValue *args, int nargs) {
     return cur;
 }
 
+static ChValue prim_take_right(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    int64_t k = 0;
+    if (parse_nonneg(vm, args[1], &k, "take-right") != 0) {
+        return CH_UNDEFINED;
+    }
+    ChValue lead = args[0];
+    for (int64_t i = 0; i < k; i++) {
+        if (!ch_is_pair(lead)) {
+            snprintf(vm->error, sizeof(vm->error), "take-right: valid index (k <= length)");
+            return CH_UNDEFINED;
+        }
+        lead = ch_cdr(lead);
+    }
+    ChValue lag = args[0];
+    while (ch_is_pair(lead)) {
+        lead = ch_cdr(lead);
+        lag = ch_cdr(lag);
+    }
+    return lag;
+}
+
+static ChValue prim_drop_right(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    int64_t k = 0;
+    if (parse_nonneg(vm, args[1], &k, "drop-right") != 0) {
+        return CH_UNDEFINED;
+    }
+    ChValue lead = args[0];
+    for (int64_t i = 0; i < k; i++) {
+        if (!ch_is_pair(lead)) {
+            snprintf(vm->error, sizeof(vm->error), "drop-right: valid index (k <= length)");
+            return CH_UNDEFINED;
+        }
+        lead = ch_cdr(lead);
+    }
+    ChValue items[SRFI1_MAX_ELEMS];
+    size_t n = 0;
+    ChValue lag = args[0];
+    while (ch_is_pair(lead)) {
+        if (n >= SRFI1_MAX_ELEMS) {
+            snprintf(vm->error, sizeof(vm->error), "drop-right: list too long");
+            return CH_UNDEFINED;
+        }
+        items[n++] = ch_car(lag);
+        lead = ch_cdr(lead);
+        lag = ch_cdr(lag);
+    }
+    return build_list(vm, items, n, CH_NIL);
+}
+
 static ChValue prim_fold(ChVM *vm, ChValue *args, int nargs) {
     if (nargs < 3) {
         snprintf(vm->error, sizeof(vm->error), "fold: expected at least 3 arguments");
@@ -312,6 +438,77 @@ static ChValue prim_fold(ChVM *vm, ChValue *args, int nargs) {
     }
 }
 
+/* fold-right needs right-to-left order, so elements are collected first into
+   a growable flat buffer -- the source lists stay reachable via `args` for
+   the duration of this call, so the buffer needs no GC root of its own --
+   then walked backwards. */
+static ChValue prim_fold_right(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 3) {
+        snprintf(vm->error, sizeof(vm->error), "fold-right: expected at least 3 arguments");
+        return CH_UNDEFINED;
+    }
+    ChValue proc = args[0];
+    int list_count = nargs - 2;
+    if (list_count > SRFI1_MAX_LISTS) {
+        snprintf(vm->error, sizeof(vm->error), "fold-right: too many lists");
+        return CH_UNDEFINED;
+    }
+    ChValue currents[SRFI1_MAX_LISTS];
+    for (int i = 0; i < list_count; i++) {
+        currents[i] = args[2 + i];
+    }
+    size_t cap = 0;
+    size_t n = 0;
+    ChValue *rows = NULL;
+    while (true) {
+        bool exhausted = false;
+        for (int i = 0; i < list_count; i++) {
+            if (!ch_is_pair(currents[i])) {
+                exhausted = true;
+                break;
+            }
+        }
+        if (exhausted) {
+            break;
+        }
+        if (n >= cap) {
+            size_t ncap = cap ? cap * 2 : 64;
+            ChValue *nrows = (ChValue *)realloc(rows, ncap * (size_t)list_count * sizeof(ChValue));
+            if (!nrows) {
+                free(rows);
+                abort();
+            }
+            rows = nrows;
+            cap = ncap;
+        }
+        for (int i = 0; i < list_count; i++) {
+            rows[n * (size_t)list_count + (size_t)i] = ch_car(currents[i]);
+            currents[i] = ch_cdr(currents[i]);
+        }
+        n++;
+    }
+    ChValue acc = args[1];
+    ch_gc_push(&vm->gc, &acc);
+    for (size_t row = n; row > 0; row--) {
+        ChValue call_args[SRFI1_MAX_LISTS + 1];
+        for (int i = 0; i < list_count; i++) {
+            call_args[i] = rows[(row - 1) * (size_t)list_count + (size_t)i];
+        }
+        call_args[list_count] = acc;
+        ChValue next = CH_UNDEFINED;
+        ChVMStatus st = ch_vm_apply(vm, proc, call_args, list_count + 1, &next);
+        if (st != CH_VM_OK) {
+            free(rows);
+            ch_gc_pop(&vm->gc);
+            return CH_UNDEFINED;
+        }
+        acc = ch_coerce_single(next);
+    }
+    free(rows);
+    ch_gc_pop(&vm->gc);
+    return acc;
+}
+
 static ChValue prim_filter(ChVM *vm, ChValue *args, int nargs) {
     (void)nargs;
     ChValue proc = args[0];
@@ -338,6 +535,136 @@ static ChValue prim_filter(ChVM *vm, ChValue *args, int nargs) {
         return CH_UNDEFINED;
     }
     return build_list(vm, items, n, CH_NIL);
+}
+
+static ChValue prim_remove(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChValue proc = args[0];
+    ChValue cur = args[1];
+    ChValue items[SRFI1_MAX_ELEMS];
+    size_t n = 0;
+    while (ch_is_pair(cur)) {
+        ChValue elem = ch_car(cur);
+        ChValue ok = CH_FALSE;
+        if (vm_call1(vm, proc, elem, &ok) != 0) {
+            return CH_UNDEFINED;
+        }
+        if (!is_truthy(ok)) {
+            if (n >= SRFI1_MAX_ELEMS) {
+                snprintf(vm->error, sizeof(vm->error), "remove: list too long");
+                return CH_UNDEFINED;
+            }
+            items[n++] = elem;
+        }
+        cur = ch_cdr(cur);
+    }
+    if (!ch_is_nil(cur)) {
+        snprintf(vm->error, sizeof(vm->error), "remove: not a proper list");
+        return CH_UNDEFINED;
+    }
+    return build_list(vm, items, n, CH_NIL);
+}
+
+static ChValue prim_find(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChValue proc = args[0];
+    for (ChValue cur = args[1]; ch_is_pair(cur); cur = ch_cdr(cur)) {
+        ChValue elem = ch_car(cur);
+        ChValue ok = CH_FALSE;
+        if (vm_call1(vm, proc, elem, &ok) != 0) {
+            return CH_UNDEFINED;
+        }
+        if (is_truthy(ok)) {
+            return elem;
+        }
+    }
+    return CH_FALSE;
+}
+
+static ChValue prim_any(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 2) {
+        snprintf(vm->error, sizeof(vm->error), "any: expected at least 2 arguments");
+        return CH_UNDEFINED;
+    }
+    ChValue proc = args[0];
+    int list_count = nargs - 1;
+    if (list_count > SRFI1_MAX_LISTS) {
+        snprintf(vm->error, sizeof(vm->error), "any: too many lists");
+        return CH_UNDEFINED;
+    }
+    ChValue currents[SRFI1_MAX_LISTS];
+    for (int i = 0; i < list_count; i++) {
+        currents[i] = args[1 + i];
+    }
+    while (true) {
+        ChValue call_args[SRFI1_MAX_LISTS];
+        for (int i = 0; i < list_count; i++) {
+            if (!ch_is_pair(currents[i])) {
+                return CH_FALSE;
+            }
+            call_args[i] = ch_car(currents[i]);
+        }
+        ChValue result = CH_UNDEFINED;
+        ChVMStatus st = ch_vm_apply(vm, proc, call_args, list_count, &result);
+        if (st == CH_VM_CONTINUATION_INVOKED) {
+            vm->continuation_invoked = true;
+            return CH_UNDEFINED;
+        }
+        if (st != CH_VM_OK) {
+            return CH_UNDEFINED;
+        }
+        result = ch_coerce_single(result);
+        if (is_truthy(result)) {
+            return result;
+        }
+        for (int i = 0; i < list_count; i++) {
+            currents[i] = ch_cdr(currents[i]);
+        }
+    }
+}
+
+static ChValue prim_every(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 2) {
+        snprintf(vm->error, sizeof(vm->error), "every: expected at least 2 arguments");
+        return CH_UNDEFINED;
+    }
+    ChValue proc = args[0];
+    int list_count = nargs - 1;
+    if (list_count > SRFI1_MAX_LISTS) {
+        snprintf(vm->error, sizeof(vm->error), "every: too many lists");
+        return CH_UNDEFINED;
+    }
+    ChValue currents[SRFI1_MAX_LISTS];
+    for (int i = 0; i < list_count; i++) {
+        currents[i] = args[1 + i];
+    }
+    ChValue last = CH_TRUE;
+    while (true) {
+        ChValue call_args[SRFI1_MAX_LISTS];
+        for (int i = 0; i < list_count; i++) {
+            if (!ch_is_pair(currents[i])) {
+                return last;
+            }
+            call_args[i] = ch_car(currents[i]);
+        }
+        ChValue result = CH_UNDEFINED;
+        ChVMStatus st = ch_vm_apply(vm, proc, call_args, list_count, &result);
+        if (st == CH_VM_CONTINUATION_INVOKED) {
+            vm->continuation_invoked = true;
+            return CH_UNDEFINED;
+        }
+        if (st != CH_VM_OK) {
+            return CH_UNDEFINED;
+        }
+        result = ch_coerce_single(result);
+        if (!is_truthy(result)) {
+            return CH_FALSE;
+        }
+        last = result;
+        for (int i = 0; i < list_count; i++) {
+            currents[i] = ch_cdr(currents[i]);
+        }
+    }
 }
 
 static ChValue prim_list_tabulate(ChVM *vm, ChValue *args, int nargs) {
@@ -422,6 +749,141 @@ static ChValue prim_unfold(ChVM *vm, ChValue *args, int nargs) {
     return out;
 }
 
+static ChValue prim_alist_cons(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChValue pair = ch_gc_cons(&vm->gc, args[0], args[1]);
+    ch_gc_push(&vm->gc, &pair);
+    ChValue result = ch_gc_cons(&vm->gc, pair, args[2]);
+    ch_gc_pop(&vm->gc);
+    return result;
+}
+
+/* Shared by delete/alist-delete: (= a b), defaulting to equal? per SRFI-1. */
+static int elt_equal(ChVM *vm, ChValue pred, bool has_pred, ChValue a, ChValue b, bool *out) {
+    if (!has_pred) {
+        *out = ch_equal(a, b);
+        return 0;
+    }
+    ChValue result = CH_FALSE;
+    if (vm_call2(vm, pred, a, b, &result) != 0) {
+        return -1;
+    }
+    *out = is_truthy(result);
+    return 0;
+}
+
+static ChValue prim_delete(ChVM *vm, ChValue *args, int nargs) {
+    ChValue x = args[0];
+    bool has_pred = nargs > 2;
+    ChValue pred = has_pred ? args[2] : CH_FALSE;
+    ChValue items[SRFI1_MAX_ELEMS];
+    size_t n = 0;
+    for (ChValue cur = args[1]; ch_is_pair(cur); cur = ch_cdr(cur)) {
+        ChValue elem = ch_car(cur);
+        bool eq = false;
+        if (elt_equal(vm, pred, has_pred, x, elem, &eq) != 0) {
+            return CH_UNDEFINED;
+        }
+        if (!eq) {
+            if (n >= SRFI1_MAX_ELEMS) {
+                snprintf(vm->error, sizeof(vm->error), "delete: list too long");
+                return CH_UNDEFINED;
+            }
+            items[n++] = elem;
+        }
+    }
+    return build_list(vm, items, n, CH_NIL);
+}
+
+static ChValue prim_alist_delete(ChVM *vm, ChValue *args, int nargs) {
+    ChValue key = args[0];
+    bool has_pred = nargs > 2;
+    ChValue pred = has_pred ? args[2] : CH_FALSE;
+    ChValue items[SRFI1_MAX_ELEMS];
+    size_t n = 0;
+    for (ChValue cur = args[1]; ch_is_pair(cur); cur = ch_cdr(cur)) {
+        ChValue entry = ch_car(cur);
+        if (!ch_is_pair(entry)) {
+            snprintf(vm->error, sizeof(vm->error), "alist-delete: not an alist");
+            return CH_UNDEFINED;
+        }
+        bool eq = false;
+        if (elt_equal(vm, pred, has_pred, key, ch_car(entry), &eq) != 0) {
+            return CH_UNDEFINED;
+        }
+        if (!eq) {
+            if (n >= SRFI1_MAX_ELEMS) {
+                snprintf(vm->error, sizeof(vm->error), "alist-delete: list too long");
+                return CH_UNDEFINED;
+            }
+            items[n++] = entry;
+        }
+    }
+    return build_list(vm, items, n, CH_NIL);
+}
+
+static ChValue prim_lset_adjoin(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 2) {
+        snprintf(vm->error, sizeof(vm->error), "lset-adjoin: expected at least 2 arguments");
+        return CH_UNDEFINED;
+    }
+    ChValue pred = args[0];
+    ChValue result = args[1];
+    ch_gc_push(&vm->gc, &result);
+    for (int i = 2; i < nargs; i++) {
+        ChValue elt = args[i];
+        int found = 0;
+        if (member_by_pred(vm, pred, elt, result, &found) != 0) {
+            ch_gc_pop(&vm->gc);
+            return CH_UNDEFINED;
+        }
+        if (!found) {
+            result = ch_gc_cons(&vm->gc, elt, result);
+        }
+    }
+    ch_gc_pop(&vm->gc);
+    return result;
+}
+
+static ChValue prim_lset_union(ChVM *vm, ChValue *args, int nargs) {
+    if (nargs < 1) {
+        snprintf(vm->error, sizeof(vm->error), "lset-union: expected at least 1 argument");
+        return CH_UNDEFINED;
+    }
+    ChValue pred = args[0];
+    if (nargs == 1) {
+        return CH_NIL;
+    }
+    ChValue result = args[1];
+    ch_gc_push(&vm->gc, &result);
+    for (int i = 2; i < nargs; i++) {
+        for (ChValue cur = args[i]; ch_is_pair(cur); cur = ch_cdr(cur)) {
+            ChValue elt = ch_car(cur);
+            int found = 0;
+            if (member_by_pred(vm, pred, elt, result, &found) != 0) {
+                ch_gc_pop(&vm->gc);
+                return CH_UNDEFINED;
+            }
+            if (!found) {
+                result = ch_gc_cons(&vm->gc, elt, result);
+            }
+        }
+    }
+    ch_gc_pop(&vm->gc);
+    return result;
+}
+
+static ChValue prim_append_reverse(ChVM *vm, ChValue *args, int nargs) {
+    (void)nargs;
+    ChValue result = args[1];
+    ch_gc_push(&vm->gc, &result);
+    for (ChValue cur = args[0]; ch_is_pair(cur); cur = ch_cdr(cur)) {
+        result = ch_gc_cons(&vm->gc, ch_car(cur), result);
+    }
+    ch_gc_pop(&vm->gc);
+    return result;
+}
+
 void ch_register_srfi1_primitives(ChVM *vm) {
     define_prim(vm, "iota", prim_iota, -1, 1);
     define_prim(vm, "first", prim_first, 1, 1);
@@ -443,9 +905,23 @@ void ch_register_srfi1_primitives(ChVM *vm) {
     define_prim(vm, "concatenate", prim_concatenate, 1, 1);
     define_prim(vm, "take", prim_take, 2, 2);
     define_prim(vm, "drop", prim_drop, 2, 2);
+    define_prim(vm, "take-right", prim_take_right, 2, 2);
+    define_prim(vm, "drop-right", prim_drop_right, 2, 2);
     define_prim(vm, "fold", prim_fold, -1, 3);
+    define_prim(vm, "fold-right", prim_fold_right, -1, 3);
     define_prim(vm, "filter", prim_filter, 2, 2);
+    define_prim(vm, "remove", prim_remove, 2, 2);
+    define_prim(vm, "find", prim_find, 2, 2);
+    define_prim(vm, "any", prim_any, -1, 2);
+    define_prim(vm, "every", prim_every, -1, 2);
     define_prim(vm, "list-tabulate", prim_list_tabulate, 2, 2);
     define_prim(vm, "length+", prim_length_plus, 1, 1);
     define_prim(vm, "unfold", prim_unfold, -1, 4);
+    define_prim(vm, "lset=", prim_lset_eq, -1, 1);
+    define_prim(vm, "lset-adjoin", prim_lset_adjoin, -1, 2);
+    define_prim(vm, "lset-union", prim_lset_union, -1, 1);
+    define_prim(vm, "alist-cons", prim_alist_cons, 3, 3);
+    define_prim(vm, "alist-delete", prim_alist_delete, -1, 2);
+    define_prim(vm, "delete", prim_delete, -1, 2);
+    define_prim(vm, "append-reverse", prim_append_reverse, 2, 2);
 }

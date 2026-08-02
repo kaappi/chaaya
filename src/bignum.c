@@ -77,6 +77,13 @@ ChValue ch_make_integer(ChGC *gc, int64_t n) {
     return ch_gc_make_bignum_from_i64(gc, n);
 }
 
+ChValue ch_value_from_u64(ChGC *gc, uint64_t mag) {
+    if (mag <= (uint64_t)CH_FIXNUM_MAX) {
+        return ch_make_fixnum((int64_t)mag);
+    }
+    return ch_gc_make_bignum_from_limbs(gc, &mag, 1, 1);
+}
+
 ChValue ch_bignum_normalize(ChGC *gc, ChValue v) {
     if (ch_is_fixnum(v)) {
         return v;

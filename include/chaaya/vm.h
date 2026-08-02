@@ -90,6 +90,9 @@ typedef struct ChVM {
     ChMacroEntry macros[CH_VM_MAX_MACROS];
     size_t macro_count;
     uint32_t hyg_counter;
+    /* When set, expand_form still registers define-syntax but does not
+     * expand macro uses (used while expanding record-type boilerplate). */
+    bool suppress_macro_expand;
 
     /* SRFI 213 define-property table (macro-expansion time) */
     ChSyntaxProp syntax_props[CH_VM_MAX_SYNTAX_PROPS];
@@ -111,6 +114,7 @@ typedef struct ChVM {
     struct ChLibraryRegistry *libraries;
     struct ChLibEnv *active_lib_env; /* non-NULL while compiling/running library body */
     struct ChEnvironment *active_eval_env; /* non-NULL during eval in a custom environment */
+    size_t eval_depth; /* >0 while running eval'd code; isolates exception handlers */
     char *loading_libs[32];
     size_t loading_lib_count;
     char *current_lib_dir; /* owned; directory of .sld being loaded */

@@ -484,11 +484,15 @@ static ChCompileStatus build_define_values_assign_form(ChCompiler *c, ChSymbol *
 
     if (name_count == 0 && rest_name != NULL) {
         /* (define-values x expr) → (set! x (call-with-values (lambda () expr) list)) */
-        ChValue producer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, expr, CH_NIL)));
-        ChValue cwv = ch_gc_cons(gc, cwv_sym,
-                                 ch_gc_cons(gc, producer, ch_gc_cons(gc, list_sym, CH_NIL)));
+        ChValue producer = CH_NIL;
+        ChValue cwv = CH_NIL;
+        ch_gc_push(gc, &producer);
+        ch_gc_push(gc, &cwv);
+        producer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, expr, CH_NIL)));
+        cwv = ch_gc_cons(gc, cwv_sym, ch_gc_cons(gc, producer, ch_gc_cons(gc, list_sym, CH_NIL)));
         *out = ch_gc_cons(gc, set_sym,
                           ch_gc_cons(gc, ch_make_pointer(&rest_name->header), ch_gc_cons(gc, cwv, CH_NIL)));
+        ch_gc_pop_n(gc, 2);
         return CH_COMPILE_OK;
     }
 
@@ -516,6 +520,7 @@ static ChCompileStatus build_define_values_assign_form(ChCompiler *c, ChSymbol *
     }
 
     ChValue consumer_params = CH_NIL;
+    ch_gc_push(gc, &consumer_params);
     if (rest_name != NULL && name_count > 0) {
         ChSymbol *rest_param = ch_as_symbol(ch_gc_intern_symbol_cstr(gc, "__dv_rest"));
         consumer_params = ch_make_pointer(&rest_param->header);
@@ -527,10 +532,14 @@ static ChCompileStatus build_define_values_assign_form(ChCompiler *c, ChSymbol *
         consumer_params = ch_gc_cons(gc, ch_make_pointer(&param->header), consumer_params);
     }
 
-    ChValue consumer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, consumer_params, consumer_body));
-    ChValue producer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, expr, CH_NIL)));
+    ChValue producer = CH_NIL;
+    ChValue consumer = CH_NIL;
+    ch_gc_push(gc, &producer);
+    ch_gc_push(gc, &consumer);
+    consumer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, consumer_params, consumer_body));
+    producer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, expr, CH_NIL)));
     *out = ch_gc_cons(gc, cwv_sym, ch_gc_cons(gc, producer, ch_gc_cons(gc, consumer, CH_NIL)));
-    ch_gc_pop(gc);
+    ch_gc_pop_n(gc, 4); /* consumer, producer, consumer_params, consumer_body */
     return CH_COMPILE_OK;
 }
 
@@ -727,29 +736,44 @@ ChCompileStatus compile_let_values(ChCompiler *c, ChFuncCompiler *fc, ChValue ar
 
     /* Single-binding tail context: avoid let/apply so body tail calls stay TCO. */
     if (tail && count == 1) {
-        ChValue producer =
+        ChValue producer = CH_NIL;
+        ChValue consumer = CH_NIL;
+        ChValue form = CH_NIL;
+        ch_gc_push(gc, &producer);
+        ch_gc_push(gc, &consumer);
+        ch_gc_push(gc, &form);
+        producer =
             ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, exprs[0], CH_NIL)));
-        ChValue consumer =
+        consumer =
             ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, formals_arr[0], ch_gc_cons(gc, inner, CH_NIL)));
-        ChValue form = ch_gc_cons(gc, cwv_sym, ch_gc_cons(gc, producer, ch_gc_cons(gc, consumer, CH_NIL)));
+        form = ch_gc_cons(gc, cwv_sym, ch_gc_cons(gc, producer, ch_gc_cons(gc, consumer, CH_NIL)));
         ChValue form_keep = form;
-        ch_gc_pop(gc);
+        ch_gc_pop_n(gc, 4); /* form, consumer, producer, inner */
         return compile_expr(c, fc, form_keep, dst, true);
     }
 
     for (int i = count - 1; i >= 0; i--) {
+        ChValue consumer = CH_NIL;
+        ch_gc_push(gc, &consumer);
         ChValue consumer_body = ch_gc_cons(gc, inner, CH_NIL);
-        ChValue consumer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, formals_arr[i], consumer_body));
+        consumer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, formals_arr[i], consumer_body));
         inner = ch_gc_cons(gc, apply_sym, ch_gc_cons(gc, consumer, ch_gc_cons(gc, temp_syms[i], CH_NIL)));
+        ch_gc_pop(gc);
     }
 
     ChValue let_binds = CH_NIL;
     ch_gc_push(gc, &let_binds);
     for (int i = count - 1; i >= 0; i--) {
-        ChValue producer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, exprs[i], CH_NIL)));
-        ChValue cwv = ch_gc_cons(gc, cwv_sym, ch_gc_cons(gc, producer, ch_gc_cons(gc, list_sym, CH_NIL)));
+        ChValue producer = CH_NIL;
+        ChValue cwv = CH_NIL;
+        ch_gc_push(gc, &producer);
+        ch_gc_push(gc, &cwv);
+        producer =
+            ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, exprs[i], CH_NIL)));
+        cwv = ch_gc_cons(gc, cwv_sym, ch_gc_cons(gc, producer, ch_gc_cons(gc, list_sym, CH_NIL)));
         ChValue bind = ch_gc_cons(gc, temp_syms[i], ch_gc_cons(gc, cwv, CH_NIL));
         let_binds = ch_gc_cons(gc, bind, let_binds);
+        ch_gc_pop_n(gc, 2);
     }
 
     ChValue form = CH_NIL;
@@ -799,17 +823,24 @@ static ChCompileStatus build_let_star_values(ChCompiler *c, ChValue bindings, Ch
     ChValue expr = ch_car(ch_cdr(binding));
 
     ChValue inner = CH_NIL;
+    ChValue producer = CH_NIL;
+    ChValue consumer = CH_NIL;
     ch_gc_push(gc, &inner);
+    ch_gc_push(gc, &producer);
+    ch_gc_push(gc, &consumer);
     if (build_let_star_values(c, rest, body, &inner) != CH_COMPILE_OK) {
-        ch_gc_pop(gc);
+        ch_gc_pop_n(gc, 3);
         return CH_COMPILE_ERROR;
     }
 
-    ChValue producer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, expr, CH_NIL)));
+    /* Root producer/consumer across nested cons — otherwise a GC during the
+     * later allocations can reclaim the producer list and leave a dangling
+     * pointer that later looks like a bare function constant (LOAD_CONST). */
+    producer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, CH_NIL, ch_gc_cons(gc, expr, CH_NIL)));
     ChValue consumer_body = ch_gc_cons(gc, inner, CH_NIL);
-    ChValue consumer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, formals, consumer_body));
+    consumer = ch_gc_cons(gc, lambda_sym, ch_gc_cons(gc, formals, consumer_body));
     *out = ch_gc_cons(gc, cwv_sym, ch_gc_cons(gc, producer, ch_gc_cons(gc, consumer, CH_NIL)));
-    ch_gc_pop(gc);
+    ch_gc_pop_n(gc, 3);
     return CH_COMPILE_OK;
 }
 

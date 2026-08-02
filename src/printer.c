@@ -757,6 +757,20 @@ static void print_value_with_depth(FILE *out, ChValue v, bool display, uint32_t 
         fputc(')', out);
         return;
     }
+    if (ch_is_record(v)) {
+        ChRecord *r = ch_as_record(v);
+        const char *nm = "?";
+        if (r->rtype && ch_is_string(r->rtype->name)) {
+            nm = ch_as_string(r->rtype->name)->data;
+        }
+        fprintf(out, "#<%s", nm);
+        for (size_t i = 0; i < r->num_fields; i++) {
+            fputc(' ', out);
+            print_value_with_depth(out, r->fields[i], display, depth + 1);
+        }
+        fputc('>', out);
+        return;
+    }
     print_value_atom(out, v, display);
 }
 

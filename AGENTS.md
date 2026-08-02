@@ -13,7 +13,7 @@ Requires CMake 3.21+, a C23-capable compiler, and libc. POSIX REPL uses vendored
 
 ```bash
 make            # configure + build → build/chaaya
-make test       # build + ctest (57 tests)
+make test       # build + ctest (329 tests)
 make bootstrap-scheme   # Kaappi-shaped bootstrap suites (17 files)
 make run        # REPL
 ```
@@ -105,7 +105,7 @@ stop-the-world mark-and-sweep with no write barrier.
 
 | Suite | Command | Notes |
 |-------|---------|-------|
-| C + Scheme (CTest) | `make test` | 57 tests; CI runs this |
+| C + Scheme (CTest) | `make test` | 329 tests; CI runs this |
 | Bootstrap | `make bootstrap-scheme` | Uses `run-bootstrap.sh`; needs suite-dir cwd for `include` fixtures |
 | Single bootstrap file | See `tests/scheme/run_bootstrap.cmake` | CTest prepends `harness.scm` |
 
@@ -116,7 +116,13 @@ When adding surface area, extend the relevant bootstrap suite
 (`numbers.scm`, `libraries.scm`, etc.) — see
 [docs/dev/scheme-tests.md](docs/dev/scheme-tests.md).
 
-Deferred (not in CTest): `tests/scheme/r7rs/`, `tests/scheme/kaappi-deferred/`.
+`tests/scheme/r7rs/` (canonical R7RS-small suite) and most of
+`tests/scheme/kaappi-deferred/` (compliance + smoke) are wired into CTest —
+see [docs/dev/scheme-tests.md](docs/dev/scheme-tests.md) for current
+wired/unwired counts. `jit-*.scm`/`llvm-*.scm` smoke files stay permanently
+unwired (no JIT/LLVM backend in Chaaya); a smaller remainder is gated on
+fiber/thread scheduler races, macro-expander depth/hygiene gaps, and missing
+SRFI-170 POSIX primitives (tracked in that doc, not in CTest).
 
 ## Conventions
 
@@ -154,7 +160,7 @@ not a greenfield package manager in C.
 | 7A | R7RS-small surface (eval, exceptions, bytevectors, hashtables, base audit) — **done** |
 | 7B | Numeric tower + I/O hardening — **done** |
 | 8 | IR/opts + generational GC + CLI tooling (`check`, `expand`, `fmt`, cache, REPL debugger MVP) — **MVP done** |
-| 9 | Portable SRFI subset + import resolution — **partial** (13 libraries vendored; full 162 deferred) |
+| 9 | Portable SRFI subset + import resolution — **partial** (~192 vendored under `lib/srfi/`; see `docs/dev/srfi-import-audit.md`) |
 | 10 | Fibers + FFI + reactor — **MVP done** (cooperative fibers/channels, dlopen FFI; SRFI-18 partial (timeouts, specifics, terminate; mutex/cond MVP)) |
 | 11 | LLVM/WASM/LSP/thottam — **MVP done** (stubs + docs; no C thottam reimplementation) |
 

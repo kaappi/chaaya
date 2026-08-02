@@ -242,6 +242,43 @@ int resolve_upvalue(ChFuncCompiler *fc, ChSymbol *name) {
     return -1;
 }
 
+/* Last-resort lookup for a hygienically-renamed identifier (__hyg_N_base) that
+ * has no binding under its exact renamed identity anywhere in scope. This
+ * happens when a syntax-rules template free-references a name that the macro
+ * never binds itself (e.g. a record accessor defined earlier in the same
+ * body, referenced from a sibling define-syntax) — hyg_rename mints a fresh
+ * symbol for any free identifier that isn't already a VM global, since at
+ * expansion time it can't see body-local bindings that don't exist yet.
+ * Falling back to a basename match only fires when exact resolution already
+ * failed, so it never shadows the hygiene renaming does provide: a
+ * template-introduced binding and its own internal references always share
+ * the exact same renamed symbol and resolve via resolve_local/resolve_upvalue
+ * above before this is ever consulted. */
+static int resolve_local_by_basename(ChFuncCompiler *fc, const char *base) {
+    for (int i = fc->local_count - 1; i >= 0; i--) {
+        if (strcmp(ch_symbol_basename(fc->locals[i].name), base) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int resolve_upvalue_by_basename(ChFuncCompiler *fc, const char *base) {
+    if (!fc->enclosing) {
+        return -1;
+    }
+    int local = resolve_local_by_basename(fc->enclosing, base);
+    if (local != -1) {
+        fc->enclosing->locals[local].is_captured = true;
+        return add_upvalue(fc, (uint8_t)local, true);
+    }
+    int up = resolve_upvalue_by_basename(fc->enclosing, base);
+    if (up != -1) {
+        return add_upvalue(fc, (uint8_t)up, false);
+    }
+    return -1;
+}
+
 void begin_scope(ChFuncCompiler *fc) {
     fc->scope_depth++;
 }
@@ -492,6 +529,23 @@ static ChCompileStatus compile_variable(ChCompiler *c, ChFuncCompiler *fc, ChSym
         emit_byte(fc, (uint8_t)up);
         return CH_COMPILE_OK;
     }
+    const char *name_base = ch_symbol_basename(name);
+    if (name_base != name->name) {
+        int blocal = resolve_local_by_basename(fc, name_base);
+        if (blocal != -1) {
+            emit_byte(fc, CH_OP_MOVE);
+            emit_byte(fc, dst);
+            emit_byte(fc, local_reg(fc, blocal));
+            return CH_COMPILE_OK;
+        }
+        int bup = resolve_upvalue_by_basename(fc, name_base);
+        if (bup != -1) {
+            emit_byte(fc, CH_OP_GET_UPVALUE);
+            emit_byte(fc, dst);
+            emit_byte(fc, (uint8_t)bup);
+            return CH_COMPILE_OK;
+        }
+    }
     if (c->vm->active_lib_env) {
         int lidx = ch_lib_env_find(c->vm->active_lib_env, name);
         if (lidx < 0) {
@@ -611,43 +665,7 @@ static ChCompileStatus compile_expr_impl(ChCompiler *c, ChFuncCompiler *fc, ChVa
     ChValue head = ch_car(expr);
     ChValue args = ch_cdr(expr);
 
-    /* Macro uses should already be expanded at toplevel; expand again for safety. */
-    if (ch_is_symbol(head)) {
-        ChTransformer *tr = ch_vm_lookup_macro(c->vm, ch_as_symbol(head));
-        if (tr) {
-            ChValue expanded = CH_NIL;
-            ch_gc_push(&c->vm->gc, &expanded);
-            char err[256];
-            ChLibEnv *saved_lib = c->vm->active_lib_env;
-            ChLibEnv *home = NULL;
-            const char *base = ch_symbol_basename(ch_as_symbol(head));
-            for (size_t i = 0; i < c->vm->macro_count; i++) {
-                if (strcmp(ch_symbol_basename(c->vm->macros[i].name), base) == 0) {
-                    home = c->vm->macros[i].home_env;
-                    break;
-                }
-            }
-            if (home) {
-                c->vm->active_lib_env = home;
-            }
-            ChUseSiteBindingCheck use_check = {
-                .ctx = fc,
-                .resolve = resolve_use_site_binding,
-            };
-            if (ch_expand_macro_checked(c->vm, tr, expr, &use_check, &expanded, err, sizeof(err)) !=
-                CH_EXPAND_OK) {
-                c->vm->active_lib_env = saved_lib;
-                ch_gc_pop(&c->vm->gc);
-                return fail(c, err);
-            }
-            size_t root_base = c->vm->gc.root_count - 1;
-            ChCompileStatus st = compile_expr(c, fc, expanded, dst, tail);
-            c->vm->active_lib_env = saved_lib;
-            pop_root_at(&c->vm->gc, root_base);
-            return st;
-        }
-    }
-
+    /* Core special forms beat macro shadows (#1718 record/define-values boilerplate). */
     if (is_symbol_named(head, "quote")) {
         return compile_quote(c, fc, args, dst);
     }
@@ -667,7 +685,6 @@ static ChCompileStatus compile_expr_impl(ChCompiler *c, ChFuncCompiler *fc, ChVa
         return compile_define(c, fc, args, dst);
     }
     if (is_symbol_named(head, "define-syntax")) {
-        /* Should have been handled during expansion; treat as void. */
         emit_byte(fc, CH_OP_LOAD_VOID);
         emit_byte(fc, dst);
         return CH_COMPILE_OK;
@@ -715,7 +732,6 @@ static ChCompileStatus compile_expr_impl(ChCompiler *c, ChFuncCompiler *fc, ChVa
         return compile_letrec(c, fc, args, dst, tail);
     }
     if (is_symbol_named(head, "letrec*")) {
-        /* MVP: reuse letrec lowering; semantic gaps are tracked by suite failures. */
         return compile_letrec(c, fc, args, dst, tail);
     }
     if (is_symbol_named(head, "let-values")) {
@@ -745,6 +761,44 @@ static ChCompileStatus compile_expr_impl(ChCompiler *c, ChFuncCompiler *fc, ChVa
     if (is_symbol_named(head, "parameterize")) {
         return compile_parameterize(c, fc, args, dst, tail);
     }
+
+    /* Macro uses should already be expanded at toplevel; expand again for safety. */
+    if (ch_is_symbol(head)) {
+        ChTransformer *tr = ch_vm_lookup_macro(c->vm, ch_as_symbol(head));
+        if (tr) {
+            ChValue expanded = CH_NIL;
+            ch_gc_push(&c->vm->gc, &expanded);
+            char err[256];
+            ChLibEnv *saved_lib = c->vm->active_lib_env;
+            ChLibEnv *home = NULL;
+            const char *base = ch_symbol_basename(ch_as_symbol(head));
+            for (size_t i = 0; i < c->vm->macro_count; i++) {
+                if (strcmp(ch_symbol_basename(c->vm->macros[i].name), base) == 0) {
+                    home = c->vm->macros[i].home_env;
+                    break;
+                }
+            }
+            if (home) {
+                c->vm->active_lib_env = home;
+            }
+            ChUseSiteBindingCheck use_check = {
+                .ctx = fc,
+                .resolve = resolve_use_site_binding,
+            };
+            if (ch_expand_macro_checked(c->vm, tr, expr, &use_check, &expanded, err, sizeof(err)) !=
+                CH_EXPAND_OK) {
+                c->vm->active_lib_env = saved_lib;
+                ch_gc_pop(&c->vm->gc);
+                return fail(c, err);
+            }
+            size_t root_base = c->vm->gc.root_count - 1;
+            ChCompileStatus st = compile_expr(c, fc, expanded, dst, tail);
+            c->vm->active_lib_env = saved_lib;
+            pop_root_at(&c->vm->gc, root_base);
+            return st;
+        }
+    }
+
     return compile_call(c, fc, expr, dst, tail);
 }
 

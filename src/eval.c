@@ -167,6 +167,7 @@ int ch_eval_datum(ChVM *vm, ChValue expr, ChValue env_or_void, ChValue *out) {
         } else {
             ChValue fn_keep = ch_make_pointer(&fn->header);
             ch_gc_push(&vm->gc, &fn_keep);
+            vm->eval_depth++;
             /* Tail eval in the interaction environment: trampoline the thunk
              * so recursive (eval ...) does not grow the C stack. */
             bool can_tail = was_tail && (!env_obj || env_obj->kind == CH_ENV_INTERACTION);
@@ -182,10 +183,22 @@ int ch_eval_datum(ChVM *vm, ChValue expr, ChValue env_or_void, ChValue *out) {
                 ch_gc_push(&vm->gc, &result);
                 ChVMStatus st = ch_vm_eval_function(vm, fn, &result);
                 ch_gc_pop_n(&vm->gc, 2);
+                if (st == CH_VM_CONTINUATION_INVOKED) {
+                    vm->continuation_invoked = true;
+                    ch_gc_pop(&vm->gc);
+                    vm->active_lib_env = saved_active_env;
+                    vm->active_eval_env = saved_eval_env;
+                    vm->eval_depth--;
+                    if (out) {
+                        *out = CH_UNDEFINED;
+                    }
+                    return 0;
+                }
                 if (st != CH_VM_OK || (vm->error[0] != '\0' && result == CH_UNDEFINED)) {
                     rc = -1;
                 }
             }
+            vm->eval_depth--;
         }
     }
 

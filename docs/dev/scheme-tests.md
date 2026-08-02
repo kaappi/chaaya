@@ -45,10 +45,24 @@ See `tests/scheme/kaappi-deferred/README.md`. Rough gates:
 3. `case-lambda`, `delay`/`force`, file ports — **done** (bootstrap suites)
 4. Exact integers / bignum — **done** (MVP; demote to fixnum)
 5. Rationals + exact `/` — **done** (MVP)
-6. Complexes (inexact rectangular) — **done** (MVP)
+6. Complexes (inexact + exact rectangular) — **done** (`exact-complex` feature)
 7. `(scheme inexact)` / `(scheme exact)` + math prims — **done** (MVP)
 8. SRFI-64 or `(chibi test)` — **done** for wired deferred suites
-9. Re-run Kaappi’s `tests/scheme/run-all.sh` corpus against `chaaya` — **in progress**
+9. Re-run Kaappi’s `tests/scheme/run-all.sh` corpus against `chaaya` — **in
+   progress**. `run-all.sh` hardcodes `KAAPPI=zig-out/bin/kaappi` with no
+   override hook, and running it as-is would mean either editing that script
+   in the sibling `../kaappi/` repo or clobbering the developer's real
+   `zig-out/bin/kaappi` binary — both out of scope here. As a substitute,
+   Kaappi's own unmodified `tests/scheme/r7rs/r7rs-tests.scm` (the same
+   canonical suite Chaaya vendors a lightly-patched copy of, at
+   `tests/scheme/r7rs/r7rs-tests.scm`) was run directly against
+   `./build/chaaya --lib-path ./lib`. It gets through `4.1`/`4.2` clean (27 +
+   74 pass) then hits two real gaps in `4.3 Macros` before aborting: a
+   hygiene miss (`let-syntax` template referencing an outer `x` returns the
+   inner shadowed binding instead — expected `outer`, got `inner`) and a
+   `letrec-syntax`-scoped `if` immediately after that reports `if: bad
+   syntax` at compile time. Both are expander bugs worth their own follow-up;
+   neither is a quick fix. Full-corpus reconciliation stays deferred.
 
 ## kaappi-deferred compliance
 
@@ -80,19 +94,50 @@ Wired in CTest as `kaappi_deferred_smoke_*`. Enable with:
 ctest --output-on-failure -R kaappi_deferred_smoke
 ```
 
+**Status as of 2026-08-02 (Phase 2/5 batch):** 216 of 257 non-backend smoke
+files wired (**216/257**, ~84%). "Non-backend" excludes the 8 permanently
+skipped `jit-*.scm`/`llvm-*.scm` files (see below); 41 remain unwired.
+
 **Wired:** language-surface fixes (`case-lambda-fixes`, `expt-negative-base-1725`,
 `equal-dag`, `circular-list-terminate`) plus a large batch of locally green
 smoke files (see `CMakeLists.txt` `smoke_*` entries), including
 `smoke_portable_srfi_import` for explicit `--lib-path` portable SRFI import
-coverage.
+coverage. Batch 9 added `file-info-blocks` (missing `file-info:blocks`
+accessor, now implemented) and `mutex-lock-false-owner` (`mutex-lock!`'s `#f`
+timeout argument was inverted — it polled instead of blocking indefinitely,
+and the optional explicit-owner-thread argument was never read; both fixed
+in `src/thread.c`/`src/prim_fiber.c`).
 
-**Skipped (do not wire):**
+`lib/kaappi/parallel.sld` loads cleanly under `--lib-path`; all three of its
+smoke covers are wired and green: `kaappi-parallel-map`,
+`kaappi-parallel-pool`, `kaappi-parallel-shutdown`.
+
+**Permanently skipped:**
 
 | File | Reason |
 |------|--------|
 | `jit-*.scm`, `llvm-*.scm` | JIT/LLVM backend not in Chaaya |
-| Some remaining SRFI-18 / provenance smokes | e.g. `thread-foreign-owner-1484` needs capture-vs-global provenance |
-| `kaappi-parallel-map.scm` | Needs SRFI-1 `lset=` (unrelated gap) |
+
+**Remaining unwired (41), grouped by blocker:**
+
+| Blocker | Files | Notes |
+|---------|------:|-------|
+| Fiber/thread scheduler races & cross-thread capacity limits | 15 | `fiber-blocked-exit`, `fiber-channel-receive-waits-out-peer-sleep`, `fiber-channel-rendezvous`, `fiber-dispatch-blocked-siblings`, `fiber-error-handling`, `fiber-many-waiters-one-object-1530`, `fiber-pipeline`, `fiber-thread-join-deadline-cleared-after-resolve`, `fiber-timed-mutex-lock-not-starved-by-busy-sibling`, `mutex-nested-dispatch-dirty-snapshot-1487`, `mutex-timeout`, `nested-wait-under-sleep-dirty-snapshot-1490`, `thread-foreign-owner-1484`, `thread-port-isolation`, `deep-copy-list-801`. Deep scheduler/dispatch work, not quick fixes; `nested-wait-under-sleep-dirty-snapshot-1490` in particular passes in isolation but times out under parallel `ctest -j` load — a genuine contention-sensitive race, left unwired rather than wired flaky. |
+| Macro expander (hygiene/scope/depth/patterns) | 6 | `macro-chains` (head-position chain compilation isn't iterative, unlike Kaappi#1796), `record-macro-scope-1718`, `internal-define-syntax-scope` (internal `define-syntax` appears to leak past its scope), `library-macro-leak-877`, `expander-vector-patterns` (vector patterns in `syntax-rules` templates), `lambda-param-shadows-keyword-788`. |
+| SRFI-170 POSIX primitives missing/incomplete | 4 | `filesystem-intcast` (`set-file-mode`/`set-umask!`/`umask` unimplemented), `group-info-by-name-1161` (`user-gid`/`group-info` unimplemented), `srfi170-time-objects` (`posix-time`/`monotonic-time` gaps), `filesystem-nul-path-805`. |
+| Fixed compiler limits (register file is `uint8_t`-indexed) | 5 | `apply-large-arglist`, `call-arg-limit`, `case-large-clauses`, `large-form-body-791`, `vector-large-arglist` — all hit an intentional ~200–256 argument/clause/register ceiling; raising it is a register-file width change, not a quick fix. |
+| Global/library rebinding internals | 3 | `percent-name-user-library-1856`, `library-redefine-closure-820`, `define-values-letrec-1719`. |
+| Continuation / dynamic-wind / exception-handler depth | 2 | `handler-wind-depth-1886` (deep nested wind/handler stacks), `gc-rooting-safety` (needs `call/ec` as a distinct escape-only, extent-checked continuation — aliasing it to the existing re-entrant `call/cc` primitive was tried and segfaults on invocation outside its extent instead of raising a catchable error, so the alias was reverted). |
+| Library primitive closures (SRFI-133 etc.) | 1 | `trampoline-polish-1375` — `vector-map`/`string-map`/`string-for-each` as Scheme closures don't raise the expected arity/type errors, and `%push-wind`/`%pop-wind` are unexpectedly unbound in one path. |
+| Numeric tower | 1 | `exact-integer-sqrt-851` — hangs (not just slow) on ~2^3000-bit bignums; a real algorithmic bug in the bignum sqrt path. |
+| Reader / ports | 1 | `peek-char-malformed-utf8` — hangs on a truncated multi-byte UTF-8 sequence; suspected stream-desync retry loop. |
+| GC | 1 | `gc-root-growth` — deep native re-entrancy (2000-deep) aborts instead of growing the root buffer or hitting the documented re-entrancy cap cleanly. |
+| FFI / platform | 1 | `bignum-rational-ffi-793` — `dlopen("liblibm.so")` fails on macOS (no such SONAME there; would need a per-platform libm path probe). |
+
+See `docs/dev/srfi-import-audit.md` for the separate, lower-level audit of
+which `lib/srfi/*.sld` files import cleanly (165 probed, 122 pass, 43 fail) —
+that tracks portable-SRFI import health, not the kaappi-deferred smoke/compliance
+corpus described here.
 
 **Runtime/platform smokes wired:** `fiber-gc-remembered-set`, `fiber-channel-close`,
 `fiber-sleep-does-not-stall-sibling`, `thread-sleep-876`, `thread-self-join`,

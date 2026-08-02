@@ -8,17 +8,15 @@
 #include <string.h>
 
 ChValue ch_make_complex_ex(ChGC *gc, double real, double imag, bool exact_real, bool exact_imag) {
+    /* Exact +0 imag collapses to a real. Inexact ±0.0i must stay complex so
+     * (real? -2.5+0.0i) is false (R7RS 6.2.6). */
     if (imag == 0.0 && !signbit(imag) && exact_imag) {
-        /* Exact zero imag collapses to real — but keep inexact +0.0i as complex. */
         if (exact_real) {
             ChValue ex = ch_exact_from_flonum(gc, real);
             if (ex != CH_UNDEFINED) {
                 return ex;
             }
         }
-        return ch_make_flonum(real);
-    }
-    if (imag == 0.0 && !exact_real && !exact_imag) {
         return ch_make_flonum(real);
     }
     ChComplex *c = (ChComplex *)ch_gc_alloc(gc, sizeof(ChComplex), CH_TAG_COMPLEX);
@@ -103,6 +101,14 @@ ChValue ch_complex_div(ChGC *gc, ChValue a, ChValue b) {
 }
 
 ChValue ch_complex_negate(ChGC *gc, ChValue a) {
+    /* Negation is rounding-free, so exactness flags survive (Kaappi #2166).
+     * Exact zero components normalize to +0.0 — the exact tower has no -0. */
+    if (ch_is_complex_obj(a)) {
+        ChComplex *c = ch_as_complex(a);
+        double nr = (c->exact_real && c->real == 0.0) ? 0.0 : -c->real;
+        double ni = (c->exact_imag && c->imag == 0.0) ? 0.0 : -c->imag;
+        return ch_make_complex_ex(gc, nr, ni, c->exact_real, c->exact_imag);
+    }
     double ar, ai;
     if (!ch_complex_parts(a, &ar, &ai)) {
         return CH_UNDEFINED;
@@ -168,6 +174,18 @@ char *ch_complex_to_string(ChValue v) {
         return NULL;
     }
     ChComplex *c = ch_as_complex(v);
+    /* Inexact +0.0i prints as a real (#637) while staying non-real? at runtime. */
+    if (c->imag == 0.0 && !signbit(c->imag) && !c->exact_imag) {
+        char re_only[64];
+        format_part(re_only, sizeof(re_only), c->real, c->exact_real);
+        size_t n = strlen(re_only);
+        char *out = (char *)malloc(n + 1);
+        if (!out) {
+            abort();
+        }
+        memcpy(out, re_only, n + 1);
+        return out;
+    }
     char re[64], im[64], buf[160];
     format_part(re, sizeof(re), c->real, c->exact_real);
     /* Real NaN/Inf need an explicit leading + for Scheme syntax. */
@@ -209,6 +227,30 @@ char *ch_complex_to_string(ChValue v) {
     }
     if (n < 0) {
         return NULL;
+    }
+    /* Exact complexes whose printed parts use exponents need #e so they
+     * re-read as exact (#e1e18+1i). Plain 10+11i must stay unprefixed. */
+    int needs_exact_prefix = 0;
+    if (c->exact_real && c->exact_imag) {
+        for (int i = 0; i < n; i++) {
+            if (buf[i] == 'e' || buf[i] == 'E') {
+                needs_exact_prefix = 1;
+                break;
+            }
+        }
+    }
+    if (needs_exact_prefix) {
+        char prefixed[168];
+        int pn = snprintf(prefixed, sizeof(prefixed), "#e%s", buf);
+        if (pn < 0) {
+            return NULL;
+        }
+        char *out = (char *)malloc((size_t)pn + 1);
+        if (!out) {
+            abort();
+        }
+        memcpy(out, prefixed, (size_t)pn + 1);
+        return out;
     }
     char *out = (char *)malloc((size_t)n + 1);
     if (!out) {

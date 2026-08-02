@@ -356,6 +356,53 @@ static ChValue prim_cddr(ChVM *vm, ChValue *args, int nargs) {
     return ch_cdr(ch_cdr(args[0]));
 }
 
+static ChValue cxr_path(ChVM *vm, ChValue arg, const char *path, const char *name) {
+    ChValue p = arg;
+    size_t len = strlen(path);
+    for (size_t i = len; i > 0; i--) {
+        char c = path[i - 1];
+        if (!ch_is_pair(p)) {
+            snprintf(vm->error, sizeof(vm->error), "%s: bad argument", name);
+            return CH_UNDEFINED;
+        }
+        p = (c == 'a') ? ch_car(p) : ch_cdr(p);
+    }
+    return p;
+}
+
+#define DEFINE_CXR(name, path)                                                                     \
+    static ChValue prim_##name(ChVM *vm, ChValue *args, int nargs) {                               \
+        (void)nargs;                                                                               \
+        return cxr_path(vm, args[0], path, #name);                                                 \
+    }
+
+DEFINE_CXR(caaar, "aaa")
+DEFINE_CXR(caadr, "aad")
+DEFINE_CXR(cadar, "ada")
+DEFINE_CXR(caddr, "add")
+DEFINE_CXR(cdaar, "daa")
+DEFINE_CXR(cdadr, "dad")
+DEFINE_CXR(cddar, "dda")
+DEFINE_CXR(cdddr, "ddd")
+DEFINE_CXR(caaaar, "aaaa")
+DEFINE_CXR(caaadr, "aaad")
+DEFINE_CXR(caadar, "aada")
+DEFINE_CXR(caaddr, "aadd")
+DEFINE_CXR(cadaar, "adaa")
+DEFINE_CXR(cadadr, "adad")
+DEFINE_CXR(caddar, "adda")
+DEFINE_CXR(cadddr, "addd")
+DEFINE_CXR(cdaaar, "daaa")
+DEFINE_CXR(cdaadr, "daad")
+DEFINE_CXR(cdadar, "dada")
+DEFINE_CXR(cdaddr, "dadd")
+DEFINE_CXR(cddaar, "ddaa")
+DEFINE_CXR(cddadr, "ddad")
+DEFINE_CXR(cdddar, "ddda")
+DEFINE_CXR(cddddr, "dddd")
+
+#undef DEFINE_CXR
+
 static ChValue mem_common(ChVM *vm, ChValue obj, ChValue lst, int mode, ChValue cmp) {
     ChValue slow = lst;
     int advance_slow = 0;
@@ -625,6 +672,30 @@ void ch_register_list_primitives(ChVM *vm) {
     define_prim(vm, "cadr", prim_cadr, 1, 1);
     define_prim(vm, "cdar", prim_cdar, 1, 1);
     define_prim(vm, "cddr", prim_cddr, 1, 1);
+    define_prim(vm, "caaar", prim_caaar, 1, 1);
+    define_prim(vm, "caadr", prim_caadr, 1, 1);
+    define_prim(vm, "cadar", prim_cadar, 1, 1);
+    define_prim(vm, "caddr", prim_caddr, 1, 1);
+    define_prim(vm, "cdaar", prim_cdaar, 1, 1);
+    define_prim(vm, "cdadr", prim_cdadr, 1, 1);
+    define_prim(vm, "cddar", prim_cddar, 1, 1);
+    define_prim(vm, "cdddr", prim_cdddr, 1, 1);
+    define_prim(vm, "caaaar", prim_caaaar, 1, 1);
+    define_prim(vm, "caaadr", prim_caaadr, 1, 1);
+    define_prim(vm, "caadar", prim_caadar, 1, 1);
+    define_prim(vm, "caaddr", prim_caaddr, 1, 1);
+    define_prim(vm, "cadaar", prim_cadaar, 1, 1);
+    define_prim(vm, "cadadr", prim_cadadr, 1, 1);
+    define_prim(vm, "caddar", prim_caddar, 1, 1);
+    define_prim(vm, "cadddr", prim_cadddr, 1, 1);
+    define_prim(vm, "cdaaar", prim_cdaaar, 1, 1);
+    define_prim(vm, "cdaadr", prim_cdaadr, 1, 1);
+    define_prim(vm, "cdadar", prim_cdadar, 1, 1);
+    define_prim(vm, "cdaddr", prim_cdaddr, 1, 1);
+    define_prim(vm, "cddaar", prim_cddaar, 1, 1);
+    define_prim(vm, "cddadr", prim_cddadr, 1, 1);
+    define_prim(vm, "cdddar", prim_cdddar, 1, 1);
+    define_prim(vm, "cddddr", prim_cddddr, 1, 1);
     define_prim(vm, "memq", prim_memq, 2, 2);
     define_prim(vm, "memv", prim_memv, 2, 2);
     define_prim(vm, "member", prim_member, -1, 2);

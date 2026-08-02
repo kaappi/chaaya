@@ -24,6 +24,7 @@ Open bugs belong in the issue tracker.
 | [ir.md](ir.md) | Tree IR: node kinds, lower/analyze/optimize/emit, safety gates |
 | [repl.md](repl.md) | REPL prompts, multiline, comma-commands, history |
 | [scheme-tests.md](scheme-tests.md) | Bootstrap suites, probes, deferred Kaappi/R7RS |
+| [srfi-import-audit.md](srfi-import-audit.md) | Portable `lib/srfi/*.sld` import probe results |
 | [thottam.md](thottam.md) | How to use sibling Kaappi thottam with Chaaya `--lib-path` |
 
 ## Design decisions

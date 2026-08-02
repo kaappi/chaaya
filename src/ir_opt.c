@@ -18,6 +18,10 @@ static bool is_fixnum_const(ChIrNode *node, int64_t value) {
            ch_to_fixnum(node->constant_value) == value;
 }
 
+static bool is_const_exact_integer(ChIrNode *node) {
+    return node && node->is_constant && ch_is_exact_integer(node->constant_value);
+}
+
 static bool fits_fixnum(int64_t v) {
     return v >= CH_FIXNUM_MIN && v <= CH_FIXNUM_MAX;
 }
@@ -480,23 +484,23 @@ static ChIrNode *simplify_prim_identity(ChIrNode *node) {
     }
     switch (pc->prim) {
     case CH_IR_PRIM_ADD:
-        if (is_fixnum_const(pc->args[0], 0)) {
+        if (is_fixnum_const(pc->args[0], 0) && is_const_exact_integer(pc->args[1])) {
             return detach_and_keep_prim_arg(node, 1);
         }
-        if (is_fixnum_const(pc->args[1], 0)) {
+        if (is_fixnum_const(pc->args[1], 0) && is_const_exact_integer(pc->args[0])) {
             return detach_and_keep_prim_arg(node, 0);
         }
         return node;
     case CH_IR_PRIM_SUB:
-        if (is_fixnum_const(pc->args[1], 0)) {
+        if (is_fixnum_const(pc->args[1], 0) && is_const_exact_integer(pc->args[0])) {
             return detach_and_keep_prim_arg(node, 0);
         }
         return node;
     case CH_IR_PRIM_MUL:
-        if (is_fixnum_const(pc->args[0], 1)) {
+        if (is_fixnum_const(pc->args[0], 1) && is_const_exact_integer(pc->args[1])) {
             return detach_and_keep_prim_arg(node, 1);
         }
-        if (is_fixnum_const(pc->args[1], 1)) {
+        if (is_fixnum_const(pc->args[1], 1) && is_const_exact_integer(pc->args[0])) {
             return detach_and_keep_prim_arg(node, 0);
         }
         return node;
@@ -706,7 +710,12 @@ ChCompileStatus ch_ir_optimize(ChCompiler *c, ChIrNode **root_slot) {
 
     ChIrOptCtx ctx;
     memset(&ctx, 0, sizeof(ctx));
-    if (!c || !c->vm) {
+    /* Inlining assumes the arithmetic names resolve to the ambient VM globals;
+     * that assumption doesn't hold when compiling for a specific eval
+     * environment (e.g. (null-environment 5)), which may deliberately hide or
+     * shadow them. Fall back to normal variable lookup in that case so the
+     * environment's own visibility rules (compile_variable) are honored. */
+    if (!c || !c->vm || c->vm->active_lib_env) {
         for (size_t i = 0; i < CH_IR_PRIM_COUNT; i++) {
             ctx.prim_disabled[i] = true;
         }

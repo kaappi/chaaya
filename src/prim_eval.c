@@ -64,6 +64,9 @@ static ChValue prim_eval(ChVM *vm, ChValue *args, int nargs) {
         }
         return CH_UNDEFINED;
     }
+    if (vm->continuation_invoked) {
+        return CH_UNDEFINED;
+    }
     return result;
 }
 
